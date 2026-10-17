@@ -55,8 +55,8 @@ export function serveOnSafePort(opts: ServeOptions) {
         hostname: opts.hostname ?? "127.0.0.1",
         port,
         fetch: opts.fetch as never,
-        websocket: opts.websocket as never,
-        error: opts.error,
+        ...(opts.websocket === undefined ? {} : { websocket: opts.websocket as never }),
+        ...(opts.error === undefined ? {} : { error: opts.error }),
       });
 
       // 双保险：即使指定了端口也再确认一次

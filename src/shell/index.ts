@@ -89,9 +89,9 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
   if (!opts.url) throw new Error("createShell: url is required");
 
   const libInfo = await resolveNativeLib({
-    nativeLibPath: opts.nativeLibPath,
-    appName: opts.appName,
-    embedded: opts.embedded,
+    ...(opts.nativeLibPath === undefined ? {} : { nativeLibPath: opts.nativeLibPath }),
+    ...(opts.appName === undefined ? {} : { appName: opts.appName }),
+    ...(opts.embedded === undefined ? {} : { embedded: opts.embedded }),
   });
   const { symbols } = openNativeLib(libInfo.path);
 

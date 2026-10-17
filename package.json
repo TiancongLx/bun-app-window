@@ -1,49 +1,50 @@
 {
-  "name": "webview-shell",
-  "version": "0.2.0",
-  "description": "Native frameless WebView2 window shell for Bun — window control, DPI-aware geometry, bidirectional message bridge",
-  "type": "module",
-  "license": "MIT",
-  "os": ["win32"],
-  "cpu": ["x64"],
-  "keywords": [
-    "bun",
-    "webview",
-    "webview2",
-    "frameless",
-    "window",
-    "desktop",
-    "ffi"
-  ],
-  "exports": {
-    ".": "./src/shell/index.ts",
-    "./embedded": "./src/shell/embedded.ts",
-    "./native": "./dist/libshell.dll",
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "src/shell",
-    "dist/libshell.dll",
-    "native/shell.cc",
-    "native/build.ps1",
-    "native/fetch.ps1",
-    "vendor/webview/core",
-    "vendor/webview/compatibility",
-    "vendor/webview2/build/native/include",
-    "README.md",
-    "AGENTS.md"
-  ],
-  "scripts": {
-    "build:native": "pwsh -NoProfile -ExecutionPolicy Bypass -File native/build.ps1",
-    "build:exe": "pwsh -NoProfile -ExecutionPolicy Bypass -File native/build-pack.ps1",
-    "demo": "bun run src/host.ts",
-    "check": "bun check",
-    "test": "bun test"
-  },
-  "devDependencies": {
-    "@types/bun": "^1.4.3"
-  },
-  "engines": {
-    "bun": ">=1.4.0"
-  }
+    "$schema": "https://json.schemastore.org/package.json",
+    "name": "webview-shell",
+    "version": "0.2.0",
+    "description": "Native frameless WebView2 window shell for Bun — window control, DPI-aware geometry, bidirectional message bridge",
+    "type": "module",
+    "license": "MIT",
+    "os": ["win32"],
+    "cpu": ["x64"],
+    "keywords": [
+        "bun",
+        "webview",
+        "webview2",
+        "frameless",
+        "window",
+        "desktop",
+        "ffi"
+    ],
+    "exports": {
+        ".": "./src/shell/index.ts",
+        "./embedded": "./src/shell/embedded.ts",
+        "./native": "./dist/libshell.dll",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "src/shell",
+        "dist/libshell.dll",
+        "native/shell.cc",
+        "native/build.ps1",
+        "native/fetch.ps1",
+        "vendor/webview/core",
+        "vendor/webview/compatibility",
+        "vendor/webview2/build/native/include",
+        "README.md",
+        "AGENTS.md"
+    ],
+    "scripts": {
+        "build:native": "pwsh -NoProfile -ExecutionPolicy Bypass -File native/build.ps1",
+        "build:exe": "pwsh -NoProfile -ExecutionPolicy Bypass -File native/build-pack.ps1",
+        "demo": "bun run ./src/host.ts",
+        "pack": "bun pm pack"
+    },
+    "devDependencies": {
+        "@types/bun": "^1.4.3",
+        "typescript": "7.0.2"
+    },
+    "engines": {
+        "bun": ">=1.4.3"
+    }
 }

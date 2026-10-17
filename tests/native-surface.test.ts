@@ -1,0 +1,115 @@
+import { expect, test } from "bun:test";
+
+import { openNativeLib } from "@/shell/native";
+import { resolveNativeLib } from "@/shell/resolve";
+
+/**
+ * ABI 面测试：shell.cc 改了导出、native.ts 没同步，或者反过来，
+ * 都会在这里断掉。这是「装进别人工程后才炸」的高发点。
+ */
+
+const DECLARED = [
+    "shell_start_ex",
+    "shell_post",
+    "shell_title",
+    "shell_minimize",
+    "shell_toggle_maximize",
+    "shell_close",
+    "shell_drag",
+    "shell_begin_resize",
+    "shell_set_min_size",
+    "shell_get_state",
+    "shell_stop",
+    "shell_error",
+    // 排障面
+    "shell_debug_hittest",
+    "shell_debug_metrics",
+    "shell_debug_dpi",
+    "shell_self_base",
+    "shell_self_path",
+] as const;
+
+test("libshell.dll 是合法 PE 映像", async () => {
+    const info = await resolveNativeLib();
+    const bytes = await Bun.file(info.path).bytes();
+    expect(bytes.length).toBeGreaterThan(100_000);
+    // MZ 头
+    expect(bytes[0]).toBe(0x4d);
+    expect(bytes[1]).toBe(0x5a);
+    // e_lfanew 指向的签名必须是 PE\0\0
+    const lfanew =
+        (bytes[0x3c] ?? 0) |
+        ((bytes[0x3d] ?? 0) << 8) |
+        ((bytes[0x3e] ?? 0) << 16) |
+        ((bytes[0x3f] ?? 0) << 24);
+    expect(lfanew).toBeGreaterThan(0);
+    expect(bytes[lfanew]).toBe(0x50); // P
+    expect(bytes[lfanew + 1]).toBe(0x45); // E
+});
+
+test("dlopen 成功且 17 个声明符号全部存在", async () => {
+    const info = await resolveNativeLib();
+    const lib = openNativeLib(info.path);
+    const keys = new Set(Object.keys(lib.symbols));
+
+    const missing = DECLARED.filter((name) => !keys.has(name));
+    expect(missing).toEqual([]);
+    expect(DECLARED.length).toBe(17);
+
+    lib.close();
+});
+
+test("未启动时的调用是安全的（消费者可能在 start 之前就查询状态）", async () => {
+    const info = await resolveNativeLib();
+    const lib = openNativeLib(info.path);
+    try {
+        // shell.cc 里 get_state 对 !g_hwnd 直接返回 0；stop 对 !g_webview 是 no-op。
+        // 这两条是 API 契约：消费者可以先 state() 再 start()。
+        expect(lib.symbols.shell_get_state()).toBe(0);
+
+        // 未启动就 stop 不应崩溃（幂等前置条件）
+        expect(() => lib.symbols.shell_stop()).not.toThrow();
+
+        // 停过一次之后状态仍可读
+        expect(lib.symbols.shell_get_state()).toBe(0);
+    } finally {
+        lib.close();
+    }
+});
+
+test("符号是可直接调用的函数（bun:ffi 不暴露 args/returns 元数据）", async () => {
+    const info = await resolveNativeLib();
+    const lib = openNativeLib(info.path);
+    try {
+        // 记录事实：bun:ffi 的 symbol 是裸函数，没有 info/args/returns 可反射。
+        // 因此 ABI 一致性只能靠「dlopen 不报错 + 实际调用」来保证，不能靠元数据断言。
+        for (const name of DECLARED) {
+            const fn = (lib.symbols as unknown as Record<string, unknown>)[name];
+            expect(typeof fn).toBe("function");
+        }
+    } finally {
+        lib.close();
+    }
+});
+
+test("未声明的遗留符号不应出现在 FFI 面上", async () => {
+    const info = await resolveNativeLib();
+    const lib = openNativeLib(info.path);
+    const keys = Object.keys(lib.symbols);
+    // DLL 里确有 shell_start（1.x 遗留），但 TS 侧刻意不声明
+    expect(keys).not.toContain("shell_start");
+    lib.close();
+});
+
+test("shell_error 在未启动时返回可读字符串（空串或说明）", async () => {
+    const info = await resolveNativeLib();
+    const lib = openNativeLib(info.path);
+    try {
+        // 只读调用，不触窗口；用于确认指针返回可安全解引用
+        const { readCStr } = await import("@/shell/native");
+        const msg = readCStr(lib.symbols.shell_error());
+        expect(typeof msg).toBe("string");
+    } finally {
+        lib.close();
+    }
+});

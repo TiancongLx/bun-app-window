@@ -112,6 +112,23 @@ window.__shellRecv = (payload) => { /* ... */ };
 - 提权不影响 WebView2：实测 High 完整性级别下正常，无需降权中介。
 - 不支持：托盘、系统菜单、自动更新、多窗口、跨平台。要做就自己在壳外面加。
 
+## 开发与验证
+
+工具链对齐 `bun-ts-project-template`：Bun 1.4.3 + TypeScript 7.0.2，`tsconfig.json` 开了
+`exactOptionalPropertyTypes` / `noUncheckedIndexedAccess` / `verbatimModuleSyntax` /
+`erasableSyntaxOnly` / `noUnusedLocals` 等全套严格项。
+
+门禁是原生命令，本仓不设同名脚本：
+
+```bash
+bun check          # 类型（bun >= 1.4.3 内置，与 tsc 7 同规则）
+bun test           # 行为（tests/，29 例）
+bun run demo       # 自检程序，需要交互式会话
+```
+
+改 `src/shell/` 或 `package.json` 后，除了两条门禁，还要跑一次「装进外部工程」的冒烟——
+`bun test` 覆盖不到 `files` 清单与 `node_modules` 安装态，详见 `AGENTS.md` 的「依赖包验收」。
+
 ## 许可
 
 MIT。

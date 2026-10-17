@@ -1,18 +1,46 @@
 {
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "moduleDetection": "force",
-    "lib": ["ESNext"],
-    "types": ["bun"],
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noFallthroughCasesInSwitch": true,
-    "skipLibCheck": true,
-    "noEmit": true,
-    "allowImportingTsExtensions": true,
-    "verbatimModuleSyntax": true
-  },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+    "compilerOptions": {
+        /* 语言特性配置 */
+        "lib": ["ESNext"],
+        "target": "ESNext",
+        "module": "Preserve",
+        "moduleResolution": "bundler",
+        "moduleDetection": "force",
+
+        /* 类型检查配置 */
+        "types": ["bun"],
+        "strict": true,
+        "exactOptionalPropertyTypes": true,
+        "noUncheckedIndexedAccess": true,
+        "verbatimModuleSyntax": true,
+        "erasableSyntaxOnly": true,
+        "noImplicitOverride": true,
+        "noFallthroughCasesInSwitch": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+
+        /* 模块解析配置 */
+        "resolveJsonModule": true,
+        "allowImportingTsExtensions": true,
+        "noEmit": true,
+
+        "paths": {
+            "@/*": ["./src/*"]
+        },
+
+        /* 源码调试 */
+        "sourceMap": true,
+        "inlineSources": true
+    },
+
+    "include": [
+        "src/**/*.ts",
+        "tests/**/*.ts",
+        "scripts/**/*.ts"
+    ],
+    "exclude": [
+        "node_modules"
+    ]
 }
