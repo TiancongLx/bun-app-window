@@ -19,6 +19,7 @@ import {
   serveOnSafePort,
   type Shell,
 } from "./shell/index";
+import { debugOf } from "./shell/debug";
 import uiHtml from "./ui/index.html" with { type: "text" };
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -120,7 +121,7 @@ const server = serveOnSafePort({
 
       if (msg.t === "hittest-probe" && shell) {
         // 页面侧报告鼠标落在哪、命中码是什么，用于核对边框几何
-        const code = shell.debug.hittest(msg.x, msg.y);
+        const code = debugOf(shell).hittest(msg.x, msg.y);
         events.push(`hittest:${msg.label}(${msg.x},${msg.y})=${code}`);
         ws.send(JSON.stringify({ t: "hittest-result", label: msg.label, x: msg.x, y: msg.y, code }));
       }
@@ -176,23 +177,23 @@ try {
 if (shell) {
   const s = shell;
   log(`[lib] source=${s.libInfo.source} path=${s.libInfo.path}`);
-  log(`[debug] ${s.debug.dpi()}`);
-  events.push(`dpi:${s.debug.dpi()}`);
-  log(`[debug] base=0x${s.debug.selfBase().toString(16)} ${s.debug.selfPath()}`);
+  log(`[debug] ${debugOf(s).dpi()}`);
+  events.push(`dpi:${debugOf(s).dpi()}`);
+  log(`[debug] base=0x${debugOf(s).selfBase().toString(16)} ${debugOf(s).selfPath()}`);
 
   // 边框命中几何自检 + 最大化/还原（验证 NCCALCSIZE 的最大化补偿）
   if (!HOLD) {
     setTimeout(() => {
-      log(`[metrics] initial: ${s.debug.metrics()}`);
+      log(`[metrics] initial: ${debugOf(s).metrics()}`);
       const st = s.state();
       log(`[host] state max=${st.maximized} min=${st.minimized} focus=${st.focused}`);
       log(`[host] toggle_maximize -> rc=${s.toggleMaximize()}`);
       setTimeout(() => {
-        log(`[metrics] maximized: ${s.debug.metrics()}`);
+        log(`[metrics] maximized: ${debugOf(s).metrics()}`);
         log(`[host] state after maximize=${s.state().maximized}`);
         log(`[host] restore -> rc=${s.toggleMaximize()}`);
         setTimeout(() => {
-          log(`[metrics] restored: ${s.debug.metrics()}`);
+          log(`[metrics] restored: ${debugOf(s).metrics()}`);
           log(`[host] state after restore=${s.state().maximized}`);
           done(0);
         }, 1200);
@@ -201,7 +202,7 @@ if (shell) {
   } else {
     log("[host] HOLD 模式：窗口保持 25 秒，供截图");
     for (const t of [1000, 3000, 8000]) {
-      setTimeout(() => log(`[metrics] hold@${t}: ${s.debug.metrics()}`), t);
+      setTimeout(() => log(`[metrics] hold@${t}: ${debugOf(s).metrics()}`), t);
     }
     setTimeout(() => done(0), 25000);
   }

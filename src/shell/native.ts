@@ -36,6 +36,14 @@ export function openNativeLib(path: string) {
     shell_set_app_id: { args: [FFIType.ptr], returns: FFIType.i32 },
     shell_is_dark: { args: [], returns: FFIType.i32 },
     shell_pick_folder: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    shell_error_text: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+
+    // 输入与视图面
+    shell_set_zoom: { args: [FFIType.f64], returns: FFIType.i32 },
+    shell_get_zoom: { args: [], returns: FFIType.f64 },
+    shell_reload: { args: [], returns: FFIType.i32 },
+    shell_devtools: { args: [], returns: FFIType.i32 },
+    shell_toggle_fullscreen: { args: [], returns: FFIType.i32 },
 
     // 排障面：不进稳定契约
     shell_debug_hittest: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },

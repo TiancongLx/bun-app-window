@@ -57,14 +57,64 @@ shell.setTitle("Doing work…");
 | `drag()` | 页面 `pointerdown` → 原生拖拽（保留贴边分屏） |
 | `beginResize(edge)` | 页面 `pointermove` → 边框缩放，edge 取 `RESIZE_EDGE.*` |
 | `setMinSize(w, h)` | 最小尺寸，逻辑像素 |
-| `state()` | `{ maximized, minimized, focused, raw }` |
-| `lastError()` | 最近失败原因，无错为空串 |
+| `state()` | `{ maximized, minimized, focused, dark, raw }` |
+| `isAlive()` | 窗口是否仍存在；`state()` 无法区分「未启动」与「已销毁」 |
+| `lastError()` | 最近失败原因，无错为空串（互斥读出的拷贝，不受并发写影响） |
+| `show()` | 配合 `FLAG_DEFER_SHOW`：页面就绪后再显示，消除首帧闪烁 |
+| `pickFolder(title?)` | 原生文件夹选择框。**同步阻塞**调用线程，需要并发请放 Worker |
+| `setZoom(f)` / `getZoom()` | 页面缩放 0.25–3.0，越界自动钳制 |
+| `reload()` / `openDevTools()` / `toggleFullscreen()` | 等同 Ctrl+R / F12 / F11 |
 | `stop()` | 销毁窗口，可重复调用 |
 | `libInfo` | 原生库解析结果（路径、来源、sha256） |
 | `symbols` | 逃生舱：直接拿 dlopen 出来的符号 |
-| `debug.*` | 排障面（hittest / metrics / dpi / selfBase / selfPath），**非稳定契约** |
 
-标志位：`FLAG_FRAMELESS`、`FLAG_TOPMOST`、`FLAG_CENTER`、`FLAG_RESIZABLE`，按位或。
+标志位（按位或）：`FLAG_FRAMELESS`、`FLAG_TOPMOST`、`FLAG_CENTER`、`FLAG_RESIZABLE`、
+`FLAG_DEFER_SHOW`、`FLAG_ACCEPT_DROP`。
+
+### 内置的键盘与鼠标行为
+
+窗口建好即可用，不需要应用侧接线：
+
+| 操作 | 行为 |
+| --- | --- |
+| `Ctrl` `+` / `Ctrl` `-` / `Ctrl+0` | 页面缩放：上/下一档 / 复位 |
+| `Ctrl+滚轮` | 同上，按滚轮方向 |
+| `F11` | 全屏切换（连边框与任务栏一起让出，与「最大化」不同） |
+| `F5` / `Ctrl+R` | 重新加载 |
+| `F12` | 打开 WebView2 开发者工具 |
+| `Alt+Space` / 右键标题栏 | 系统菜单 |
+| 拖入文件/文件夹 | 需 `FLAG_ACCEPT_DROP`，见下 |
+
+### 拖放
+
+```ts
+const shell = await openShell({ url, flags: FLAG_ACCEPT_DROP });
+```
+
+落下的路径以 shell-msg 推送：
+
+```js
+window.addEventListener("shell-msg", (e) => {
+  if (e.detail.t === "drop") console.log(e.detail.paths); // ["C:\\题库"]
+});
+```
+
+提权进程（High 完整性）下资源管理器属 Medium，默认收不到 `WM_DROPFILES`；壳已用
+`ChangeWindowMessageFilterEx` 放行，无需调用方处理。
+
+### 排障面（独立入口）
+
+诊断接口不放在主入口——留在主入口等于把它们也变成契约，改一次诊断输出就成了破坏性
+变更。它们随时可能变化，生产代码不应依赖：
+
+```ts
+import { debugOf } from "webview-shell/debug";
+
+const d = debugOf(shell);
+d.metrics();   // pos / win / client / work / border / round
+d.dpi();       // 感知级别与缩放
+d.hittest(x, y);
+```
 
 ## 原生库怎么被找到
 

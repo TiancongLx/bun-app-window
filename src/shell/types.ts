@@ -24,6 +24,14 @@ export const FLAG_RESIZABLE = 8;
  * 用于消除「空窗口先出现、内容后填上」的首帧闪烁。
  */
 export const FLAG_DEFER_SHOW = 16;
+/**
+ * 接受文件/文件夹拖放。
+ *
+ * 落进来的路径以 shell-msg 推送：`{ t: "drop", paths: ["C:\\a", "C:\\b"] }`。
+ * 提权进程（High 完整性）需要放行 UIPI，壳已用 `ChangeWindowMessageFilterEx`
+ * 处理；否则资源管理器拖过来的消息会被静默拦掉。
+ */
+export const FLAG_ACCEPT_DROP = 32;
 
 /** 缩放边框的 8 个命中边，取值与 Win32 HT* 常量一致 */
 export const RESIZE_EDGE = {

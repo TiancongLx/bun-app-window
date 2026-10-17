@@ -20,7 +20,7 @@
  * 线程模型：`start()` 立即返回（原生层自建 UI 线程），调用方主线程不被阻塞。
  */
 
-import { cstr, openNativeLib, readBuffer, readCStr } from "./native";
+import { cstr, openNativeLib, readBuffer } from "./native";
 import { ptr } from "bun:ffi";
 import type { NativeSymbols } from "./native";
 import { resolveNativeLib } from "./resolve";
@@ -87,8 +87,23 @@ export type Shell = {
    * 窗口销毁后原生 UI 线程会返回，但宿主进程与它起的本地服务不会自己退出。
    */
   isAlive(): boolean;
-  /** 最近一次失败的原因；无错误时为空串 */
+  /** 最近一次失败的原因；无错误时为空串。走拷贝式读出，不受并发写影响 */
   lastError(): string;
+
+  // ---- 输入与视图 ----
+  /**
+   * 页面缩放倍率（0.25 ~ 3.0）。也支持用户键盘操作：Ctrl± / Ctrl+0 / Ctrl+滚轮。
+   * 生效是异步的（投到 UI 线程），getZoom() 读的是缓存值。
+   */
+  setZoom(factor: number): number;
+  /** 当前缩放倍率（缓存值） */
+  getZoom(): number;
+  /** 重新加载页面（等同 Ctrl+R / F5） */
+  reload(): number;
+  /** 打开开发者工具（等同 F12） */
+  openDevTools(): number;
+  /** 切换全屏（等同 F11）；全屏与最大化不同，连边框与任务栏一起让出 */
+  toggleFullscreen(): number;
   /** 停止并释放窗口（可重复调用） */
   stop(): void;
 
@@ -97,22 +112,10 @@ export type Shell = {
   /** 逃生舱：直接访问 dlopen 出来的符号 */
   readonly symbols: NativeSymbols;
 
-  /**
-   * 排障面 —— 不是稳定契约，可能随版本变化。
-   * 生产代码不应依赖这里。
-   */
-  readonly debug: {
-    /** 客户区坐标 → Win32 命中码（HT* 常量） */
-    hittest(x: number, y: number): number;
-    /** 一次性几何快照：pos / win / client / work / border / round */
-    metrics(): string;
-    /** DPI 感知级别与缩放 */
-    dpi(): string;
-    /** 原生库自身模块基址 */
-    selfBase(): bigint;
-    /** 原生库自身文件路径 */
-    selfPath(): string;
-  };
+  // 排障面（hittest / metrics / dpi / selfBase / selfPath）已移到独立入口
+  //     import { debugOf } from "webview-shell/debug"
+  // 目的：公共面只承诺产品向能力。把排障面留在主入口，等于把它也变成契约，
+  // 将来改一次诊断输出就成了破坏性变更。
 };
 
 export async function createShell(opts: ShellOptions): Promise<Shell> {
@@ -128,7 +131,8 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
   let started = false;
   let stopped = false;
 
-  const lastError = () => readCStr(symbols.shell_error());
+  // 拷贝式读出：shell_error() 返回共享缓冲区的指针，解锁后可能被别的线程改写
+  const lastError = () => readBuffer((p, len) => symbols.shell_error_text(p, len), 512);
 
   const shell: Shell = {
     start(): StartResult {
@@ -185,6 +189,12 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
 
     lastError,
 
+    setZoom: (factor) => symbols.shell_set_zoom(factor),
+    getZoom: () => symbols.shell_get_zoom(),
+    reload: () => symbols.shell_reload(),
+    openDevTools: () => symbols.shell_devtools(),
+    toggleFullscreen: () => symbols.shell_toggle_fullscreen(),
+
     stop() {
       if (stopped) return;
       stopped = true;
@@ -202,13 +212,7 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
     libInfo,
     symbols,
 
-    debug: {
-      hittest: (x, y) => symbols.shell_debug_hittest(x, y),
-      metrics: () => readBuffer((p, len) => symbols.shell_debug_metrics(p, len)),
-      dpi: () => readBuffer((p, len) => symbols.shell_debug_dpi(p, len)),
-      selfBase: () => symbols.shell_self_base(),
-      selfPath: () => readBuffer((p, len) => symbols.shell_self_path(p, len)),
-    },
+
   };
 
   return shell;

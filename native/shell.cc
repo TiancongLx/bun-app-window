@@ -26,6 +26,7 @@
 #include <shlwapi.h>
 
 #include <cstdlib>
+#include <atomic>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -48,6 +49,8 @@ enum ShellFlag : int {
   // 创建后先不显示，等调用方确认页面就绪再 shell_show()。
   // 用于消除「空窗口先出现、内容后填上」的首帧闪烁。
   SHELL_FLAG_DEFER_SHOW = 16,
+  // 接受文件/文件夹拖放，落下的路径以 shell-msg 的 {t:'drop',paths:[...]} 推给页面。
+  SHELL_FLAG_ACCEPT_DROP = 32,
 };
 
 enum ShellState : int {
@@ -67,14 +70,14 @@ enum ShellEdge : int {
   SHELL_EDGE_BOTTOMRIGHT = 7,
 };
 
-enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize, show };
+enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize, show, zoom, reload, devtools, fullscreen };
 
 struct cmd {
   cmd_kind kind;
   std::string arg;
 };
 
-webview_t g_webview = nullptr;
+std::atomic<webview_t> g_webview{nullptr};
 HWND g_hwnd = nullptr;        // 顶层窗口（自有或 webview 创建）
 HWND g_widget = nullptr;      // WebView2 容器子窗口
 WNDPROC g_widget_orig = nullptr;
@@ -82,25 +85,56 @@ WNDPROC g_toplevel_orig = nullptr;  // 仅带边框模式：webview 自建窗口
 HANDLE g_ready = nullptr;
 
 bool g_frameless = false;
-bool g_shown = false;         // 是否已完成首次显示（用于忽略创建期的 WM_DPICHANGED 建议矩形）
-int g_round_state = -1;       // 圆角状态缓存：-1 未知 / 0 直角 / 1 圆角
+std::atomic<bool> g_shown{false};  // 是否已完成首次显示（忽略创建期 WM_DPICHANGED 建议矩形；跨线程读）
+std::atomic<int> g_round_state{-1};  // 圆角状态缓存：-1 未知 / 0 直角 / 1 圆角（跨线程读）
 bool g_resizable = true;
 bool g_defer_show = false;    // 延迟显示：等 shell_show() 再 ShowWindow
+bool g_accept_drop = false;   // 接受文件拖放
 std::wstring g_app_id;        // AppUserModelID：决定任务栏分组与图标归属
 int g_min_w = 320;
 int g_min_h = 200;
 int g_start_w = 1200;
 int g_start_h = 800;
 
-std::mutex g_mu;
+// 两把锁，锁序固定为 life → queue，避免任何自锁路径：
+//   g_life_mu  — 保护 g_webview 的生死：enqueue 的「检查后投递」与 teardown 的「销毁后清空」互斥
+//   g_queue_mu — 只保护命令队列本身
+// 注意 drain() 只碰 g_queue_mu；teardown 会持 g_life_mu 调 webview_destroy，
+// 若两者共用一把锁，销毁过程中若同步派发了 WM_APP 就会死锁。
+std::mutex g_life_mu;
+std::mutex g_queue_mu;
 std::deque<cmd> g_queue;
 
 std::string g_url;
 std::string g_title;
+
+// 错误槽。跨线程写：启动期由 UI 线程写（CoInitializeEx / webview_create 失败等），
+// 运行期任何线程都可能写。放在 mutex 后面，避免两条错误互相覆盖成半截字符串。
+// 读侧必须走 shell_error_text() 拿拷贝——shell_error() 返回的是共享缓冲区的指针。
+std::mutex g_err_mu;
 char g_err[1024] = {0};
 
 void set_err(const char *msg) {
+  std::lock_guard<std::mutex> lock(g_err_mu);
   lstrcpynA(g_err, msg ? msg : "", static_cast<int>(sizeof(g_err)));
+}
+
+// 启动前清空：让「启动失败」读到的一定是本次启动写下的那条，而不是上一次的残留。
+void clear_err() {
+  std::lock_guard<std::mutex> lock(g_err_mu);
+  g_err[0] = 0;
+}
+
+// 把当前错误拷进调用方的缓冲区并返回长度。shell_error() 只保留 ABI 兼容，
+// 它返回的指针在解锁后可能被别的线程改写，新代码一律用这个。
+int copy_err(char *buf, int cap) {
+  if (!buf || cap <= 0) return 0;
+  std::lock_guard<std::mutex> lock(g_err_mu);
+  const int n = lstrlenA(g_err);
+  const int copy = n < cap - 1 ? n : cap - 1;
+  if (copy > 0) memcpy(buf, g_err, static_cast<size_t>(copy));
+  buf[copy] = 0;
+  return copy;
 }
 
 // ---- 外观与系统集成辅助 ----
@@ -321,10 +355,33 @@ void post_json(const std::string &json) {
   webview_eval(g_webview, expr.c_str());
 }
 
+// 上一次真正推送出去的状态。放在这里而不是函数内，供变化检测比对。
+struct PushedState {
+  int px_w = -1;
+  int px_h = -1;
+  unsigned int dpi = 0;
+  bool maxed = false;
+  bool minned = false;
+  bool focused = false;
+  bool dark = false;
+  ULONGLONG at = 0;
+};
+PushedState g_pushed;
+bool g_push_pending = false;  // 有变化被节流掉了，等定时器补齐
+
+const UINT_PTR kPushTimerId = 1;
+const ULONGLONG kPushMinIntervalMs = 16;  // 约一帧
+
 // 推送窗口状态（仅限 UI 线程调用）
 // 尺寸对外统一用 96 DPI 逻辑像素（即页面 CSS px），另附物理像素与 dpi，
 // 避免前端每次自行按 dpr 折算。
-void push_state() {
+//
+// 两道闸，因为 WM_SIZE 在拖动缩放时每帧都触发，而每次推送都是一次跨进程
+// webview_eval（宿主侧 39µs，渲染器还要执行一段 JS）：
+//   1) 变化检测：状态一模一样就不发。停下来之后不会再有 WM_SIZE，这里直接吸收掉。
+//   2) 16ms 节流 + 尾随补齐：拖动过程中尺寸每帧都在变，靠第 1 道拦不住；
+//      被节流掉时挂一个 16ms 定时器，到点补发最后一次状态，保证不会丢。
+void push_state(bool force = false) {
   if (!g_hwnd || !g_webview) {
     return;
   }
@@ -337,6 +394,32 @@ void push_state() {
   const int px_w = rc.right - rc.left;
   const int px_h = rc.bottom - rc.top;
   const UINT dpi = GetDpiForWindow(g_hwnd);
+  const bool dark = system_uses_dark();
+
+  const bool same = px_w == g_pushed.px_w && px_h == g_pushed.px_h &&
+                    dpi == g_pushed.dpi && maxed == g_pushed.maxed &&
+                    minned == g_pushed.minned && focused == g_pushed.focused &&
+                    dark == g_pushed.dark;
+  if (same && !force) {
+    return;
+  }
+
+  const ULONGLONG now = GetTickCount64();
+  if (!force && now - g_pushed.at < kPushMinIntervalMs) {
+    if (!g_push_pending) {
+      g_push_pending = true;
+      SetTimer(g_hwnd, kPushTimerId, static_cast<UINT>(kPushMinIntervalMs), nullptr);
+    }
+    return;
+  }
+
+  if (g_push_pending) {
+    g_push_pending = false;
+    KillTimer(g_hwnd, kPushTimerId);
+  }
+
+  g_pushed = PushedState{px_w, px_h, dpi, maxed, minned, focused, dark, now};
+
   const int css_w = dpi ? MulDiv(px_w, 96, static_cast<int>(dpi)) : px_w;
   const int css_h = dpi ? MulDiv(px_h, 96, static_cast<int>(dpi)) : px_h;
 
@@ -347,8 +430,20 @@ void push_state() {
             "\"dpi\":%u,\"frameless\":%s,\"dark\":%s}",
             maxed ? "true" : "false", minned ? "true" : "false",
             focused ? "true" : "false", css_w, css_h, px_w, px_h, dpi,
-            g_frameless ? "true" : "false", system_uses_dark() ? "true" : "false");
+            g_frameless ? "true" : "false", dark ? "true" : "false");
   post_json(buf);
+}
+
+// 节流定时器到点：补发一次（force，因为此时往往与上次推送的状态已经不同了）。
+void flush_push_state() {
+  if (!g_push_pending) {
+    return;
+  }
+  g_push_pending = false;
+  if (g_hwnd) {
+    KillTimer(g_hwnd, kPushTimerId);
+  }
+  push_state(true);
 }
 
 void apply_round_corners(HWND hwnd, bool round) {
@@ -379,6 +474,263 @@ void show_now() {
   SetFocus(g_hwnd);
   UpdateWindow(g_hwnd);
   push_state();
+}
+
+// ---- 缩放 / 全屏 / 刷新 / 开发者工具 / 拖放 ----
+
+// 缩放级别阶梯。与 Edge 的量级接近：小端更密，大端更疏，避免高倍率下 ±0.1 看不出变化。
+const double kZoomLadder[] = {0.25, 0.33, 0.5, 0.67, 0.8, 0.9, 1.0,
+                              1.1,  1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
+const int kZoomCount = static_cast<int>(sizeof(kZoomLadder) / sizeof(kZoomLadder[0]));
+double g_zoom = 1.0;
+
+// 全屏状态：进入前保存样式与矩形，退出时原样还原。
+bool g_fullscreen = false;
+LONG_PTR g_saved_style = 0;
+RECT g_saved_rect{};
+
+// 取 CoreWebView2。调用方负责 Release()。失败返回 nullptr（老 runtime 或缺 COM 上下文）。
+ICoreWebView2 *core_webview() {
+  if (!g_webview) {
+    return nullptr;
+  }
+  auto *ctrl = static_cast<ICoreWebView2Controller *>(
+      webview_get_native_handle(g_webview, WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER));
+  if (!ctrl) {
+    return nullptr;
+  }
+  ICoreWebView2 *core = nullptr;
+  if (FAILED(ctrl->get_CoreWebView2(&core))) {
+    return nullptr;
+  }
+  return core;
+}
+
+// 设页面缩放。必须在 UI 线程调用（WebView2 是 STA）。
+void apply_zoom(double factor) {
+  if (!g_webview) {
+    return;
+  }
+  if (factor < kZoomLadder[0]) factor = kZoomLadder[0];
+  if (factor > kZoomLadder[kZoomCount - 1]) factor = kZoomLadder[kZoomCount - 1];
+
+  auto *ctrl = static_cast<ICoreWebView2Controller *>(
+      webview_get_native_handle(g_webview, WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER));
+  if (!ctrl) {
+    return;
+  }
+  if (SUCCEEDED(ctrl->put_ZoomFactor(factor))) {
+    g_zoom = factor;
+  }
+}
+
+// 往上/下走一档。direction > 0 放大。
+void zoom_step(int direction) {
+  int nearest = 0;
+  for (int i = 0; i < kZoomCount; ++i) {
+    if (g_zoom <= kZoomLadder[i] + 1e-9) {
+      nearest = i;
+      break;
+    }
+    nearest = i;
+  }
+  int next = nearest + (direction > 0 ? 1 : -1);
+  if (next < 0) next = 0;
+  if (next >= kZoomCount) next = kZoomCount - 1;
+  apply_zoom(kZoomLadder[next]);
+}
+
+void reload_page() {
+  ICoreWebView2 *core = core_webview();
+  if (!core) {
+    return;
+  }
+  core->Reload();
+  core->Release();
+}
+
+void open_dev_tools() {
+  ICoreWebView2 *core = core_webview();
+  if (!core) {
+    return;
+  }
+  core->OpenDevToolsWindow();
+  core->Release();
+}
+
+// F11 全屏：去掉窗口样式钉到当前显示器整屏，再按一次还原。
+// 与「最大化」不同——最大化仍保留边框与任务栏，全屏两者都不要。
+void toggle_fullscreen() {
+  if (!g_hwnd) {
+    return;
+  }
+  HWND hwnd = g_hwnd;
+
+  if (!g_fullscreen) {
+    GetWindowRect(hwnd, &g_saved_rect);
+    g_saved_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+      return;
+    }
+    const int w = mi.rcMonitor.right - mi.rcMonitor.left;
+    const int h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+
+    // 无边框模式本来就是 WS_POPUP 风格，只需铺满；带边框模式要去掉整个非客户区。
+    SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+    SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, w, h,
+                 SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    g_fullscreen = true;
+  } else {
+    SetWindowLongPtrW(hwnd, GWL_STYLE, g_saved_style);
+    SetWindowPos(hwnd, nullptr, g_saved_rect.left, g_saved_rect.top,
+                 g_saved_rect.right - g_saved_rect.left,
+                 g_saved_rect.bottom - g_saved_rect.top,
+                 SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
+    g_fullscreen = false;
+  }
+  fit_widget();
+  push_state(true);
+}
+
+// 把宽字符串转成 UTF-8 并写进 JSON 字符串字面量（转义 \ 与 "）。
+void append_json_string(std::string &out, const std::wstring &w) {
+  out.push_back('"');
+  const int need = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  if (need > 1) {
+    std::string utf8(static_cast<size_t>(need - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &utf8[0], need, nullptr, nullptr);
+    for (char ch : utf8) {
+      if (ch == '\\' || ch == '"') {
+        out.push_back('\\');
+      }
+      out.push_back(ch);
+    }
+  }
+  out.push_back('"');
+}
+
+// 拖放：把落进来的路径推给页面。
+//
+// 注意提权场景：本进程若是 High 完整性（例如由 OTT 派生），资源管理器（Medium）
+// 发来的 WM_DROPFILES 会被 UIPI 拦掉。所以窗口建好后要显式放行这三条消息，
+// 否则「拖进来没反应」且完全没有错误提示。
+void enable_drop(HWND hwnd) {
+  if (!hwnd) {
+    return;
+  }
+  DragAcceptFiles(hwnd, TRUE);
+  ChangeWindowMessageFilterEx(hwnd, WM_DROPFILES, MSGFLT_ALLOW, nullptr);
+  ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+  // 0x0049 = WM_COPYGLOBALDATA，Win7 起改名后未再公开常量
+  ChangeWindowMessageFilterEx(hwnd, 0x0049, MSGFLT_ALLOW, nullptr);
+}
+
+void handle_drop(HDROP hd) {
+  if (!hd) {
+    return;
+  }
+  const UINT count = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
+  std::string json = "{\"t\":\"drop\",\"paths\":[";
+  for (UINT i = 0; i < count; ++i) {
+    const UINT len = DragQueryFileW(hd, i, nullptr, 0);
+    if (len == 0) {
+      continue;
+    }
+    std::wstring path(static_cast<size_t>(len) + 1, L'\0');
+    if (DragQueryFileW(hd, i, &path[0], len + 1) == 0) {
+      continue;
+    }
+    path.resize(len);
+    if (json[json.size() - 1] != '[') {
+      json.push_back(',');
+    }
+    append_json_string(json, path);
+  }
+  json += "]}";
+  DragFinish(hd);
+  if (count > 0) {
+    post_json(json);
+  }
+}
+
+// 键盘 / 滚轮 / 拖放的共用前置处理。两种窗口模式都要，抽出来避免两份漂移。
+// 返回 true 表示已处理并回填 *out。
+bool handle_input_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT *out) {
+  switch (msg) {
+  case WM_KEYDOWN: {
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    switch (wp) {
+    case VK_F11:
+      toggle_fullscreen();
+      *out = 0;
+      return true;
+    case VK_F12:
+      open_dev_tools();
+      *out = 0;
+      return true;
+    case VK_F5:
+      reload_page();
+      *out = 0;
+      return true;
+    case 'R':
+      if (ctrl) {
+        reload_page();
+        *out = 0;
+        return true;
+      }
+      break;
+    case VK_OEM_PLUS:   // 主键盘 =/+（Shift 不改变虚拟键码）
+    case VK_ADD:        // 小键盘 +
+      if (ctrl) {
+        zoom_step(+1);
+        *out = 0;
+        return true;
+      }
+      break;
+    case VK_OEM_MINUS:
+    case VK_SUBTRACT:
+      if (ctrl) {
+        zoom_step(-1);
+        *out = 0;
+        return true;
+      }
+      break;
+    case '0':
+    case VK_NUMPAD0:
+      if (ctrl) {
+        apply_zoom(1.0);
+        *out = 0;
+        return true;
+      }
+      break;
+    default:
+      break;
+    }
+    break;
+  }
+
+  case WM_MOUSEWHEEL: {
+    if ((GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) != 0) {
+      const short delta = GET_WHEEL_DELTA_WPARAM(wp);
+      zoom_step(delta > 0 ? +1 : -1);
+      *out = 0;
+      return true;
+    }
+    break;
+  }
+
+  case WM_DROPFILES:
+    handle_drop(reinterpret_cast<HDROP>(wp));
+    *out = 0;
+    return true;
+
+  default:
+    break;
+  }
+  return false;
 }
 
 // setMinSize 的入参是逻辑像素（96 DPI），而系统的 track size 要物理像素。
@@ -452,6 +804,11 @@ void center_on_work_area(HWND hwnd) {
 // ---- 自有窗口的消息处理（仅 frameless 路径使用） ----
 
 LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  // 键盘 / Ctrl+滚轮 / 拖放：两种窗口模式共用同一套处理
+  LRESULT handled = 0;
+  if (handle_input_message(hwnd, msg, wp, lp, &handled)) {
+    return handled;
+  }
   switch (msg) {
   case WM_NCCALCSIZE:
     if (g_frameless && wp == TRUE) {
@@ -500,6 +857,14 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     break;
   }
+
+  case WM_TIMER:
+    // 状态推送被节流时挂的一次性定时器：到点补发最后一次状态
+    if (wp == kPushTimerId) {
+      flush_push_state();
+      return 0;
+    }
+    break;
 
   case WM_SIZE:
     // 贴满屏幕时收起圆角：最大化窗口与屏幕边缘应严丝合缝，
@@ -598,6 +963,10 @@ void subclass_widget() {
 // 带边框模式：顶层窗口由 webview 创建，要补系统菜单与主题跟随只能子类化。
 // 只拦这几类消息，其余原样转发，避免影响 webview 自身的窗口逻辑。
 LRESULT CALLBACK toplevel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  LRESULT handled = 0;
+  if (handle_input_message(hwnd, msg, wp, lp, &handled)) {
+    return handled;
+  }
   switch (msg) {
   case WM_SHOWWINDOW:
     // webview 的 set_size_impl 结尾会 window_show()，而 window_show() 里
@@ -610,6 +979,12 @@ LRESULT CALLBACK toplevel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                    SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
                        SWP_NOACTIVATE);
+      return 0;
+    }
+    break;
+  case WM_TIMER:
+    if (wp == kPushTimerId) {
+      flush_push_state();
       return 0;
     }
     break;
@@ -645,7 +1020,7 @@ void subclass_toplevel() {
 void drain(webview_t /*w*/, void * /*arg*/) {
   std::deque<cmd> local;
   {
-    std::lock_guard<std::mutex> lock(g_mu);
+    std::lock_guard<std::mutex> lock(g_queue_mu);
     local.swap(g_queue);
   }
   for (const auto &c : local) {
@@ -686,16 +1061,36 @@ void drain(webview_t /*w*/, void * /*arg*/) {
     case cmd_kind::show:
       if (!g_shown) show_now();
       break;
+    case cmd_kind::zoom:
+      // 参数是千分数（见 shell_set_zoom）
+      apply_zoom(static_cast<double>(std::atoi(c.arg.c_str())) / 1000.0);
+      break;
+    case cmd_kind::reload:
+      reload_page();
+      break;
+    case cmd_kind::devtools:
+      open_dev_tools();
+      break;
+    case cmd_kind::fullscreen:
+      toggle_fullscreen();
+      break;
     }
   }
 }
 
+// 把命令投给 UI 线程执行。
+//
+// 生命周期锁 g_life_mu 让「检查 g_webview 非空」与「投递」成为原子对：
+// teardown 也必须持它才能销毁并清空，所以中间不会插进一次销毁，
+// 不会把 webview_dispatch 打到已释放的对象上。
+// webview_dispatch 内部只是 PostMessageW，不同步回调 drain，因此持锁安全。
 void enqueue(cmd_kind kind, std::string arg = {}) {
+  std::lock_guard<std::mutex> life(g_life_mu);
   if (!g_webview) {
     return;
   }
   {
-    std::lock_guard<std::mutex> lock(g_mu);
+    std::lock_guard<std::mutex> q(g_queue_mu);
     g_queue.push_back(cmd{kind, std::move(arg)});
   }
   webview_dispatch(g_webview, drain, nullptr);
@@ -756,6 +1151,7 @@ DWORD WINAPI ui_thread(LPVOID param) {
   g_frameless = (flags & SHELL_FLAG_FRAMELESS) != 0;
   g_resizable = (flags & SHELL_FLAG_RESIZABLE) != 0;
   g_defer_show = (flags & SHELL_FLAG_DEFER_SHOW) != 0;
+  g_accept_drop = (flags & SHELL_FLAG_ACCEPT_DROP) != 0;
 
   // 任务栏归属必须在窗口创建前设定
   apply_app_user_model_id();
@@ -834,6 +1230,10 @@ DWORD WINAPI ui_thread(LPVOID param) {
   g_widget = static_cast<HWND>(
       webview_get_native_handle(g_webview, WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET));
 
+  if (g_accept_drop) {
+    enable_drop(g_hwnd);
+  }
+
   static const char *kInit =
       "window.__shell = window.__shell || {};"
       "window.__shell.recv = function (o) {"
@@ -860,14 +1260,26 @@ DWORD WINAPI ui_thread(LPVOID param) {
 
   webview_run(g_webview); // 阻塞直到窗口关闭或 shell_stop()
 
-  webview_destroy(g_webview);
-  g_webview = nullptr;
+  // 销毁 + 清空必须在生命周期锁内完成：enqueue 在同一把锁下「检查非空并投递」，
+  // 中间若插进一次销毁，就会把 webview_dispatch 打到已释放的对象上。
+  {
+    std::lock_guard<std::mutex> life(g_life_mu);
+    webview_destroy(g_webview);
+    g_webview = nullptr;
+    {
+      std::lock_guard<std::mutex> q(g_queue_mu);
+      g_queue.clear();
+    }
+  }
+
   g_widget = nullptr;
   g_widget_orig = nullptr;
   g_toplevel_orig = nullptr;
   g_hwnd = nullptr;
   g_shown = false;
   g_round_state = -1; // 窗口已销毁，缓存失效
+  g_push_pending = false;
+  g_pushed = PushedState{};
 
   if (g_frameless) {
     CoUninitialize();
@@ -911,7 +1323,8 @@ __declspec(dllexport) int shell_start_ex(const char *url, const char *title,
   g_start_h = height > 0 ? height : 800;
   g_frameless = (flags & SHELL_FLAG_FRAMELESS) != 0;
   g_resizable = (flags & SHELL_FLAG_RESIZABLE) != 0;
-  g_err[0] = 0;
+  g_accept_drop = (flags & SHELL_FLAG_ACCEPT_DROP) != 0;
+  clear_err();
 
   g_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (!g_ready) {
@@ -1009,6 +1422,45 @@ __declspec(dllexport) int shell_show(void) {
   if (!g_webview) return -1;
   if (g_shown) return 0;
   enqueue(cmd_kind::show);
+  return 0;
+}
+
+// ---- 输入与视图能力 ----
+
+// 设页面缩放倍率（0.25 ~ 3.0）。主线程调用，实际 COM 动作投到 UI 线程执行。
+__declspec(dllexport) int shell_set_zoom(double factor) {
+  if (!g_webview) return -1;
+  // 注意：不能在这里用 wsprintfA("...%f", factor)。user32 的 wsprintf 只支持
+  // %c/%d/%u/%x/%s，没有浮点，%.4f 会产出空串，atof("")=0 再被钳到下限——
+  // 实测表现为「设任何倍率都变成 0.25」。改用整数千分数编码。
+  int milli = static_cast<int>(factor * 1000.0 + (factor >= 0 ? 0.5 : -0.5));
+  char buf[24];
+  wsprintfA(buf, "%d", milli);
+  enqueue(cmd_kind::zoom, std::string(buf));
+  return 0;
+}
+
+// 查询当前缩放。读缓存，无 COM 调用。
+__declspec(dllexport) double shell_get_zoom(void) { return g_zoom; }
+
+// 重新加载页面（等同 Ctrl+R / F5）。
+__declspec(dllexport) int shell_reload(void) {
+  if (!g_webview) return -1;
+  enqueue(cmd_kind::reload);
+  return 0;
+}
+
+// 打开 WebView2 开发者工具（等同 F12）。
+__declspec(dllexport) int shell_devtools(void) {
+  if (!g_webview) return -1;
+  enqueue(cmd_kind::devtools);
+  return 0;
+}
+
+// 切换全屏（等同 F11）。
+__declspec(dllexport) int shell_toggle_fullscreen(void) {
+  if (!g_webview) return -1;
+  enqueue(cmd_kind::fullscreen);
   return 0;
 }
 
@@ -1120,7 +1572,7 @@ __declspec(dllexport) int shell_debug_metrics(char *buf, int cap) {
             wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
             cr.right - cr.left, cr.bottom - cr.top,
             mi.rcWork.right - mi.rcWork.left, mi.rcWork.bottom - mi.rcWork.top,
-            frame_border_x(), frame_border_y(), g_round_state);
+            frame_border_x(), frame_border_y(), g_round_state.load());
 
   const int n = lstrlenA(tmp);
   if (n >= cap) return 0;
@@ -1199,10 +1651,17 @@ __declspec(dllexport) int shell_self_path(char *buf, int cap) {
 }
 
 __declspec(dllexport) void shell_stop(void) {
+  // 持生命周期锁：teardown 也用它，所以不会在「检查非空」与「终止」之间
+  // 插进一次销毁。
+  std::lock_guard<std::mutex> life(g_life_mu);
   if (g_webview) {
     webview_terminate(g_webview);
   }
 }
+
+// 错误文本的拷贝式读出。shell_error() 返回的是共享缓冲区的指针，解锁后可能被
+// 别的线程改写；需要可靠读取时用这个（返回写入长度）。
+__declspec(dllexport) int shell_error_text(char *buf, int cap) { return copy_err(buf, cap); }
 
 __declspec(dllexport) const char *shell_error(void) { return g_err; }
 

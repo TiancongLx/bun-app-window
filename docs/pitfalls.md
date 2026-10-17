@@ -118,6 +118,34 @@
 - **回归守护**：`tests/first-paint.test.ts`（原生侧三条顺序约束）与
   `it-is-go-time` 的 `src/gui/page.test.ts`（`data-theme` 必须在 head 内、且在 `<style>` 之前）。
 
+### 2.4d `wsprintfA` 没有 `%f`：浮点参数会静默变成空串
+
+- **症状**：`shell_set_zoom(1.5)` 之后 `getZoom()` 返回 `0.25`（下限），设任何倍率都一样。
+- **原因**：`wsprintfA` 是 user32 的实现，只支持 `%c` / `%d` / `%u` / `%x` / `%s`；
+  `%.4f` 不被识别，输出空串，下游 `atof("")` 得 `0`，再被钳到阶梯下限。
+- **修法**：跨线程传浮点改为整数编码（这里是千分数）：发送端 `int milli = factor * 1000`，
+  接收端 `/ 1000.0`。要真正的格式化用 `snprintf`（ucrt），但那就别指望 user32 的轻量实现。
+- **证据**：`实测`。修复前 `setZoom(1.5|0.5|99|1.0)` 全部读回 `0.25`；修复后
+  依次得到 `1.5 / 0.5 / 3（钳制）/ 1`。
+
+### 2.4e 提权进程收不到资源管理器的 WM_DROPFILES
+
+- **症状**：`DragAcceptFiles(hwnd, TRUE)` 已调用，但把文件拖进窗口毫无反应，也没有任何错误。
+- **原因**：UIPI。资源管理器是 Medium 完整性，High 完整性进程默认拒收它的窗口消息。
+- **修法**：窗口建好后 `ChangeWindowMessageFilterEx` 放行三条：`WM_DROPFILES`、
+  `WM_COPYDATA`、`0x0049`（`WM_COPYGLOBALDATA`，Win7 起改名后未再公开常量）。
+- **证据**：`源码核实`（UIPI 规则）+ `逻辑推断`（本机无法在不提权的脚本里复现真实拖放）。
+
+### 2.4f 键盘验证不要靠伪造前台
+
+- **现象**：用 `keybd_event` / `SendInput` 发 `Ctrl+=`，窗口收到 0 次。
+- **原因**：本机 `SetForegroundWindow` 被策略锁定（见 1.2），按键打到了别的窗口。
+- **修法**：验证消息路由本身用 `SendMessageTimeoutW(hwnd, WM_KEYDOWN, vk, 0, SMTO_ABORTIFHUNG)`，
+  能确定地验证「窗口过程收到并处理了」。注意这也说明一处真实限制：依赖 `GetKeyState`
+  的组合键（`Ctrl+滚轮`）在非前台窗口下不会触发——这是应有行为，无需修改。
+- **证据**：`实测`。`WM_KEYDOWN F11` 后窗口变为 `3072x1920`，再按一次精确回到
+  `pos=776,392 win=1520x1040`，`与基线一致: True`。
+
 ### 2.5 最大化矩形不能靠 `SM_CXSIZEFRAME` 推算
 
 - **症状**：最大化后客户区超出工作区（@192dpi 时溢出明显）。
