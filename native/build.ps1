@@ -50,8 +50,15 @@ Write-Host ''
 if ($LASTEXITCODE -ne 0) { throw "clang++ failed: $LASTEXITCODE" }
 
 $dll = Join-Path $out 'libshell.dll'
+
+# 同时产出一份到 dist/：包分发从这里取（package.json 的 files 与 embedded 入口都指向 dist）
+$distDir = Join-Path $Root 'dist'
+New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+Copy-Item $dll (Join-Path $distDir 'libshell.dll') -Force
+
 Write-Host ''
 Write-Host ('built: {0} ({1:N0} bytes)' -f $dll, (Get-Item $dll).Length)
+Write-Host ('staged: {0}' -f (Join-Path $distDir 'libshell.dll'))
 Write-Host ''
 Write-Host '=== exported symbols ==='
 & llvm-nm.exe --defined-only --extern-only --demangle $dll 2>&1 | Select-String 'shell_'

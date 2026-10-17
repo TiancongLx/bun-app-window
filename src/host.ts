@@ -1,23 +1,41 @@
+/**
+ * host.ts — 自检程序（webview-shell 内核的消费者）
+ *
+ * 这不是库的一部分。它的作用是证明内核 API 足以支撑一个真实应用：
+ * 起本地服务 → 开窗 → 双向消息 → 几何/DPI/命中自检 → 最大化还原 → 退出。
+ *
+ * 业务应用只需把这里面的自检段落替换成自己的逻辑。
+ */
+
 import { appendFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import {
+  FLAG_CENTER,
+  FLAG_FRAMELESS,
+  FLAG_RESIZABLE,
+  FLAG_TOPMOST,
+  openShell,
+  serveOnSafePort,
+  type Shell,
+} from "./shell/index";
 import uiHtml from "./ui/index.html" with { type: "text" };
-import { cstr, openNativeLib, ptr, readCStr, resolveNativeLib } from "./native-lib";
-import { serveOnSafePort } from "./safe-port";
 
 const ROOT = resolve(import.meta.dir, "..");
 const PACKED = /^[A-Za-z]:[\\/]~BUN[\\/]/i.test(import.meta.dir);
 
-// 打包后 import.meta.dir 是 B:\~BUN\root（不可写），
-// 日志改落到 exe 所在目录；开发时仍写仓库 build/。
+// 打包后 import.meta.dir 是 B:\~BUN\root（不可写），日志改落 exe 所在目录
 const LOG = PACKED
   ? resolve(process.execPath, "..", "host.log")
   : resolve(ROOT, "build", "host.log");
 
 writeFileSync(
   LOG,
-  `=== shell start ${new Date().toISOString()} pid=${process.pid} packed=${PACKED} ===\n`,
+  `=== host start ${new Date().toISOString()} pid=${process.pid} packed=${PACKED} ===\n`,
 );
+
+const events: string[] = [];
+let finished = false;
 
 function log(...parts: unknown[]) {
   const line = parts
@@ -27,57 +45,35 @@ function log(...parts: unknown[]) {
   console.log(line);
 }
 
-// 受控加载原生库：打包态从内嵌字节释放到 %LOCALAPPDATA%，不碰 %TEMP%
-const libInfo = await resolveNativeLib("WebViewShell");
-log(
-  `[lib] source=${libInfo.source} path=${libInfo.path} bytes=${libInfo.bytes}` +
-    `${libInfo.sha256 ? ` sha256=${libInfo.sha256.slice(0, 16)}` : ""}` +
-    ` reused=${libInfo.reused}` +
-    `${libInfo.pruned.length ? ` pruned=${JSON.stringify(libInfo.pruned)}` : ""}`,
-);
-
-const { symbols } = openNativeLib(libInfo.path);
-
-function lastError(): string {
-  return readCStr(symbols.shell_error()) || "(empty)";
-}
-
-const FLAG_FRAMELESS = 1;
-const FLAG_TOPMOST = 2;
-const FLAG_CENTER = 4;
-const FLAG_RESIZABLE = 8;
-
 const HOLD = process.env.HOLD === "1";
 
 const token = crypto.randomUUID();
-const events: string[] = [];
-let finished = false;
+let shell: Shell | null = null;
 
 function done(code: number) {
   if (finished) return;
   finished = true;
-  try {
-    symbols.shell_stop();
-  } catch {}
+  shell?.stop();
   log(`=== exit ${code} events=${JSON.stringify(events)} ===`);
   setTimeout(() => process.exit(code), 200);
 }
 
-// 端口必须避开浏览器的受限端口表，否则 WebView2 直接报 ERR_UNSAFE_PORT
+// 端口必须避开浏览器受限端口表，否则 WebView2 直接报 ERR_UNSAFE_PORT
 const server = serveOnSafePort({
-  hostname: "127.0.0.1",
   fetch(req, srv) {
     const url = new URL(req.url);
 
     if (url.pathname === "/ws") {
       if (url.searchParams.get("t") !== token) return new Response(null, { status: 403 });
-      if (srv.upgrade(req, { data: {} })) return undefined;
+      if ((srv as { upgrade(r: Request, o: unknown): boolean }).upgrade(req, { data: {} })) {
+        return undefined;
+      }
       return new Response(null, { status: 400 });
     }
 
     if (url.pathname === "/") {
       // HTML 通过 type:"text" 内联为字符串，不落盘、不经过临时目录
-      return new Response(uiHtml, {
+      return new Response(uiHtml as unknown as string, {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
     }
@@ -89,11 +85,12 @@ const server = serveOnSafePort({
     return new Response("not found", { status: 404 });
   },
   websocket: {
-    open() {
+    open(ws: { send(d: string): void }) {
       events.push("ws:open");
       log("[ws] open");
+      void ws;
     },
-    message(ws, raw) {
+    message(ws: { send(d: string): void }, raw: string | Buffer) {
       const msg = JSON.parse(String(raw));
       log("[ws] <-", msg);
 
@@ -103,33 +100,38 @@ const server = serveOnSafePort({
 
       if (msg.t === "hello") {
         ws.send(JSON.stringify({ t: "welcome", ua: msg.ua ?? null }));
-        const rc = symbols.shell_post(cstr(JSON.stringify({ t: "from-host", at: Date.now() })));
-        log(`[host] shell_post -> rc=${rc}${rc === 0 ? "" : ` err=${lastError()}`}`);
+        if (!shell) return;
+        const rc = shell.post(JSON.stringify({ t: "from-host", at: Date.now() }));
+        log(`[host] shell_post -> rc=${rc}${rc === 0 ? "" : ` err=${shell.lastError()}`}`);
       }
 
-      if (msg.t === "ui") {
+      if (msg.t === "ui" && shell) {
         // 页面点按钮，转发到原生窗口操作
         const action = String(msg.action);
         const map: Record<string, () => number> = {
-          minimize: () => symbols.shell_minimize(),
-          maximize: () => symbols.shell_toggle_maximize(),
-          close: () => symbols.shell_close(),
-          drag: () => symbols.shell_drag(),
+          minimize: () => shell!.minimize(),
+          maximize: () => shell!.toggleMaximize(),
+          close: () => shell!.close(),
+          drag: () => shell!.drag(),
         };
         const rc = map[action]?.() ?? -1;
         log(`[host] ui:${action} -> rc=${rc}`);
       }
 
-      if (msg.t === "hittest-probe") {
+      if (msg.t === "hittest-probe" && shell) {
         // 页面侧报告鼠标落在哪、命中码是什么，用于核对边框几何
-        const code = symbols.shell_debug_hittest(msg.x, msg.y);
+        const code = shell.debug.hittest(msg.x, msg.y);
         events.push(`hittest:${msg.label}(${msg.x},${msg.y})=${code}`);
         ws.send(JSON.stringify({ t: "hittest-result", label: msg.label, x: msg.x, y: msg.y, code }));
       }
 
       if (msg.t === "geo") {
         events.push(`geo:${JSON.stringify(msg)}`);
-        log(`[geo] screenX=${msg.screenX} screenY=${msg.screenY} outer=${msg.outerW}x${msg.outerH} inner=${msg.innerW}x${msg.innerH} screen=${msg.screenW}x${msg.screenH} avail=${msg.availW}x${msg.availH} dpr=${msg.dpr}`);
+        log(
+          `[geo] screenX=${msg.screenX} screenY=${msg.screenY} outer=${msg.outerW}x${msg.outerH} ` +
+            `inner=${msg.innerW}x${msg.innerH} screen=${msg.screenW}x${msg.screenH} ` +
+            `avail=${msg.availW}x${msg.availH} dpr=${msg.dpr}`,
+        );
       }
 
       if (msg.t === "win-report") {
@@ -148,75 +150,61 @@ const server = serveOnSafePort({
     close() {
       log("[ws] close");
     },
-  },
+  } as never,
 });
 
 const url = `http://127.0.0.1:${server.port}/?t=${token}`;
 log(`[serve] ${url} (port ${server.port})`);
 
-symbols.shell_set_min_size(480, 320);
-
 const flags = FLAG_FRAMELESS | FLAG_RESIZABLE | FLAG_CENTER | (HOLD ? FLAG_TOPMOST : 0);
-const rc = symbols.shell_start_ex(cstr(url), cstr("WebView Shell"), 1000, 680, flags);
-log(`[host] shell_start_ex(flags=${flags}) -> rc=${rc}${rc === 0 ? "" : ` err=${lastError()}`}`);
-if (rc !== 0) done(1);
 
-function metrics(label: string) {
-  const buf = new Uint8Array(256);
-  const n = symbols.shell_debug_metrics(ptr(buf), buf.length);
-  if (n > 0) {
-    const text = new TextDecoder().decode(buf.subarray(0, n));
-    log(`[metrics] ${label}: ${text}`);
-    events.push(`metrics:${label}=${text}`);
-  }
+try {
+  shell = await openShell({
+    url,
+    title: "WebView Shell",
+    width: 1000,
+    height: 680,
+    flags,
+    minWidth: 480,
+    minHeight: 320,
+  });
+} catch (err) {
+  log(`[host] openShell failed: ${String(err)}`);
+  done(1);
 }
 
-function dpiInfo() {
-  const buf = new Uint8Array(160);
-  const n = symbols.shell_debug_dpi(ptr(buf), buf.length);
-  if (n > 0) {
-    const text = new TextDecoder().decode(buf.subarray(0, n));
-    log(`[dpi] ${text}`);
-    events.push(`dpi:${text}`);
-  }
-}
+if (shell) {
+  const s = shell;
+  log(`[lib] source=${s.libInfo.source} path=${s.libInfo.path}`);
+  log(`[debug] ${s.debug.dpi()}`);
+  events.push(`dpi:${s.debug.dpi()}`);
+  log(`[debug] base=0x${s.debug.selfBase().toString(16)} ${s.debug.selfPath()}`);
 
-function selfInfo() {
-  const base = symbols.shell_self_base();
-  const buf = new Uint8Array(1024);
-  const n = symbols.shell_self_path(ptr(buf), buf.length);
-  const path = n > 0 ? new TextDecoder().decode(buf.subarray(0, n)) : "(empty)";
-  log(`[self] base=0x${base.toString(16)} path="${path}"`);
-  events.push(`self:base=0x${base.toString(16)} path=${path}`);
-}
-
-selfInfo();
-dpiInfo();
-
-// 边框命中几何自检 + 最大化/还原（验证 NCCALCSIZE 的最大化补偿）
-if (!HOLD) {
-  setTimeout(() => {
-    metrics("initial");
-    const st = symbols.shell_get_state();
-    log(`[host] state=${st} max=${!!(st & 1)} min=${!!(st & 2)} focus=${!!(st & 4)}`);
-    log(`[host] toggle_maximize -> rc=${symbols.shell_toggle_maximize()}`);
+  // 边框命中几何自检 + 最大化/还原（验证 NCCALCSIZE 的最大化补偿）
+  if (!HOLD) {
     setTimeout(() => {
-      metrics("maximized");
-      const st2 = symbols.shell_get_state();
-      log(`[host] state after maximize=${st2} max=${!!(st2 & 1)}`);
-      log(`[host] restore -> rc=${symbols.shell_toggle_maximize()}`);
+      log(`[metrics] initial: ${s.debug.metrics()}`);
+      const st = s.state();
+      log(`[host] state max=${st.maximized} min=${st.minimized} focus=${st.focused}`);
+      log(`[host] toggle_maximize -> rc=${s.toggleMaximize()}`);
       setTimeout(() => {
-        metrics("restored");
-        const st3 = symbols.shell_get_state();
-        log(`[host] state after restore=${st3} max=${!!(st3 & 1)}`);
-        done(0);
-      }, 1200);
-    }, 1400);
-  }, 1800);
-} else {
-  log("[host] HOLD 模式：窗口保持 25 秒，供截图");
-  for (const t of [1000, 3000, 8000]) setTimeout(() => metrics(`hold@${t}`), t);
-  setTimeout(() => done(0), 25000);
+        log(`[metrics] maximized: ${s.debug.metrics()}`);
+        log(`[host] state after maximize=${s.state().maximized}`);
+        log(`[host] restore -> rc=${s.toggleMaximize()}`);
+        setTimeout(() => {
+          log(`[metrics] restored: ${s.debug.metrics()}`);
+          log(`[host] state after restore=${s.state().maximized}`);
+          done(0);
+        }, 1200);
+      }, 1400);
+    }, 1800);
+  } else {
+    log("[host] HOLD 模式：窗口保持 25 秒，供截图");
+    for (const t of [1000, 3000, 8000]) {
+      setTimeout(() => log(`[metrics] hold@${t}: ${s.debug.metrics()}`), t);
+    }
+    setTimeout(() => done(0), 25000);
+  }
 }
 
 setTimeout(() => {

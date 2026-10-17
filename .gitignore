@@ -1,13 +1,16 @@
-# 构建与发布产物（可由 native/build.ps1 + native/build-pack.ps1 重建）
-/build/
-/dist/
+# 构建产物：native/build.ps1 与 build-pack.ps1 可重建
+/build/*
+# 发布目录里只有原生库是「必须随包分发」的资产，其余是重建品
+/dist/*.exe
+/dist/*.log
+# 打完包留下的 tarball
+/*.tgz
 
 # 运行日志
 *.log
 
 # Bun / Node
 node_modules/
-bun.lockb
 
 # 临时与编辑器
 *.tmp
