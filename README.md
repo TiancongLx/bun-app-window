@@ -129,6 +129,17 @@ bun run demo       # 自检程序，需要交互式会话
 改 `src/shell/` 或 `package.json` 后，除了两条门禁，还要跑一次「装进外部工程」的冒烟——
 `bun test` 覆盖不到 `files` 清单与 `node_modules` 安装态，详见 `AGENTS.md` 的「依赖包验收」。
 
+## 调试提示
+
+窗口类名按模式不同，用于 `tools/capture-window.ps1 -Class <name>` 或 `EnumWindows` 过滤：
+
+| 模式 | 类名 | 说明 |
+| --- | --- | --- |
+| 带边框（不传 `FLAG_FRAMELESS`） | `webview` | 由 webview 库自建顶层窗口 |
+| 无边框（传 `FLAG_FRAMELESS`） | `webview_shell` | 本项目自建窗口，再以嵌入模式交给 webview |
+
+传错类名会表现为「窗口明明在，却枚举不到」。
+
 ## 许可
 
 MIT。

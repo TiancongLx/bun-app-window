@@ -13,6 +13,10 @@
  * 会在没有 dist/libshell.dll 的场景下让打包失败。
  */
 
+// 消费方的 tsconfig 不 include node_modules，因此包内的 assets.d.ts 不会被自动纳入。
+// 用三斜线引用把 *.dll 的模块声明钉在本文件上，否则消费者 `bun check` 会报 TS2307。
+/// <reference path="./assets.d.ts" />
+
 // 这条 import 的唯一作用是让打包器把 DLL 记为「需要内嵌」
 import dllPath from "../../dist/libshell.dll" with { type: "file" };
 
