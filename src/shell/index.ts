@@ -90,6 +90,33 @@ export type Shell = {
   /** 最近一次失败的原因；无错误时为空串。走拷贝式读出，不受并发写影响 */
   lastError(): string;
 
+  // ---- 应用化 ----
+  /**
+   * 关掉指定的浏览器行为（`BROWSER_UI_*` 按位或）。运行时生效。
+   *
+   * 一般通过 `ShellOptions.browserUi` 声明即可；这个方法用于运行中切换
+   * （例如调试模式临时放开 `Ctrl+F`）。
+   */
+  setBrowserUi(mask: number): number;
+  /**
+   * 在屏幕坐标弹出**原生**上下文菜单。
+   *
+   * 关掉 WebView2 默认右键菜单后，右键就成了「点了没反应」，那也不像原生应用。
+   * 原生应用右键是有菜单的，只是菜单属于应用：
+   *
+   * ```ts
+   * document.addEventListener("contextmenu", (e) => {
+   *   e.preventDefault();
+   *   fetch("/api/menu", { method: "POST", body: JSON.stringify({ x: e.screenX, y: e.screenY }) });
+   * });
+   * ```
+   *
+   * `items` 用行描述，`id|label` 每行一项，单独 `-` 是分隔线：
+   * `"open|打开题库\nrefresh|刷新\n-\nquit|退出"`。
+   * 选中后通过 shell-msg 推回 `{ t: "menu", id: "<id>" }`。
+   */
+  showContextMenu(x: number, y: number, items: string): number;
+
   // ---- 窗口位置 ----
   /**
    * 当前窗口矩形，格式 "x,y,w,h,maximized,dpi"（物理像素）。
@@ -171,6 +198,11 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
       if (started && opts.minWidth && opts.minHeight) {
         symbols.shell_set_min_size(opts.minWidth, opts.minHeight);
       }
+      if (started && opts.browserUi) {
+        // 放在 start 之后：需要 webview 已存在。这些是 UI 行为开关，
+        // 运行时改即时生效，不涉及渲染，不必赶在 navigate 之前。
+        symbols.shell_set_browser_ui(opts.browserUi);
+      }
       return { rc, error: rc === 0 ? "" : lastError() };
     },
 
@@ -211,6 +243,9 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
     isAlive: () => symbols.shell_is_alive() !== 0,
 
     lastError,
+
+    setBrowserUi: (mask) => symbols.shell_set_browser_ui(mask),
+    showContextMenu: (x, y, items) => symbols.shell_show_app_menu(x, y, cstr(items)),
 
     getBounds: () => readBuffer((p, len) => symbols.shell_get_bounds(p, len), 256),
     restoreBounds: (x, y, w, h, savedDpi, maximized) =>

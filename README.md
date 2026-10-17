@@ -102,6 +102,83 @@ window.addEventListener("shell-msg", (e) => {
 提权进程（High 完整性）下资源管理器属 Medium，默认收不到 `WM_DROPFILES`；壳已用
 `ChangeWindowMessageFilterEx` 放行，无需调用方处理。
 
+### 让它像原生应用而不是网页
+
+WebView2 的默认设置是**浏览器**语义。这不是缺陷——对浏览器是对的，对桌面应用
+每一条都是「这是个网页」的破绽。壳提供两件事把它掰回来。
+
+#### 1. 关掉浏览器行为
+
+```ts
+import { openShell, BROWSER_UI_ALL } from "webview-shell";
+
+const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
+```
+
+| 位 | 关掉的东西 | 不关的话 |
+| --- | --- | --- |
+| `BROWSER_UI_MENU` | 默认右键菜单 | 右键出现「重新加载 / 检查 / 另存为 / 打印 / 翻译成中文 / Web 捕获」 |
+| `BROWSER_UI_KEYS` | 浏览器快捷键 | `Ctrl+P` 打印网页、`Ctrl+F` 查找、`Ctrl+S` 保存网页 |
+| `BROWSER_UI_STATUSBAR` | 悬停状态栏 | 鼠标划过任何元素左下角跳出链接地址 |
+| `BROWSER_UI_SWIPE` | 触控板滑动导航 | 横滑会前进/后退，整页被替换 |
+| `BROWSER_UI_AUTOFILL` | 表单自动填充 | 输入框弹出历史值下拉、密码保存提示 |
+
+运行中也可切换：`shell.setBrowserUi(mask)`。
+
+`F11` 全屏、`F12` 开发者工具、`Ctrl±` 缩放不受这项影响——它们由壳自己处理，
+不是 WebView2 的浏览器快捷键。
+
+#### 2. 用原生菜单替掉默认右键菜单
+
+关掉默认菜单后右键就成了「点了没反应」，那也不像原生应用。原生应用的右键是有
+菜单的，只是菜单属于应用：
+
+```ts
+// 页面
+document.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  fetch("/api/menu", {
+    method: "POST",
+    body: JSON.stringify({
+      x: Math.round(e.screenX),
+      y: Math.round(e.screenY),
+      items: "open|打开题库\nrefresh|刷新\n-\nquit|退出",
+    }),
+  });
+});
+
+window.addEventListener("shell-msg", (e) => {
+  if (e.detail.t === "menu") console.log("选中", e.detail.id);
+});
+```
+
+菜单本身是 Win32 的 `TrackPopupMenu`：跟随系统主题、支持键盘导航、带阴影、
+贴边自动翻向。`items` 用行描述，`id|label` 每行一项，单独 `-` 是分隔线。
+
+壳不做 JSON 解析——只切分字符串，所以页面不必担心跨进程传结构的兼容性。
+
+#### 3. 页面侧还剩三件事
+
+壳管不到 DOM，这三条要应用自己做：
+
+```css
+/* 光标：网页默认 I 形，桌面应用是箭头 */
+html, body { cursor: default; }
+/* 选择：整块文字可拖选是网页特征；输入区与日志要留出选择能力 */
+body { user-select: none; }
+input, textarea, .log { user-select: text; cursor: auto; }
+/* 焦点环：鼠标点进来不该出现，Tab 过来才该有 */
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+```
+
+输入框还要关掉拼写检查与自动填充：
+
+```html
+<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off">
+```
+
+拼写检查会给路径与数值标红波浪线——这是最容易被忽略、也最能暴露「这是网页」的一条。
+
 ### 窗口位置持久化（独立入口）
 
 库主体有一条硬约束：`index.ts` 不引入副作用。持久化按定义就是副作用，所以它是

@@ -31,6 +31,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "webview/webview.h"
 
@@ -71,7 +72,7 @@ enum ShellEdge : int {
   SHELL_EDGE_BOTTOMRIGHT = 7,
 };
 
-enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize, show, zoom, reload, devtools, fullscreen, restore_bounds };
+enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize, show, zoom, reload, devtools, fullscreen, restore_bounds, browser_ui, app_menu };
 
 struct cmd {
   cmd_kind kind;
@@ -260,6 +261,103 @@ void apply_default_background(webview_t w, bool dark) {
   }
   ctrl2->put_DefaultBackgroundColor(color);
   ctrl2->Release();
+}
+
+// ---- WebView2 的「浏览器 vs 应用」设置 ----
+
+// WebView2 的默认设置是**浏览器**语义：右键是 Edge 菜单、Ctrl+P 打印网页、
+// 左下角跳状态栏、触控板横滑会前进后退、表单有自动填充与密码提示。
+// 这些在浏览器里都对，在桌面应用里每一条都是「这是个网页」的破绽。
+//
+// 位定义与 TS 侧 `BROWSER_UI_*` 逐位一致，不要单独改。
+enum ShellBrowserUi : int {
+  SHELL_BROWSER_MENU = 1,       // 默认右键菜单（重新加载 / 检查 / 另存为 / 翻译…）
+  SHELL_BROWSER_KEYS = 2,       // 浏览器快捷键（Ctrl+P 打印、Ctrl+F 查找、Ctrl+S 保存…）
+  SHELL_BROWSER_STATUSBAR = 4,  // 悬停时左下角的链接状态栏
+  SHELL_BROWSER_SWIPE = 8,      // 触控板横滑导航
+  SHELL_BROWSER_AUTOFILL = 16,  // 表单自动填充与密码保存提示
+};
+
+// 各 Settings 接口的 IID（MinGW 无 IID 符号库，按本仓约定用字面量）。
+// 它们是链式继承（Settings5 : Settings4 : Settings3 : Settings2 : Settings），
+// 所以 QueryInterface 到最高版本即可访问全部属性。
+static const GUID kIIDSettings = {
+    0xe562e4f0, 0xd7fa, 0x43ac, {0x8d, 0x71, 0xc0, 0x51, 0x50, 0x49, 0x9f, 0x00}};
+static const GUID kIIDSettings3 = {
+    0xfdb5ab74, 0xaf33, 0x4854, {0x84, 0xf0, 0x0a, 0x63, 0x1d, 0xeb, 0x5e, 0xba}};
+static const GUID kIIDSettings4 = {
+    0xcb56846c, 0x4168, 0x4d53, {0xb0, 0x4f, 0x03, 0xb6, 0xd6, 0x79, 0x6f, 0xf2}};
+static const GUID kIIDSettings5 = {
+    0x183e7052, 0x1d03, 0x43a0, {0xab, 0x99, 0x98, 0xe0, 0x43, 0xb6, 0x6b, 0x39}};
+// IsSwipeNavigationEnabled 在 Settings6（实测：头文件 21168 行），不在 Settings5
+static const GUID kIIDSettings6 = {
+    0x11cb3acd, 0x9bc8, 0x43b8, {0x83, 0xbf, 0xf4, 0x07, 0x53, 0x71, 0x4f, 0x87}};
+
+// 逐项关闭 mask 里的浏览器行为。
+//
+// 每一项都单独判 SUCCEEDED：老版本 WebView2 Runtime 可能没有 Settings4/5，
+// 那时对应的 IF 会失败，但前面的项已经生效——不能因为一个失败就整体放弃。
+void apply_browser_ui(webview_t w, int mask) {
+  if (!w || mask == 0) {
+    return;
+  }
+  auto *ctrl = static_cast<ICoreWebView2Controller *>(
+      webview_get_native_handle(w, WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER));
+  if (!ctrl) {
+    return;
+  }
+  ICoreWebView2 *core = nullptr;
+  if (FAILED(ctrl->get_CoreWebView2(&core)) || !core) {
+    return;
+  }
+  ICoreWebView2Settings *s1 = nullptr;
+  if (FAILED(core->get_Settings(&s1)) || !s1) {
+    core->Release();
+    return;
+  }
+
+  // ---- Settings（基线版本）----
+  if (mask & (SHELL_BROWSER_MENU | SHELL_BROWSER_STATUSBAR)) {
+    if (mask & SHELL_BROWSER_MENU) {
+      s1->put_AreDefaultContextMenusEnabled(FALSE);
+    }
+    if (mask & SHELL_BROWSER_STATUSBAR) {
+      s1->put_IsStatusBarEnabled(FALSE);
+    }
+  }
+
+  // ---- Settings3：浏览器快捷键 ----
+  if (mask & SHELL_BROWSER_KEYS) {
+    ICoreWebView2Settings3 *s3 = nullptr;
+    if (SUCCEEDED(s1->QueryInterface(kIIDSettings3, reinterpret_cast<void **>(&s3))) && s3) {
+      s3->put_AreBrowserAcceleratorKeysEnabled(FALSE);
+      s3->Release();
+    }
+  }
+
+  // ---- Settings4：自动填充与密码保存 ----
+  if (mask & SHELL_BROWSER_AUTOFILL) {
+    ICoreWebView2Settings4 *s4 = nullptr;
+    if (SUCCEEDED(s1->QueryInterface(kIIDSettings4, reinterpret_cast<void **>(&s4))) && s4) {
+      s4->put_IsGeneralAutofillEnabled(FALSE);
+      s4->put_IsPasswordAutosaveEnabled(FALSE);
+      s4->Release();
+    }
+  }
+
+  // ---- Settings6：滑动导航 ----
+  if (mask & SHELL_BROWSER_SWIPE) {
+    ICoreWebView2Settings6 *s6 = nullptr;
+    if (SUCCEEDED(s1->QueryInterface(kIIDSettings6, reinterpret_cast<void **>(&s6))) && s6) {
+      s6->put_IsSwipeNavigationEnabled(FALSE);
+      s6->Release();
+    }
+  }
+
+  (void)kIIDSettings;   // 基接口走 get_Settings，保留字面量供文档对照
+  (void)kIIDSettings5;  // Settings5 无本项目所需属性，保留以便将来扩展
+  s1->Release();
+  core->Release();
 }
 
 // 右键标题栏 / Alt+Space 的系统菜单。原生窗口靠它给出还原、移动、大小、关闭；
@@ -476,6 +574,114 @@ void show_now() {
   UpdateWindow(g_hwnd);
   push_state();
 }
+
+// ---- 原生上下文菜单 ----
+//
+// 关掉 WebView2 的默认右键菜单之后，右键就成了「点了没反应」——那也不像原生应用。
+// 原生桌面应用右键是有菜单的，只是菜单属于应用而非浏览器。
+//
+// 这里由页面定义菜单项，壳负责用 TrackPopupMenu 弹出系统菜单（真正的 Win32 菜单，
+// 跟随系统主题、支持键盘导航、带阴影）。选中结果通过 shell-msg 推回页面：
+//   { t: "menu", id: "<选中的 id>" }
+//
+// 菜单项格式（页面侧构造，壳只做切分，不做 JSON 解析）：
+//   "open|打开题库\nrefresh|刷新\n-\nquit|退出"
+//   每行 `id|label`，单独的 `-` 表示分隔线。
+
+struct MenuItem {
+  std::string id;
+  std::wstring label;
+  bool separator;
+};
+
+std::wstring widen_utf8(const std::string &s) {
+  if (s.empty()) return std::wstring();
+  const int need = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+  if (need <= 1) return std::wstring();
+  std::wstring out(static_cast<size_t>(need - 1), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &out[0], need);
+  return out;
+}
+
+// 解析菜单描述。空行忽略；`-` 是分隔线。
+std::vector<MenuItem> parse_menu(const std::string &spec) {
+  std::vector<MenuItem> out;
+  size_t start = 0;
+  while (start <= spec.size()) {
+    const size_t nl = spec.find('\n', start);
+    const std::string line =
+        spec.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+    if (!line.empty()) {
+      if (line == "-") {
+        out.push_back(MenuItem{"", L"", true});
+      } else {
+        const size_t bar = line.find('|');
+        if (bar != std::string::npos && bar > 0 && bar + 1 < line.size()) {
+          out.push_back(MenuItem{line.substr(0, bar), widen_utf8(line.substr(bar + 1)), false});
+        }
+      }
+    }
+    if (nl == std::string::npos) break;
+    start = nl + 1;
+  }
+  return out;
+}
+
+// 弹出原生菜单并把选中项推回页面。仅 UI 线程调用。
+//
+// 为什么不在返回值里给结果：菜单是模态的，选中前拿不到结果；而跨线程同步返回
+// 又要多一套等待机制。推回 shell-msg 与既有的消息通道同构，页面侧处理起来更自然。
+void show_app_menu(HWND hwnd, POINT screen_pt, const std::string &spec) {
+  const std::vector<MenuItem> items = parse_menu(spec);
+  if (items.empty() || !hwnd) {
+    return;
+  }
+
+  HMENU menu = CreatePopupMenu();
+  if (!menu) {
+    return;
+  }
+
+  // 菜单项 id 从 1 开始（0 在 TrackPopupMenu 里表示「没选」）
+  std::vector<std::string> ids(items.size());
+  int next_id = 1;
+  for (size_t i = 0; i < items.size(); ++i) {
+    const MenuItem &it = items[i];
+    if (it.separator) {
+      AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+      continue;
+    }
+    ids[static_cast<size_t>(next_id - 1)] = it.id;
+    AppendMenuW(menu, MF_STRING, static_cast<UINT_PTR>(next_id), it.label.c_str());
+    ++next_id;
+  }
+
+  SetForegroundWindow(hwnd);
+  const UINT cmd = static_cast<UINT>(TrackPopupMenu(
+      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, screen_pt.x, screen_pt.y, 0, hwnd,
+      nullptr));
+  DestroyMenu(menu);
+
+  // TPM_NONOTIFY 下必须补这一条，否则菜单关掉后窗口收不到激活，
+  // 表现为「菜单没了但窗口半死」——点哪都不响应，直到 Alt+Tab 切走再回来。
+  PostMessageW(hwnd, WM_NULL, 0, 0);
+
+  if (cmd == 0 || cmd > ids.size()) {
+    return;
+  }
+  const std::string &picked = ids[cmd - 1];
+  if (picked.empty()) {
+    return;
+  }
+  std::string json = "{\"t\":\"menu\",\"id\":\"";
+  for (char ch : picked) {
+    if (ch == '\\' || ch == '"') json.push_back('\\');
+    json.push_back(ch);
+  }
+  json += "\"}";
+  post_json(json);
+}
+
 
 // ---- 缩放 / 全屏 / 刷新 / 开发者工具 / 拖放 ----
 
@@ -1180,7 +1386,10 @@ void drain(webview_t /*w*/, void * /*arg*/) {
       if (g_webview) webview_eval(g_webview, c.arg.c_str());
       break;
     case cmd_kind::title:
-      SetWindowTextW(g_hwnd, std::wstring(c.arg.begin(), c.arg.end()).c_str());
+      // 必须做 UTF-8 → UTF-16 解码：std::wstring(arg.begin(), arg.end()) 会把每个
+      // UTF-8 字节当成一个 wchar_t，中文标题直接变乱码（实测：「围棋习题册生成器」
+      // 被显示成「￥ﾛﾴ￦ﾣﾋ…」）。widen_utf8 见原生上下文菜单那一节。
+      SetWindowTextW(g_hwnd, widen_utf8(c.arg).c_str());
       break;
     case cmd_kind::minimize:
       ShowWindow(g_hwnd, SW_MINIMIZE);
@@ -1222,6 +1431,24 @@ void drain(webview_t /*w*/, void * /*arg*/) {
     case cmd_kind::fullscreen:
       toggle_fullscreen();
       break;
+    case cmd_kind::browser_ui:
+      apply_browser_ui(g_webview, std::atoi(c.arg.c_str()));
+      break;
+    case cmd_kind::app_menu: {
+      // 参数格式 "x,y|menu-spec"：屏幕坐标 + 菜单描述
+      const size_t bar = c.arg.find('|');
+      if (bar != std::string::npos) {
+        const std::string coord = c.arg.substr(0, bar);
+        const std::string spec = c.arg.substr(bar + 1);
+        int mx = 0;
+        int my = 0;
+        if (sscanf(coord.c_str(), "%d,%d", &mx, &my) == 2) {
+          POINT pt{mx, my};
+          show_app_menu(g_hwnd, pt, spec);
+        }
+      }
+      break;
+    }
     case cmd_kind::restore_bounds: {
       int bx = 0, by = 0, bw = 0, bh = 0, bdpi = 0, bmax = 0;
       // 纯整数解析：与 format_bounds 的输出格式成对
@@ -1325,7 +1552,9 @@ DWORD WINAPI ui_thread(LPVOID param) {
     }
   }
 
-  const std::wstring wtitle(g_title.begin(), g_title.end());
+  // 必须做 UTF-8 → UTF-16 解码（同 drain 里的 title 分支）：
+  // 无边框模式用它创建窗口标题，直接窄转宽会把中文变成乱码。
+  const std::wstring wtitle = widen_utf8(g_title);
 
   if (g_frameless) {
     g_hwnd = create_own_window(g_start_w, g_start_h, wtitle.c_str());
@@ -1579,6 +1808,28 @@ __declspec(dllexport) int shell_show(void) {
   if (!g_webview) return -1;
   if (g_shown) return 0;
   enqueue(cmd_kind::show);
+  return 0;
+}
+
+// 在屏幕坐标 (x, y) 弹出原生上下文菜单。items 是页面定义的描述串：
+//   "open|打开题库\nrefresh|刷新\n-\nquit|退出"
+// 选中后通过 shell-msg 推回 { t: "menu", id: "<id>" }。
+__declspec(dllexport) int shell_show_app_menu(int x, int y, const char *items) {
+  if (!g_webview || !items || !*items) return -1;
+  char head[40];
+  wsprintfA(head, "%d,%d|", x, y);
+  enqueue(cmd_kind::app_menu, std::string(head) + items);
+  return 0;
+}
+
+// 关闭 mask 里指定的浏览器行为（右键默认菜单 / 浏览器快捷键 / 状态栏 /
+// 滑动导航 / 自动填充）。位定义见 ShellBrowserUi。
+// 运行时生效；建议在 start() 之后立即调用。
+__declspec(dllexport) int shell_set_browser_ui(int mask) {
+  if (!g_webview) return -1;
+  char buf[16];
+  wsprintfA(buf, "%d", mask);
+  enqueue(cmd_kind::browser_ui, std::string(buf));
   return 0;
 }
 

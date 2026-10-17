@@ -33,6 +33,23 @@ export const FLAG_DEFER_SHOW = 16;
  */
 export const FLAG_ACCEPT_DROP = 32;
 
+/**
+ * 关闭 WebView2 的浏览器行为（`ShellOptions.browserUi` 使用）。
+ *
+ * WebView2 默认是**浏览器**语义：右键弹 Edge 菜单、Ctrl+P 打印网页、左下角跳状态栏、
+ * 触控板横滑前进后退、表单自动填充。这些在浏览器里都对，在桌面应用里每一条都是
+ * 「这是个网页」的破绽。位定义与原生 `ShellBrowserUi` 逐位一致。
+ */
+export const BROWSER_UI_MENU = 1;
+export const BROWSER_UI_KEYS = 2;
+export const BROWSER_UI_STATUSBAR = 4;
+export const BROWSER_UI_SWIPE = 8;
+export const BROWSER_UI_AUTOFILL = 16;
+
+/** 一次性关掉全部浏览器行为。桌面应用通常要这个。 */
+export const BROWSER_UI_ALL =
+    BROWSER_UI_MENU | BROWSER_UI_KEYS | BROWSER_UI_STATUSBAR | BROWSER_UI_SWIPE | BROWSER_UI_AUTOFILL;
+
 /** 缩放边框的 8 个命中边，取值与 Win32 HT* 常量一致 */
 export const RESIZE_EDGE = {
   LEFT: 10,
@@ -99,6 +116,14 @@ export type ShellOptions = {
    * 同一机器上多个应用共用一个包时应各自指定，避免互相清理 DLL 副本。
    */
   appName?: string;
+  /**
+   * 关闭哪些浏览器行为，取 `BROWSER_UI_*` 的按位或。缺省 0（保持 WebView2 默认）。
+   *
+   * 桌面应用一般传 `BROWSER_UI_ALL`：关掉右键 Edge 菜单、`Ctrl+P`/`Ctrl+F`/`Ctrl+S`、
+   * 左下角状态栏、触控板滑动导航与表单自动填充。关掉默认右键菜单后若要右键有反应，
+   * 用 `showContextMenu()` 弹原生菜单。
+   */
+  browserUi?: number;
   /**
    * 编译产物内嵌字节的提供者。
    * 使用 `bun build --compile` 时传入 `embeddedDll`（见 `webview-shell/embedded`）。
