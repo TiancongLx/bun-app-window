@@ -21,6 +21,7 @@
  */
 
 import { cstr, openNativeLib, readBuffer, readCStr } from "./native";
+import { ptr } from "bun:ffi";
 import type { NativeSymbols } from "./native";
 import { resolveNativeLib } from "./resolve";
 import {
@@ -66,6 +67,17 @@ export type Shell = {
    * 只在 `start()` 之前调用才对本窗口生效。
    */
   setAppId(appId: string): number;
+  /**
+   * 弹出系统文件夹选择框，返回选中路径；用户取消返回 null。
+   *
+   * 直接调 shell32，不起子进程、不落临时脚本——比「spawn powershell 跑 WinForms」
+   * 快一个数量级，也不受执行策略限制。
+   *
+   * **同步阻塞**：SHBrowseForFolder 自带模态循环，调用期间调用线程被占住
+   * （实测：Bun 主线程上的定时器在此期间不会触发）。同理，被阻塞的调用链
+   * 无法取消或超时。需要并发时把它放到 Worker 里调用。
+   */
+  pickFolder(title?: string): string | null;
   state(): WindowState;
   /** 最近一次失败的原因；无错误时为空串 */
   lastError(): string;
@@ -137,6 +149,18 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
     setMinSize: (w, h) => symbols.shell_set_min_size(w, h),
     show: () => symbols.shell_show(),
     setAppId: (appId) => symbols.shell_set_app_id(cstr(appId)),
+
+    pickFolder(title?: string): string | null {
+      const buf = new Uint8Array(4096);
+      const rc = symbols.shell_pick_folder(
+        cstr(title ?? "选择文件夹"),
+        ptr(buf),
+        buf.length,
+      );
+      if (rc !== 0) return null; // 1 = 取消，-1 = 失败
+      const end = buf.indexOf(0);
+      return new TextDecoder().decode(buf.subarray(0, end < 0 ? buf.length : end));
+    },
 
     state(): WindowState {
       const raw = symbols.shell_get_state();

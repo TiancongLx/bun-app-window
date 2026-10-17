@@ -21,6 +21,9 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <dwmapi.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <shlwapi.h>
 
 #include <cstdlib>
 #include <deque>
@@ -884,6 +887,48 @@ __declspec(dllexport) int shell_set_app_id(const char *app_id) {
   g_app_id.assign(static_cast<size_t>(need - 1), L'\0');
   MultiByteToWideChar(CP_UTF8, 0, app_id, -1, &g_app_id[0], need);
   apply_app_user_model_id();
+  return 0;
+}
+
+// 系统文件夹选择框。替代「每次 spawn 一个 powershell.exe 跑 WinForms」的做法：
+// 直接调 shell32，无子进程、无脚本落盘、无 STA 依赖外部进程。
+// 返回 0 表示用户选中并把路径写入 buf；1 表示取消；-1 表示失败。
+__declspec(dllexport) int shell_pick_folder(const char *title, char *buf, int cap) {
+  if (!buf || cap <= 0) return -1;
+  buf[0] = 0;
+
+  // SHBrowseForFolder 需要 COM 已初始化；重复初始化返回 S_FALSE 也无害
+  const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+  wchar_t wtitle[256] = L"选择文件夹";
+  if (title && *title) {
+    MultiByteToWideChar(CP_UTF8, 0, title, -1, wtitle, 256);
+  }
+
+  BROWSEINFOW bi{};
+  bi.lpszTitle = wtitle;
+  bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
+
+  PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+  if (!pidl) {
+    if (SUCCEEDED(hr)) CoUninitialize();
+    return 1;  // 用户取消
+  }
+
+  wchar_t wpath[MAX_PATH] = {0};
+  const BOOL ok = SHGetPathFromIDListW(pidl, wpath);
+  CoTaskMemFree(pidl);
+  if (SUCCEEDED(hr)) CoUninitialize();
+
+  if (!ok) {
+    set_err("SHGetPathFromIDList failed");
+    return -1;
+  }
+  const int need = WideCharToMultiByte(CP_UTF8, 0, wpath, -1, buf, cap, nullptr, nullptr);
+  if (need <= 0) {
+    set_err("folder path too long");
+    return -1;
+  }
   return 0;
 }
 
