@@ -53,6 +53,13 @@ enum ShellFlag : int {
   SHELL_FLAG_DEFER_SHOW = 16,
   // 接受文件/文件夹拖放，落下的路径以 shell-msg 的 {t:'drop',paths:[...]} 推给页面。
   SHELL_FLAG_ACCEPT_DROP = 32,
+  // 首次显示时直接以最大化出现。
+  //
+  // 为什么不「先 show 再 maximize」：那会有一次「小窗闪一下再撑满」的跳变，
+  // 交付观感很差。这里把最大化合成到 show_now() 的那一次 ShowWindow，
+  // 窗口从隐藏直接变成最大化，中间没有任何可见帧。
+  // 与 FLAG_CENTER 同时给时以本项为准——最大化会覆盖位置。
+  SHELL_FLAG_START_MAXIMIZED = 64,
 };
 
 enum ShellState : int {
@@ -92,6 +99,7 @@ std::atomic<int> g_round_state{-1};  // 圆角状态缓存：-1 未知 / 0 直�
 bool g_resizable = true;
 bool g_defer_show = false;    // 延迟显示：等 shell_show() 再 ShowWindow
 bool g_accept_drop = false;   // 接受文件拖放
+bool g_start_maximized = false;  // 首次显示即以最大化出现
 std::wstring g_app_id;        // AppUserModelID：决定任务栏分组与图标归属
 int g_min_w = 320;
 int g_min_h = 200;
@@ -567,12 +575,17 @@ void apply_round_corners(HWND hwnd, bool round) {
 // 用起来像「卡住了」）。SetForegroundWindow 可能因本机策略失败，属尽力而为。
 void show_now() {
   if (!g_hwnd) return;
+  // 先置 g_shown：之后的 WM_DPICHANGED 才允许跟随建议矩形，
+  // 也让 toplevel_proc 的 WM_SHOWWINDOW 拦截放行。
   g_shown = true;
-  ShowWindow(g_hwnd, SW_SHOW);
+  // 最大化也走这一次 ShowWindow：窗口从隐藏直接变成最大化，
+  // 没有「先小窗再撑满」的中间帧。
+  ShowWindow(g_hwnd, g_start_maximized ? SW_SHOWMAXIMIZED : SW_SHOW);
   SetForegroundWindow(g_hwnd);
   SetFocus(g_hwnd);
   UpdateWindow(g_hwnd);
-  push_state();
+  fit_widget();
+  push_state(true);
 }
 
 // ---- 原生上下文菜单 ----
@@ -1536,6 +1549,7 @@ DWORD WINAPI ui_thread(LPVOID param) {
   g_resizable = (flags & SHELL_FLAG_RESIZABLE) != 0;
   g_defer_show = (flags & SHELL_FLAG_DEFER_SHOW) != 0;
   g_accept_drop = (flags & SHELL_FLAG_ACCEPT_DROP) != 0;
+  g_start_maximized = (flags & SHELL_FLAG_START_MAXIMIZED) != 0;
 
   // 任务栏归属必须在窗口创建前设定
   apply_app_user_model_id();
@@ -1710,6 +1724,7 @@ __declspec(dllexport) int shell_start_ex(const char *url, const char *title,
   g_frameless = (flags & SHELL_FLAG_FRAMELESS) != 0;
   g_resizable = (flags & SHELL_FLAG_RESIZABLE) != 0;
   g_accept_drop = (flags & SHELL_FLAG_ACCEPT_DROP) != 0;
+  g_start_maximized = (flags & SHELL_FLAG_START_MAXIMIZED) != 0;
   clear_err();
 
   g_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -1926,6 +1941,22 @@ __declspec(dllexport) int shell_pick_folder(const char *title, char *buf, int ca
   }
 
   BROWSEINFOW bi{};
+  // hwndOwner 必须给：没有 owner 的对话框不模态于应用窗口，z 序上也压不住
+  // 应用窗口——表现为「点了选择，对话框跑到窗口下面去了，看着像没反应」。
+  // 给了 owner 之后它是该窗口的模态子级，必然在其之上，且打开期间应用窗口不可操作。
+  //
+  // 取 hwnd 时短暂持生命周期锁，但**不能**在 SHBrowseForFolder 阻塞期间持锁：
+  // 那会挡住 teardown。所以只锁住「读值」这一步，再用 IsWindow 复核一次，
+  // 防止读到的窗口在解锁后已被销毁（无效 owner 会退化为无 owner，不会崩）。
+  HWND owner = nullptr;
+  {
+    std::lock_guard<std::mutex> life(g_life_mu);
+    owner = g_hwnd;
+  }
+  if (owner && !IsWindow(owner)) {
+    owner = nullptr;
+  }
+  bi.hwndOwner = owner;
   bi.lpszTitle = wtitle;
   bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
 

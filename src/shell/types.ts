@@ -32,6 +32,16 @@ export const FLAG_DEFER_SHOW = 16;
  * 处理；否则资源管理器拖过来的消息会被静默拦掉。
  */
 export const FLAG_ACCEPT_DROP = 32;
+/**
+ * 首次显示时直接以最大化出现。
+ *
+ * 不要用「先 show() 再 toggleMaximize()」代替：那会有一次「小窗闪一下再撑满」
+ * 的跳变。本项把最大化合成到显示的那一次 `ShowWindow`，窗口从隐藏直接变成
+ * 最大化，中间没有可见帧。
+ *
+ * 与 `FLAG_CENTER` 同时给时以本项为准（最大化会覆盖位置）。
+ */
+export const FLAG_START_MAXIMIZED = 64;
 
 /**
  * 关闭 WebView2 的浏览器行为（`ShellOptions.browserUi` 使用）。

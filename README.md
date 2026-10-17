@@ -69,7 +69,11 @@ shell.setTitle("Doing work…");
 | `symbols` | 逃生舱：直接拿 dlopen 出来的符号 |
 
 标志位（按位或）：`FLAG_FRAMELESS`、`FLAG_TOPMOST`、`FLAG_CENTER`、`FLAG_RESIZABLE`、
-`FLAG_DEFER_SHOW`、`FLAG_ACCEPT_DROP`。
+`FLAG_DEFER_SHOW`、`FLAG_ACCEPT_DROP`、`FLAG_START_MAXIMIZED`。
+
+`FLAG_START_MAXIMIZED` 让窗口第一次出现就是最大化。不要用「`show()` 之后再
+`toggleMaximize()`」代替——那会先闪一个小窗再撑满。与 `FLAG_CENTER` 同时给时
+以最大化为准（它会覆盖位置）。
 
 ### 内置的键盘与鼠标行为
 
