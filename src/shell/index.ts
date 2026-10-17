@@ -56,6 +56,16 @@ export type Shell = {
   beginResize(edge: number): number;
   /** 最小尺寸，逻辑像素 */
   setMinSize(width: number, height: number): void;
+  /**
+   * 显示窗口。配合 `FLAG_DEFER_SHOW` 使用：页面就绪后再调用，消除首帧闪烁。
+   * 未启用延迟显示时是幂等 no-op。
+   */
+  show(): number;
+  /**
+   * 设置 AppUserModelID（任务栏分组与图标归属）。
+   * 只在 `start()` 之前调用才对本窗口生效。
+   */
+  setAppId(appId: string): number;
   state(): WindowState;
   /** 最近一次失败的原因；无错误时为空串 */
   lastError(): string;
@@ -125,6 +135,8 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
     drag: () => symbols.shell_drag(),
     beginResize: (edge) => symbols.shell_begin_resize(edge),
     setMinSize: (w, h) => symbols.shell_set_min_size(w, h),
+    show: () => symbols.shell_show(),
+    setAppId: (appId) => symbols.shell_set_app_id(cstr(appId)),
 
     state(): WindowState {
       const raw = symbols.shell_get_state();
@@ -133,6 +145,7 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
         maximized: (raw & STATE_MAXIMIZED) !== 0,
         minimized: (raw & STATE_MINIMIZED) !== 0,
         focused: (raw & STATE_FOCUSED) !== 0,
+        dark: symbols.shell_is_dark() !== 0,
       };
     },
 

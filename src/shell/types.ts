@@ -13,6 +13,11 @@ export const FLAG_TOPMOST = 2;
 export const FLAG_CENTER = 4;
 /** 可缩放（配合无边框时，边框拖拽区由 shell_begin_resize 提供） */
 export const FLAG_RESIZABLE = 8;
+/**
+ * 创建后先不显示，等调用方确认页面就绪再 `shell.show()`。
+ * 用于消除「空窗口先出现、内容后填上」的首帧闪烁。
+ */
+export const FLAG_DEFER_SHOW = 16;
 
 /** 缩放边框的 8 个命中边，取值与 Win32 HT* 常量一致 */
 export const RESIZE_EDGE = {
@@ -38,6 +43,8 @@ export type WindowState = {
   maximized: boolean;
   minimized: boolean;
   focused: boolean;
+  /** 系统当前是否深色（原生侧读 AppsUseLightTheme，并随 WM_SETTINGCHANGE 刷新） */
+  dark: boolean;
 };
 
 /** 原生库的解析结果 */

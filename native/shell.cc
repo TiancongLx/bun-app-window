@@ -37,6 +37,9 @@ enum ShellFlag : int {
   SHELL_FLAG_TOPMOST = 2,
   SHELL_FLAG_CENTER = 4,
   SHELL_FLAG_RESIZABLE = 8,
+  // 创建后先不显示，等调用方确认页面就绪再 shell_show()。
+  // 用于消除「空窗口先出现、内容后填上」的首帧闪烁。
+  SHELL_FLAG_DEFER_SHOW = 16,
 };
 
 enum ShellState : int {
@@ -56,7 +59,7 @@ enum ShellEdge : int {
   SHELL_EDGE_BOTTOMRIGHT = 7,
 };
 
-enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize };
+enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize, show };
 
 struct cmd {
   cmd_kind kind;
@@ -67,12 +70,15 @@ webview_t g_webview = nullptr;
 HWND g_hwnd = nullptr;        // 顶层窗口（自有或 webview 创建）
 HWND g_widget = nullptr;      // WebView2 容器子窗口
 WNDPROC g_widget_orig = nullptr;
+WNDPROC g_toplevel_orig = nullptr;  // 仅带边框模式：webview 自建窗口的子类化
 HANDLE g_ready = nullptr;
 
 bool g_frameless = false;
 bool g_shown = false;         // 是否已完成首次显示（用于忽略创建期的 WM_DPICHANGED 建议矩形）
 int g_round_state = -1;       // 圆角状态缓存：-1 未知 / 0 直角 / 1 圆角
 bool g_resizable = true;
+bool g_defer_show = false;    // 延迟显示：等 shell_show() 再 ShowWindow
+std::wstring g_app_id;        // AppUserModelID：决定任务栏分组与图标归属
 int g_min_w = 320;
 int g_min_h = 200;
 int g_start_w = 1200;
@@ -87,6 +93,107 @@ char g_err[1024] = {0};
 
 void set_err(const char *msg) {
   lstrcpynA(g_err, msg ? msg : "", static_cast<int>(sizeof(g_err)));
+}
+
+// ---- 外观与系统集成辅助 ----
+
+// 从宿主 exe 的资源里取图标。
+// Bun 的 --windows-icon 会把 ICO 的每个尺寸各写成一个 RT_GROUP_ICON 条目，
+// 编号不保证从 1 开始，因此这里枚举第一个可用的图标组，而不是猜测 ID。
+HICON load_exe_icon(int cx, int cy) {
+  HINSTANCE inst = GetModuleHandleW(nullptr);
+  const int w = cx > 0 ? cx : GetSystemMetrics(SM_CXICON);
+  const int h = cy > 0 ? cy : GetSystemMetrics(SM_CYICON);
+
+  HICON icon = static_cast<HICON>(LoadImageW(inst, IDI_APPLICATION, IMAGE_ICON, w, h,
+                                             LR_SHARED));
+
+  // 枚举本模块的图标组资源，取第一个能加载成功的
+  struct Ctx {
+    HINSTANCE inst;
+    int w, h;
+    HICON out;
+  } ctx{inst, w, h, nullptr};
+
+  EnumResourceNamesW(
+      inst, RT_GROUP_ICON,
+      [](HMODULE, LPCWSTR, LPWSTR name, LONG_PTR lp) -> BOOL {
+        auto *c = reinterpret_cast<Ctx *>(lp);
+        HICON ic =
+            static_cast<HICON>(LoadImageW(c->inst, name, IMAGE_ICON, c->w, c->h, 0));
+        if (ic) {
+          c->out = ic;
+          return FALSE;  // 找到即停
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LONG_PTR>(&ctx));
+
+  if (ctx.out) icon = ctx.out;
+  return icon;
+}
+
+// exe 里嵌了图标，但窗口不会自动继承；不显式设置的话任务栏/Alt-Tab/标题栏
+// 全是系统默认图标。大图标给 Alt-Tab 与任务栏，小图标给标题栏与 Alt-Tab 缩略。
+void apply_window_icons(HWND hwnd) {
+  if (!hwnd) return;
+  HICON big = load_exe_icon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+  HICON small =
+      load_exe_icon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+  if (big) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
+  if (small) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
+}
+
+// 任务栏分组按 AppUserModelID 归属。不设的话窗口会被归到承载进程（bun.exe）名下，
+// 图标与跳转列表都跟着错。必须在窗口创建前调用。
+void apply_app_user_model_id() {
+  if (g_app_id.empty()) return;
+  using SetFn = HRESULT(WINAPI *)(PCWSTR);
+  auto fn = reinterpret_cast<SetFn>(GetProcAddress(
+      GetModuleHandleW(L"shell32.dll"), "SetCurrentProcessExplicitAppUserModelID"));
+  if (fn) fn(g_app_id.c_str());
+}
+
+// AppsUseLightTheme: 0 = 深色，1 = 浅色。缺省按浅色处理。
+bool system_uses_dark() {
+  DWORD value = 1;
+  DWORD size = sizeof(value);
+  const LONG rc = RegGetValueW(
+      HKEY_CURRENT_USER,
+      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+      L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+  return rc == ERROR_SUCCESS && value == 0;
+}
+
+// 标题栏、边框、系统菜单由 DWM 绘制；只有把这个属性设上，它们才跟随系统深色。
+// 20 是 1903+ 的属性号，19 对应更早的 1809，两个都试一遍不影响结果。
+void apply_dark_mode(HWND hwnd) {
+  if (!hwnd) return;
+  const BOOL dark = system_uses_dark() ? TRUE : FALSE;
+  if (FAILED(DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)))) {
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
+  }
+}
+
+// 右键标题栏 / Alt+Space 的系统菜单。原生窗口靠它给出还原、移动、大小、关闭；
+// 无边框模式删掉了非客户区，必须自己补回来，否则这几条交互全缺。
+void show_system_menu(HWND hwnd, POINT screen_pt) {
+  if (!hwnd) return;
+  HMENU menu = GetSystemMenu(hwnd, FALSE);
+  if (!menu) return;
+
+  const bool maximized = IsZoomed(hwnd) != 0;
+  EnableMenuItem(menu, SC_RESTORE, MF_BYCOMMAND | (maximized ? MF_ENABLED : MF_GRAYED));
+  EnableMenuItem(menu, SC_MOVE, MF_BYCOMMAND | (maximized ? MF_GRAYED : MF_ENABLED));
+  EnableMenuItem(menu, SC_SIZE,
+                 MF_BYCOMMAND | (maximized || !g_resizable ? MF_GRAYED : MF_ENABLED));
+  SetMenuDefaultItem(menu, SC_CLOSE, FALSE);
+
+  SetForegroundWindow(hwnd);
+  const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen_pt.x,
+                                 screen_pt.y, 0, hwnd, nullptr);
+  // 交给系统执行，避免自己重复实现最小化/最大化/关闭
+  if (cmd) PostMessageW(hwnd, WM_SYSCOMMAND, static_cast<WPARAM>(cmd), 0);
 }
 
 // ---- 几何辅助 ----
@@ -181,14 +288,14 @@ void push_state() {
   const int css_w = dpi ? MulDiv(px_w, 96, static_cast<int>(dpi)) : px_w;
   const int css_h = dpi ? MulDiv(px_h, 96, static_cast<int>(dpi)) : px_h;
 
-  char buf[384];
+  char buf[448];
   wsprintfA(buf,
             "{\"t\":\"win\",\"maximized\":%s,\"minimized\":%s,\"focused\":%s,"
             "\"width\":%d,\"height\":%d,\"pixelWidth\":%d,\"pixelHeight\":%d,"
-            "\"dpi\":%u,\"frameless\":%s}",
+            "\"dpi\":%u,\"frameless\":%s,\"dark\":%s}",
             maxed ? "true" : "false", minned ? "true" : "false",
             focused ? "true" : "false", css_w, css_h, px_w, px_h, dpi,
-            g_frameless ? "true" : "false");
+            g_frameless ? "true" : "false", system_uses_dark() ? "true" : "false");
   post_json(buf);
 }
 
@@ -203,6 +310,16 @@ void apply_round_corners(HWND hwnd, bool round) {
   if (SUCCEEDED(DwmSetWindowAttribute(hwnd, 33, &pref, sizeof(pref)))) {
     g_round_state = key;
   }
+}
+
+// 首次显示。g_shown 必须先置位再 ShowWindow：
+// 显示之后的 WM_DPICHANGED 才允许跟随系统建议矩形。
+void show_now() {
+  if (!g_hwnd) return;
+  g_shown = true;
+  ShowWindow(g_hwnd, SW_SHOW);
+  UpdateWindow(g_hwnd);
+  push_state();
 }
 
 // ---- 自有窗口的消息处理（仅 frameless 路径使用） ----
@@ -270,6 +387,35 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     push_state();
     break;
 
+  case WM_SETTINGCHANGE:
+  case WM_THEMECHANGED:
+    // 系统切换深/浅色时重新应用，并把新状态推给页面
+    apply_dark_mode(hwnd);
+    push_state();
+    break;
+
+  case WM_NCRBUTTONUP:
+    // 右键标题栏：系统菜单。无边框模式没有非客户区，命中由 hit_test 给出
+    if (static_cast<WPARAM>(wp) == HTCAPTION) {
+      POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      show_system_menu(hwnd, pt);
+      return 0;
+    }
+    break;
+
+  case WM_SYSCOMMAND:
+    // Alt+Space 走 SC_KEYMENU，低半字节用于携带按键字符
+    if ((static_cast<WPARAM>(wp) & 0xFFF0) == SC_KEYMENU) {
+      if (static_cast<INT_PTR>(lp) == ' ') {
+        RECT rc{};
+        GetWindowRect(hwnd, &rc);
+        POINT pt{rc.left + 8, rc.top + 8};
+        show_system_menu(hwnd, pt);
+        return 0;
+      }
+    }
+    break;
+
   case WM_DPICHANGED: {
     // 只在窗口已显示后跟随建议矩形。创建/首次布局阶段系统给出的建议矩形，
     // 是基于创建时的级联位置算出来的，会覆盖掉调用方的居中/定位意图。
@@ -322,6 +468,37 @@ void subclass_widget() {
                         reinterpret_cast<LONG_PTR>(widget_proc)));
 }
 
+// 带边框模式：顶层窗口由 webview 创建，要补系统菜单与主题跟随只能子类化。
+// 只拦这两类消息，其余原样转发，避免影响 webview 自身的窗口逻辑。
+LRESULT CALLBACK toplevel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  switch (msg) {
+  case WM_SETTINGCHANGE:
+  case WM_THEMECHANGED:
+    apply_dark_mode(hwnd);
+    push_state();
+    break;
+  case WM_NCRBUTTONUP:
+    if (static_cast<WPARAM>(wp) == HTCAPTION) {
+      POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      show_system_menu(hwnd, pt);
+      return 0;
+    }
+    break;
+  default:
+    break;
+  }
+  return CallWindowProcW(g_toplevel_orig, hwnd, msg, wp, lp);
+}
+
+void subclass_toplevel() {
+  if (!g_hwnd || g_toplevel_orig) {
+    return;
+  }
+  g_toplevel_orig = reinterpret_cast<WNDPROC>(
+      SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC,
+                        reinterpret_cast<LONG_PTR>(toplevel_proc)));
+}
+
 // ---- UI 线程 ----
 
 void drain(webview_t /*w*/, void * /*arg*/) {
@@ -365,6 +542,9 @@ void drain(webview_t /*w*/, void * /*arg*/) {
       }
       break;
     }
+    case cmd_kind::show:
+      if (!g_shown) show_now();
+      break;
     }
   }
 }
@@ -390,6 +570,10 @@ HWND create_own_window(int width, int height, const wchar_t *title) {
     wc.lpfnWndProc = shell_wnd_proc;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
+    // 窗口不会自动继承 exe 图标，必须在类上显式给，否则标题栏/Alt-Tab 是默认图标
+    wc.hIcon = load_exe_icon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    wc.hIconSm =
+        load_exe_icon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     // CS_HREDRAW/VREDRAW 会引发重绘闪烁，无边框自绘不需要
     wc.style = 0;
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
@@ -420,6 +604,8 @@ HWND create_own_window(int width, int height, const wchar_t *title) {
                    SWP_FRAMECHANGED);
 
   apply_round_corners(hwnd, true);
+  apply_window_icons(hwnd);
+  apply_dark_mode(hwnd);
   return hwnd;
 }
 
@@ -428,6 +614,10 @@ DWORD WINAPI ui_thread(LPVOID param) {
 
   g_frameless = (flags & SHELL_FLAG_FRAMELESS) != 0;
   g_resizable = (flags & SHELL_FLAG_RESIZABLE) != 0;
+  g_defer_show = (flags & SHELL_FLAG_DEFER_SHOW) != 0;
+
+  // 任务栏归属必须在窗口创建前设定
+  apply_app_user_model_id();
 
   // 关键：webview 的 com_init_wrapper 只在「它自己创建窗口」时初始化 COM。
   // 嵌入模式（我们提供 HWND）必须由调用方先 CoInitializeEx，否则
@@ -487,6 +677,11 @@ DWORD WINAPI ui_thread(LPVOID param) {
     g_hwnd = static_cast<HWND>(webview_get_window(g_webview));
     webview_set_title(g_webview, g_title.c_str());
     webview_set_size(g_webview, g_start_w, g_start_h, WEBVIEW_HINT_NONE);
+    // webview 自建的窗口同样不继承 exe 图标，且不会跟随系统深色
+    apply_window_icons(g_hwnd);
+    apply_dark_mode(g_hwnd);
+    // 延迟显示：先藏起来，等 shell_show()
+    if (g_defer_show) ShowWindow(g_hwnd, SW_HIDE);
   }
 
   g_widget = static_cast<HWND>(
@@ -508,10 +703,10 @@ DWORD WINAPI ui_thread(LPVOID param) {
   if (g_frameless) {
     subclass_widget();
     fit_widget();
-    g_shown = true; // 先置位再 ShowWindow：显示后的 WM_DPICHANGED 才允许跟随建议矩形
-    ShowWindow(g_hwnd, SW_SHOW);
-    UpdateWindow(g_hwnd);
-    push_state();
+    if (!g_defer_show) show_now();
+  } else {
+    subclass_toplevel();
+    if (!g_defer_show) g_shown = true;
   }
 
   SetEvent(g_ready);
@@ -522,6 +717,7 @@ DWORD WINAPI ui_thread(LPVOID param) {
   g_webview = nullptr;
   g_widget = nullptr;
   g_widget_orig = nullptr;
+  g_toplevel_orig = nullptr;
   g_hwnd = nullptr;
   g_shown = false;
   g_round_state = -1; // 窗口已销毁，缓存失效
@@ -658,6 +854,37 @@ __declspec(dllexport) int shell_begin_resize(int edge) {
 __declspec(dllexport) void shell_set_min_size(int width, int height) {
   if (width > 0) g_min_w = width;
   if (height > 0) g_min_h = height;
+}
+
+// 延迟显示模式下由调用方在页面就绪后调用（消除首帧闪烁）。
+// 未启用 SHELL_FLAG_DEFER_SHOW 时是幂等 no-op。
+__declspec(dllexport) int shell_show(void) {
+  if (!g_webview) return -1;
+  if (g_shown) return 0;
+  enqueue(cmd_kind::show);
+  return 0;
+}
+
+// 同步查询系统深浅色。页面侧也会收到 win 推送里的 dark 字段；
+// 这个接口供宿主在推送之外按需读取。
+__declspec(dllexport) int shell_is_dark(void) { return system_uses_dark() ? 1 : 0; }
+
+// AppUserModelID 决定任务栏分组与图标归属。
+// 进程级设定应在 shell_start_ex 之前调用；窗口已建时改写对当前窗口不生效。
+__declspec(dllexport) int shell_set_app_id(const char *app_id) {
+  if (!app_id || !*app_id) {
+    g_app_id.clear();
+    return 0;
+  }
+  const int need = MultiByteToWideChar(CP_UTF8, 0, app_id, -1, nullptr, 0);
+  if (need <= 0) {
+    set_err("invalid app id (utf-8 decode failed)");
+    return -1;
+  }
+  g_app_id.assign(static_cast<size_t>(need - 1), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, app_id, -1, &g_app_id[0], need);
+  apply_app_user_model_id();
+  return 0;
 }
 
 __declspec(dllexport) int shell_get_state(void) {
