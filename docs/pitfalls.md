@@ -93,6 +93,31 @@
 - **附带修正**：`setMinSize` 契约是逻辑像素，原生侧直接当物理像素用会让高 DPI 下最小尺寸偏小；统一走 `min_track_size()` 按 `GetDpiForWindow` 换算。
 - **证据**：`实测`。修复前 `rect=(343,343) 1826x1950`；修复后 `rect=(623,56) 1826x1711`，与工作区中心一致，四边留白 623/623/56/57。
 
+### 2.4c 启动白闪 / 闪屏：三个独立缺陷叠在一起
+
+- **症状**：双击启动时窗口先闪一下（先整块白，再变成内容），约 200~700 ms。
+- **根因一：窗口被提前显示。** `webview_set_size()` 的实现结尾是 `return window_show();`
+  （`vendor/webview/.../win32_edge.hh` 的 `set_size_impl`），而 `window_show()` 里
+  `ShowWindow` + `UpdateWindow` 是**同步绘制**。所以「延迟显示」实际是「先显示、再被我们藏起来」。
+  - 修法：子类化要装在 `webview_set_size` **之前**，并在 `WM_SHOWWINDOW` 里用 `SWP_HIDEWINDOW`
+    把来自外部的显示请求压回去（`wp == TRUE && g_defer_show && !g_shown`）。
+  - 反向陷阱：**不能**为了避开它就不调 `webview_set_size`。它置位内部的 `m_is_size_set`，
+    少了这一步 webview 会在消息循环里补一次默认 `640x480`，把尺寸覆盖掉（实测 client 从
+    1800×1640 变成 1280×960）。
+- **根因二：露出来的底色是白的。** WebView2 表面在页面首帧绘制前显示自身默认**白底**，
+  实测首帧亮度 mean=236/255。窗口再怎么延后显示也没用——一显示就是白的。
+  - 修法：`ICoreWebView2Controller2::put_DefaultBackgroundColor`，在 `navigate` **之前**设。
+    MinGW 无 IID 符号库，用 GUID 字面量 `{c979903e-d4ca-4228-92eb-47ee3fa96eab}`（见 3.2）。
+- **根因三：显示时机由固定延时决定。** `Bun.sleep(600)` 太短会露出半成品首帧
+  （实测首帧亮度只有终态的 46%），太长则拖慢启动。
+  - 修法：页面在两次 `requestAnimationFrame` 之后 `POST /api/ready`，宿主等这个信号再
+    `shell.show()`，并留 2.5 s 超时兜底。深色模式还要在 `<head>` 内同步设 `data-theme`，
+    否则首帧会按浅色算变量（深色面板里冒出白底按钮）。
+- **证据**：`实测`。逐帧 `PrintWindow` 采样（不要用 `CopyFromScreen`，本机 z 序被锁、
+  截图会被遮挡窗口覆盖）：修复前首帧 `mean=236`；修复后从第一帧起稳定 `mean=39`。
+- **回归守护**：`tests/first-paint.test.ts`（原生侧三条顺序约束）与
+  `it-is-go-time` 的 `src/gui/page.test.ts`（`data-theme` 必须在 head 内、且在 `<style>` 之前）。
+
 ### 2.5 最大化矩形不能靠 `SM_CXSIZEFRAME` 推算
 
 - **症状**：最大化后客户区超出工作区（@192dpi 时溢出明显）。

@@ -32,6 +32,11 @@
 
 #include "webview/webview.h"
 
+// WebView2 的 COM 头。只为了拿 ICoreWebView2Controller2::put_DefaultBackgroundColor：
+// WebView2 表面在页面首帧绘制之前显示的是它自己的默认白底，深色应用启动会白闪一下。
+// MinGW 下没有 IID 符号库，所以下面的 QueryInterface 一律用本文件内的 GUID 字面量。
+#include <WebView2.h>
+
 namespace {
 
 // ---- 对外常量（与 TS 侧保持字面一致） ----
@@ -178,6 +183,50 @@ void apply_dark_mode(HWND hwnd) {
   }
 }
 
+// 让 WebView2 在页面首帧绘制之前显示与系统主题一致的底色。
+//
+// 不设的话，未绘制区域是 WebView2 的默认**白底**：深色应用窗口一显示，屏幕会先闪
+// 一下白（实测首帧亮度 mean=236/255，约 200 ms），这才是「启动闪屏」的真正来源——
+// 光把窗口藏到内容就绪只能减轻一半，因为窗口一显示、页面还没合成，露出的是白底。
+//
+// 需要 ICoreWebView2Controller2。MinGW 不提供 IID 符号库，所以用 GUID 字面量
+// （同仓库既有约定：见 pitfalls 3.2）。失败不影响其余功能。
+void apply_default_background(webview_t w, bool dark) {
+  if (!w) {
+    return;
+  }
+  auto *ctrl = static_cast<ICoreWebView2Controller *>(
+      webview_get_native_handle(w, WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER));
+  if (!ctrl) {
+    return;
+  }
+
+  // {c979903e-d4ca-4228-92eb-47ee3fa96eab} = ICoreWebView2Controller2
+  static const GUID kIIDController2 = {
+      0xc979903e, 0xd4ca, 0x4228, {0x92, 0xeb, 0x47, 0xee, 0x3f, 0xa9, 0x6e, 0xab}};
+
+  ICoreWebView2Controller2 *ctrl2 = nullptr;
+  if (FAILED(ctrl->QueryInterface(kIIDController2, reinterpret_cast<void **>(&ctrl2))) ||
+      !ctrl2) {
+    return;
+  }
+
+  COREWEBVIEW2_COLOR color{};
+  color.A = 255;
+  if (dark) {
+    // 与常见深色应用底色同量级，差值小到看不出来
+    color.R = 32;
+    color.G = 32;
+    color.B = 32;
+  } else {
+    color.R = 255;
+    color.G = 255;
+    color.B = 255;
+  }
+  ctrl2->put_DefaultBackgroundColor(color);
+  ctrl2->Release();
+}
+
 // 右键标题栏 / Alt+Space 的系统菜单。原生窗口靠它给出还原、移动、大小、关闭；
 // 无边框模式删掉了非客户区，必须自己补回来，否则这几条交互全缺。
 void show_system_menu(HWND hwnd, POINT screen_pt) {
@@ -316,11 +365,18 @@ void apply_round_corners(HWND hwnd, bool round) {
 }
 
 // 首次显示。g_shown 必须先置位再 ShowWindow：
-// 显示之后的 WM_DPICHANGED 才允许跟随系统建议矩形。
+// 显示之后的 WM_DPICHANGED 才允许跟随系统建议矩形；同时也让 toplevel_proc 的
+// WM_SHOWWINDOW 拦截放行（它只拦 g_shown 为假的显示请求）。
+//
+// 激活动作是必须的：带边框模式下原本由 webview 的 window_show() 负责 SetFocus，
+// 现在我们接管了显示，不补这一步窗口出现时不会成为前台窗口（标题栏呈未激活灰态，
+// 用起来像「卡住了」）。SetForegroundWindow 可能因本机策略失败，属尽力而为。
 void show_now() {
   if (!g_hwnd) return;
   g_shown = true;
   ShowWindow(g_hwnd, SW_SHOW);
+  SetForegroundWindow(g_hwnd);
+  SetFocus(g_hwnd);
   UpdateWindow(g_hwnd);
   push_state();
 }
@@ -540,9 +596,23 @@ void subclass_widget() {
 }
 
 // 带边框模式：顶层窗口由 webview 创建，要补系统菜单与主题跟随只能子类化。
-// 只拦这两类消息，其余原样转发，避免影响 webview 自身的窗口逻辑。
+// 只拦这几类消息，其余原样转发，避免影响 webview 自身的窗口逻辑。
 LRESULT CALLBACK toplevel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
+  case WM_SHOWWINDOW:
+    // webview 的 set_size_impl 结尾会 window_show()，而 window_show() 里
+    // ShowWindow + UpdateWindow 是**同步绘制**：窗口会先以未加载页面（纯黑）
+    // 的姿态真画出一帧，再被调用方藏起来——这就是启动闪屏。
+    // 延迟显示期间，任何来自外部的显示请求都在这里压回去：
+    // 用 SWP_HIDEWINDOW 清掉 WS_VISIBLE，使随后的 UpdateWindow 无更新区域可画。
+    // 我们自己的 shell_show() → show_now() 会先置 g_shown，故不会被拦截。
+    if (wp == TRUE && g_defer_show && !g_shown) {
+      SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                   SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                       SWP_NOACTIVATE);
+      return 0;
+    }
+    break;
   case WM_SETTINGCHANGE:
   case WM_THEMECHANGED:
     apply_dark_mode(hwnd);
@@ -732,18 +802,30 @@ DWORD WINAPI ui_thread(LPVOID param) {
     return 1;
   }
 
+  // 必须在 navigate 之前：这是「页面还没画出内容时露出的底色」，
+  // 设晚了那一帧白底已经闪过去了。
+  apply_default_background(g_webview, system_uses_dark());
+
   if (!g_frameless) {
     g_hwnd = static_cast<HWND>(webview_get_window(g_webview));
+
+    // 子类化必须在 set_size 之前安装：webview 的 set_size_impl 结尾会调
+    // window_show()，而我们要在 WM_SHOWWINDOW 里把这次显示压回去。
+    subclass_toplevel();
+
     webview_set_title(g_webview, g_title.c_str());
-    webview_set_size(g_webview, g_start_w, g_start_h, WEBVIEW_HINT_NONE);
     // webview 自建的窗口同样不继承 exe 图标，且不会跟随系统深色
     apply_window_icons(g_hwnd);
     apply_dark_mode(g_hwnd);
-    // 延迟显示：先藏起来，等 shell_show()
-    if (g_defer_show) ShowWindow(g_hwnd, SW_HIDE);
+
+    // 这个调用不能省，哪怕尺寸我们后面会再改：
+    // 它会置位 webview 内部的 m_is_size_set。不置位的话，webview 在消息循环里
+    // 会补一个「默认 640x480」的 set_size，把尺寸覆盖掉（实测 client 变 1280x960，
+    // 而不是预期的 1800x1640）。它顺带的显示动作由 WM_SHOWWINDOW 拦截。
+    webview_set_size(g_webview, g_start_w, g_start_h, WEBVIEW_HINT_NONE);
+
     // 带边框模式同样支持 FLAG_CENTER。此前只在无边框分支里居中，
-    // 带边框窗口于是停在 CreateWindowEx 的级联位置（实测 343,343）。
-    // 放在 ShowWindow(SW_HIDE) 之后：位置先定好再显示，避免显示后跳一下。
+    // 带边框窗口于是停在创建时的级联位置（实测 147,147 / 343,343）。
     if (flags & SHELL_FLAG_CENTER) {
       center_on_work_area(g_hwnd);
     }
@@ -770,7 +852,7 @@ DWORD WINAPI ui_thread(LPVOID param) {
     fit_widget();
     if (!g_defer_show) show_now();
   } else {
-    subclass_toplevel();
+    // subclass_toplevel() 已在上面（set_size 之前）安装
     if (!g_defer_show) g_shown = true;
   }
 
