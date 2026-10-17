@@ -325,6 +325,74 @@ void show_now() {
   push_state();
 }
 
+// setMinSize 的入参是逻辑像素（96 DPI），而系统的 track size 要物理像素。
+// WM_GETMINMAXINFO 与居中夹取都要这个换算，抽出来避免两处口径分叉
+// （此前直接在 native 侧按物理像素用，高 DPI 下最小尺寸只有预期的六成）。
+void min_track_size(HWND hwnd, int *out_w, int *out_h) {
+  const UINT dpi = hwnd ? GetDpiForWindow(hwnd) : 96;
+  RECT rc{0, 0, MulDiv(g_min_w, static_cast<int>(dpi), 96),
+          MulDiv(g_min_h, static_cast<int>(dpi), 96)};
+  AdjustWindowRectExForDpi(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+  if (out_w) *out_w = rc.right - rc.left;
+  if (out_h) *out_h = rc.bottom - rc.top;
+}
+
+// 把窗口居中到它所在显示器的工作区。两种窗口模式（自有窗口 / webview 自建窗口）共用。
+//
+// 三处容易写错的地方：
+//   1) 必须用 rcWork 而不是 rcMonitor——整屏居中会让窗口压到任务栏下面。
+//   2) 窗口比工作区大时必须先收缩再居中。高 DPI 下这很常见（900x940 逻辑像素在 200%
+//      就是 1800x1880，加边框 1950 > 工作区 1824）。不收缩的话居中算出的 y 为负，
+//      夹取后窗口贴顶，看起来「没有垂直居中」；收缩后才是真正的居中。
+//   3) 收缩不得低于 setMinSize 给的下限。
+void center_on_work_area(HWND hwnd) {
+  if (!hwnd) {
+    return;
+  }
+  MONITORINFO mi{};
+  mi.cbSize = sizeof(mi);
+  if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+    return;
+  }
+
+  RECT rc{};
+  if (!GetWindowRect(hwnd, &rc)) {
+    return;
+  }
+  int w = rc.right - rc.left;
+  int h = rc.bottom - rc.top;
+  const int work_w = mi.rcWork.right - mi.rcWork.left;
+  const int work_h = mi.rcWork.bottom - mi.rcWork.top;
+
+  // 先收缩到工作区内，但不下探到最小尺寸以下
+  if (w > work_w || h > work_h) {
+    int min_w = 0;
+    int min_h = 0;
+    min_track_size(hwnd, &min_w, &min_h);
+    const int max_w = work_w > min_w ? work_w : min_w;
+    const int max_h = work_h > min_h ? work_h : min_h;
+    const int fit_w = w > max_w ? max_w : w;
+    const int fit_h = h > max_h ? max_h : h;
+    if (fit_w != w || fit_h != h) {
+      SetWindowPos(hwnd, nullptr, 0, 0, fit_w, fit_h,
+                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+      w = fit_w;
+      h = fit_h;
+    }
+  }
+
+  int x = mi.rcWork.left + (work_w - w) / 2;
+  int y = mi.rcWork.top + (work_h - h) / 2;
+
+  if (x + w > mi.rcWork.right) x = mi.rcWork.right - w;
+  if (y + h > mi.rcWork.bottom) y = mi.rcWork.bottom - h;
+  if (x < mi.rcWork.left) x = mi.rcWork.left;
+  if (y < mi.rcWork.top) y = mi.rcWork.top;
+
+  SetWindowPos(hwnd, nullptr, x, y, 0, 0,
+               SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 // ---- 自有窗口的消息处理（仅 frameless 路径使用） ----
 
 LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -358,12 +426,12 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_GETMINMAXINFO: {
     auto *mmi = reinterpret_cast<MINMAXINFO *>(lp);
 
-    // 最小尺寸：按窗口样式换算后回报
-    RECT minrc{0, 0, g_min_w, g_min_h};
-    AdjustWindowRectExForDpi(&minrc, WS_OVERLAPPEDWINDOW, FALSE, 0,
-                             GetDpiForWindow(hwnd));
-    mmi->ptMinTrackSize.x = minrc.right - minrc.left;
-    mmi->ptMinTrackSize.y = minrc.bottom - minrc.top;
+    // 最小尺寸：入参是逻辑像素，换算成当前 DPI 的 track size 后回报
+    int min_w = 0;
+    int min_h = 0;
+    min_track_size(hwnd, &min_w, &min_h);
+    mmi->ptMinTrackSize.x = min_w;
+    mmi->ptMinTrackSize.y = min_h;
 
     // 最大化区域钉到工作区：否则系统按带边框的窗口外扩，无边框下会溢出屏幕。
     MONITORINFO mi{};
@@ -653,19 +721,7 @@ DWORD WINAPI ui_thread(LPVOID param) {
                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
     if (flags & SHELL_FLAG_CENTER) {
-      // 用工作区而非整屏：否则窗口会压到任务栏下方
-      MONITORINFO mi{};
-      mi.cbSize = sizeof(mi);
-      GetMonitorInfoW(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &mi);
-
-      RECT rc{};
-      GetWindowRect(g_hwnd, &rc);
-      const int w = rc.right - rc.left;
-      const int h = rc.bottom - rc.top;
-      const int x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - w) / 2;
-      const int y = mi.rcWork.top + ((mi.rcWork.bottom - mi.rcWork.top) - h) / 2;
-      SetWindowPos(g_hwnd, nullptr, x, y, 0, 0,
-                   SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+      center_on_work_area(g_hwnd);
     }
   }
 
@@ -685,6 +741,12 @@ DWORD WINAPI ui_thread(LPVOID param) {
     apply_dark_mode(g_hwnd);
     // 延迟显示：先藏起来，等 shell_show()
     if (g_defer_show) ShowWindow(g_hwnd, SW_HIDE);
+    // 带边框模式同样支持 FLAG_CENTER。此前只在无边框分支里居中，
+    // 带边框窗口于是停在 CreateWindowEx 的级联位置（实测 343,343）。
+    // 放在 ShowWindow(SW_HIDE) 之后：位置先定好再显示，避免显示后跳一下。
+    if (flags & SHELL_FLAG_CENTER) {
+      center_on_work_area(g_hwnd);
+    }
   }
 
   g_widget = static_cast<HWND>(

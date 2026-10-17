@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
     FLAG_CENTER,
+    FLAG_DEFER_SHOW,
     FLAG_FRAMELESS,
     FLAG_RESIZABLE,
     FLAG_TOPMOST,
@@ -12,7 +13,7 @@ import {
 } from "@/shell/types";
 
 test("标志位互不重叠，可按位或组合", () => {
-    const flags = [FLAG_FRAMELESS, FLAG_TOPMOST, FLAG_CENTER, FLAG_RESIZABLE];
+    const flags = [FLAG_FRAMELESS, FLAG_TOPMOST, FLAG_CENTER, FLAG_RESIZABLE, FLAG_DEFER_SHOW];
     expect(new Set(flags).size).toBe(flags.length);
 
     for (const f of flags) {
@@ -25,6 +26,13 @@ test("标志位互不重叠，可按位或组合", () => {
     expect(combined & FLAG_TOPMOST).toBe(0);
     expect(combined & FLAG_RESIZABLE).toBe(FLAG_RESIZABLE);
     expect(combined & FLAG_CENTER).toBe(FLAG_CENTER);
+});
+
+test("FLAG_CENTER 不隐含无边框（带边框模式同样生效）", () => {
+    // 曾经的缺陷：居中逻辑只写在无边框分支里，带边框窗口停在创建时的级联位置。
+    // 这条守护绑定的是「居中与边框样式正交」这个契约。
+    expect(FLAG_CENTER & FLAG_FRAMELESS).toBe(0);
+    expect(FLAG_CENTER | FLAG_FRAMELESS).toBe(FLAG_FRAMELESS + FLAG_CENTER);
 });
 
 test("RESIZE_EDGE 取值与 Win32 HT* 常量一致", () => {

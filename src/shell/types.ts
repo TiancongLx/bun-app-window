@@ -9,7 +9,13 @@
 export const FLAG_FRAMELESS = 1;
 /** 置顶 */
 export const FLAG_TOPMOST = 2;
-/** 屏幕居中 */
+/**
+ * 启动时把窗口居中到所在显示器的工作区（避开任务栏）。
+ *
+ * 带边框与无边框两种模式都生效。窗口比工作区大时会先收缩到工作区内再居中——
+ * 高 DPI 下这很常见（900×940 逻辑像素在 200% 缩放加边框就是 1950 物理像素高，
+ * 超过 1824 的工作区），不收缩只能贴顶，垂直方向看不出居中。
+ */
 export const FLAG_CENTER = 4;
 /** 可缩放（配合无边框时，边框拖拽区由 shell_begin_resize 提供） */
 export const FLAG_RESIZABLE = 8;
