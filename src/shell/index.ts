@@ -79,6 +79,14 @@ export type Shell = {
    */
   pickFolder(title?: string): string | null;
   state(): WindowState;
+  /**
+   * 窗口是否仍然存在。
+   *
+   * `state()` 无法区分「未启动」与「已销毁」（两者都返回全 false），
+   * 宿主需要这个信号才能判断窗口是否已被用户关掉，进而回收自己的进程——
+   * 窗口销毁后原生 UI 线程会返回，但宿主进程与它起的本地服务不会自己退出。
+   */
+  isAlive(): boolean;
   /** 最近一次失败的原因；无错误时为空串 */
   lastError(): string;
   /** 停止并释放窗口（可重复调用） */
@@ -172,6 +180,8 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
         dark: symbols.shell_is_dark() !== 0,
       };
     },
+
+    isAlive: () => symbols.shell_is_alive() !== 0,
 
     lastError,
 

@@ -28,6 +28,7 @@ export function openNativeLib(path: string) {
     shell_begin_resize: { args: [FFIType.i32], returns: FFIType.i32 },
     shell_set_min_size: { args: [FFIType.i32, FFIType.i32], returns: FFIType.void },
     shell_get_state: { args: [], returns: FFIType.i32 },
+    shell_is_alive: { args: [], returns: FFIType.i32 },
     shell_stop: { args: [], returns: FFIType.void },
     shell_error: { args: [], returns: FFIType.ptr },
     // 系统集成面

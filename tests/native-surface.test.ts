@@ -19,6 +19,7 @@ const DECLARED = [
     "shell_begin_resize",
     "shell_set_min_size",
     "shell_get_state",
+    "shell_is_alive",
     "shell_stop",
     "shell_error",
     // 系统集成面
@@ -51,14 +52,14 @@ test("libshell.dll 是合法 PE 映像", async () => {
     expect(bytes[lfanew + 1]).toBe(0x45); // E
 });
 
-test("dlopen 成功且 20 个声明符号全部存在", async () => {
+test("dlopen 成功且 21 个声明符号全部存在", async () => {
     const info = await resolveNativeLib();
     const lib = openNativeLib(info.path);
     const keys = new Set(Object.keys(lib.symbols));
 
     const missing = DECLARED.filter((name) => !keys.has(name));
     expect(missing).toEqual([]);
-    expect(DECLARED.length).toBe(20);
+    expect(DECLARED.length).toBe(21);
 
     lib.close();
 });
@@ -76,6 +77,24 @@ test("未启动时的调用是安全的（消费者可能在 start 之前就查�
 
         // 停过一次之后状态仍可读
         expect(lib.symbols.shell_get_state()).toBe(0);
+    } finally {
+        lib.close();
+    }
+});
+
+test("is_alive 与 get_state 的语义差异：已销毁 ≠ 未启动", async () => {
+    const info = await resolveNativeLib();
+    const lib = openNativeLib(info.path);
+    try {
+        // 未启动：两者都是「没有窗口」
+        expect(lib.symbols.shell_is_alive()).toBe(0);
+        expect(lib.symbols.shell_get_state()).toBe(0);
+
+        // 这条用例的存在理由：宿主曾用 state() 判断窗口是否关闭，
+        // 但 get_state 对「未启动」和「已销毁」都返回 0 且不抛错，
+        // 导致窗口关闭后进程一直挂着、本地端口不释放。
+        // is_alive 是专门用来区分这两种状态的信号。
+        expect(typeof lib.symbols.shell_is_alive).toBe("function");
     } finally {
         lib.close();
     }

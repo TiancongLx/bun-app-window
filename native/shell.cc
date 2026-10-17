@@ -941,6 +941,13 @@ __declspec(dllexport) int shell_get_state(void) {
   return state;
 }
 
+// 窗口是否仍然存在。1 = 存活，0 = 已销毁（用户点 X 或调用过 shell_stop）。
+//
+// 为什么不复用 shell_get_state：它返回 0 同时表示「未启动」与「已销毁」，
+// 调用方无法区分。宿主需要这个信号来回收进程——窗口销毁后 webview_run 会在
+// UI 线程返回，但宿主进程（以及它起的本地服务）不会自己退出。
+__declspec(dllexport) int shell_is_alive(void) { return g_webview ? 1 : 0; }
+
 // 调试用：入参为顶层窗口客户区坐标（设备像素），与页面 CSS 像素按 dpr 换算。
 __declspec(dllexport) int shell_debug_hittest(int x, int y) {
   if (!g_hwnd) return -1;
