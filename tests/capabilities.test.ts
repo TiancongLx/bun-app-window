@@ -66,3 +66,26 @@ test("生命周期锁让「检查 webview 非空」与「投递」成为原子�
     expect(body).toContain("std::lock_guard<std::mutex> life(g_life_mu)");
     expect(body).toContain("webview_dispatch");
 });
+
+test("shell_stop 必须把 terminate 分发到 UI 线程", () => {
+    // vendor 的 terminate_impl 是 PostQuitMessage(0)：只投给调用线程的队列。
+    // 从宿主线程直接调 = 静默无效（窗口还在、is_alive 仍为真、再 start 报
+    // 「shell already started」）。实测踩过，见 pitfalls 2.4g。
+    expect(SHELL_CC).toContain("terminate_on_ui");
+    const stopAt = SHELL_CC.indexOf("void shell_stop(void)");
+    expect(stopAt).toBeGreaterThan(0);
+    const body = SHELL_CC.slice(stopAt, stopAt + 400);
+    expect(body).toContain("webview_dispatch(g_webview, terminate_on_ui");
+    // 不允许直接调
+    expect(body).not.toMatch(/webview_terminate\(g_webview\)/);
+});
+
+test("窗口位置：读的是还原矩形，且对外部坐标做屏幕校验", () => {
+    // 最大化时用 WINDOWPLACEMENT.rcNormalPosition，而不是 GetWindowRect 的整屏尺寸
+    expect(SHELL_CC).toContain("rcNormalPosition");
+    // 屏外坐标要能救回来：按与工作区的交叠面积判断
+    expect(SHELL_CC).toContain("intersect_area");
+    expect(SHELL_CC).toContain("EnumDisplayMonitors");
+    // DPI 变化要按比例换算
+    expect(SHELL_CC).toContain("MulDiv(w, static_cast<int>(dpi), saved_dpi)");
+});

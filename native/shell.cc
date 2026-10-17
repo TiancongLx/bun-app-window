@@ -25,6 +25,7 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <atomic>
 #include <deque>
@@ -70,7 +71,7 @@ enum ShellEdge : int {
   SHELL_EDGE_BOTTOMRIGHT = 7,
 };
 
-enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize, show, zoom, reload, devtools, fullscreen };
+enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize, show, zoom, reload, devtools, fullscreen, restore_bounds };
 
 struct cmd {
   cmd_kind kind;
@@ -801,6 +802,153 @@ void center_on_work_area(HWND hwnd) {
                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+// ---- 窗口位置与尺寸的保存/恢复 ----
+
+// 读取当前窗口矩形，写成 "x,y,w,h,max,dpi"。
+//
+// 最大化时必须取「还原后」的矩形（WINDOWPLACEMENT.rcNormalPosition）：
+// 直接 GetWindowRect 拿到的是整屏尺寸，下次启动就会先铺满再最大化，
+// 用户点「还原」时看到的仍是全屏——这是同类实现最常见的错。
+int format_bounds(char *buf, int cap) {
+  if (!buf || cap <= 0) return 0;
+  buf[0] = 0;
+  if (!g_hwnd) return 0;
+
+  const bool maxed = IsZoomed(g_hwnd) != 0;
+  RECT rc{};
+  WINDOWPLACEMENT wp{};
+  wp.length = sizeof(wp);
+  if (maxed && GetWindowPlacement(g_hwnd, &wp)) {
+    rc = wp.rcNormalPosition;
+  } else if (!GetWindowRect(g_hwnd, &rc)) {
+    return 0;
+  }
+
+  const UINT dpi = GetDpiForWindow(g_hwnd);
+  char tmp[128];
+  // 只用整数格式：wsprintfA 不吃 %f（见 pitfalls 2.4d）
+  wsprintfA(tmp, "%d,%d,%d,%d,%d,%u", static_cast<int>(rc.left),
+            static_cast<int>(rc.top), static_cast<int>(rc.right - rc.left),
+            static_cast<int>(rc.bottom - rc.top), maxed ? 1 : 0, dpi);
+  const int n = lstrlenA(tmp);
+  if (n >= cap) return 0;
+  lstrcpyA(buf, tmp);
+  return n;
+}
+
+long long intersect_area(const RECT &a, const RECT &b) {
+  const int l = a.left > b.left ? a.left : b.left;
+  const int t = a.top > b.top ? a.top : b.top;
+  const int r = a.right < b.right ? a.right : b.right;
+  const int bo = a.bottom < b.bottom ? a.bottom : b.bottom;
+  if (r <= l || bo <= t) return 0;
+  return static_cast<long long>(r - l) * (bo - t);
+}
+
+// 找出与目标矩形交叠最多的那块显示器工作区。
+struct MonitorPick {
+  HMONITOR mon = nullptr;
+  long long area = 0;
+  RECT work{};
+};
+
+struct PickCtx {
+  const RECT *want;
+  MonitorPick *out;
+};
+
+BOOL CALLBACK pick_monitor_proc(HMONITOR mon, HDC, LPRECT, LPARAM lp) {
+  auto *ctx = reinterpret_cast<PickCtx *>(lp);
+  MONITORINFO mi{};
+  mi.cbSize = sizeof(mi);
+  if (GetMonitorInfoW(mon, &mi)) {
+    const long long a = intersect_area(*ctx->want, mi.rcWork);
+    if (a > ctx->out->area) {
+      ctx->out->area = a;
+      ctx->out->mon = mon;
+      ctx->out->work = mi.rcWork;
+    }
+  }
+  return TRUE;
+}
+
+// 把保存的矩形恢复到窗口上。
+//
+// 跨会话恢复有三种失败方式，每个都要处理，否则表现为「窗口不知道跑哪去了」：
+//   1) 缩放比例变了：保存的是物理像素，要按 DPI 比例换算，否则同一份配置在
+//      125% 和 200% 的机器上是两个大小。
+//   2) 显示器不在了（拔掉外接屏、换分辨率）：矩形可能整块落在屏幕外。
+//      判据取「与某块工作区交叠至少 80×40」——够看见标题栏并抓住窗口。
+//   3) 窗口比工作区还大：先收缩，否则标题栏会被推到屏幕外。
+// 判据不过时在某块屏上居中，而不是沿用 (0,0)——那会让使用者以为程序没启动。
+void restore_bounds(int x, int y, int w, int h, int saved_dpi, bool maximized) {
+  if (!g_hwnd) return;
+
+  const UINT dpi = GetDpiForWindow(g_hwnd);
+  int tw = w;
+  int th = h;
+  if (saved_dpi > 0 && dpi > 0 && saved_dpi != static_cast<int>(dpi)) {
+    tw = MulDiv(w, static_cast<int>(dpi), saved_dpi);
+    th = MulDiv(h, static_cast<int>(dpi), saved_dpi);
+  }
+  if (tw < g_min_w) tw = g_min_w;
+  if (th < g_min_h) th = g_min_h;
+
+  RECT want{x, y, x + tw, y + th};
+  MonitorPick pick;
+  PickCtx ctx{&want, &pick};
+  EnumDisplayMonitors(nullptr, nullptr, pick_monitor_proc,
+                      reinterpret_cast<LPARAM>(&ctx));
+
+  const long long kMinVisible = 80LL * 40LL;
+  const bool usable = pick.mon != nullptr && pick.area >= kMinVisible;
+
+  RECT work{};
+  if (usable) {
+    work = pick.work;
+  } else {
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+      return;
+    }
+    work = mi.rcWork;
+  }
+
+  const int work_w = work.right - work.left;
+  const int work_h = work.bottom - work.top;
+  if (tw > work_w) tw = work_w;
+  if (th > work_h) th = work_h;
+
+  int nx;
+  int ny;
+  if (usable) {
+    nx = x;
+    ny = y;
+  } else {
+    nx = work.left + (work_w - tw) / 2;
+    ny = work.top + (work_h - th) / 2;
+  }
+
+  if (nx + tw > work.right) nx = work.right - tw;
+  if (ny + th > work.bottom) ny = work.bottom - th;
+  if (nx < work.left) nx = work.left;
+  if (ny < work.top) ny = work.top;
+
+  // 最大化状态下直接 SetWindowPos 只改「还原位置」，不移动窗口本身；
+  // 先还原再定位，最后按需重新最大化。
+  if (IsZoomed(g_hwnd)) {
+    ShowWindow(g_hwnd, SW_RESTORE);
+  }
+  SetWindowPos(g_hwnd, nullptr, nx, ny, tw, th,
+               SWP_NOZORDER | SWP_NOACTIVATE);
+  if (maximized) {
+    ShowWindow(g_hwnd, SW_MAXIMIZE);
+  }
+  fit_widget();
+  push_state(true);
+}
+
 // ---- 自有窗口的消息处理（仅 frameless 路径使用） ----
 
 LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1074,6 +1222,15 @@ void drain(webview_t /*w*/, void * /*arg*/) {
     case cmd_kind::fullscreen:
       toggle_fullscreen();
       break;
+    case cmd_kind::restore_bounds: {
+      int bx = 0, by = 0, bw = 0, bh = 0, bdpi = 0, bmax = 0;
+      // 纯整数解析：与 format_bounds 的输出格式成对
+      if (sscanf(c.arg.c_str(), "%d,%d,%d,%d,%d,%d", &bx, &by, &bw, &bh, &bdpi,
+                 &bmax) == 6) {
+        restore_bounds(bx, by, bw, bh, bdpi, bmax != 0);
+      }
+      break;
+    }
     }
   }
 }
@@ -1425,6 +1582,22 @@ __declspec(dllexport) int shell_show(void) {
   return 0;
 }
 
+// ---- 窗口位置（供持久化 helper 使用）----
+
+// 读取当前矩形，格式 "x,y,w,h,maximized,dpi"。返回写入长度，0 表示窗口不存在。
+__declspec(dllexport) int shell_get_bounds(char *buf, int cap) { return format_bounds(buf, cap); }
+
+// 恢复矩形。坐标与尺寸均为物理像素，saved_dpi 是保存时的缩放 DPI。
+// 会按当前 DPI 换算尺寸、校验矩形是否仍在某块屏上、必要时居中。
+__declspec(dllexport) int shell_restore_bounds(int x, int y, int w, int h,
+                                               int saved_dpi, int maximized) {
+  if (!g_webview) return -1;
+  char buf[96];
+  wsprintfA(buf, "%d,%d,%d,%d,%d,%d", x, y, w, h, saved_dpi, maximized ? 1 : 0);
+  enqueue(cmd_kind::restore_bounds, std::string(buf));
+  return 0;
+}
+
 // ---- 输入与视图能力 ----
 
 // 设页面缩放倍率（0.25 ~ 3.0）。主线程调用，实际 COM 动作投到 UI 线程执行。
@@ -1650,12 +1823,23 @@ __declspec(dllexport) int shell_self_path(char *buf, int cap) {
   return need > 0 ? need - 1 : 0;
 }
 
+// terminate 必须跑在 UI 线程：vendor 侧的实现是 PostQuitMessage(0)，它只把
+// WM_QUIT 投给**调用线程**的消息队列。从宿主线程直接调，退出消息就落在一个
+// 没有消息循环的线程上，UI 线程的 webview_run 永远收不到——表现为
+// shell_stop()「什么都没发生」：窗口还在、is_alive 仍为真、再 start 会报
+// 「shell already started」。实测踩过。
+void terminate_on_ui(webview_t w, void * /*arg*/) {
+  if (w) {
+    webview_terminate(w);
+  }
+}
+
 __declspec(dllexport) void shell_stop(void) {
-  // 持生命周期锁：teardown 也用它，所以不会在「检查非空」与「终止」之间
+  // 持生命周期锁：teardown 也用它，所以不会在「检查非空」与「投递」之间
   // 插进一次销毁。
   std::lock_guard<std::mutex> life(g_life_mu);
   if (g_webview) {
-    webview_terminate(g_webview);
+    webview_dispatch(g_webview, terminate_on_ui, nullptr);
   }
 }
 

@@ -1,7 +1,7 @@
 {
     "$schema": "https://json.schemastore.org/package.json",
     "name": "webview-shell",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "description": "Native frameless WebView2 window shell for Bun — window control, DPI-aware geometry, bidirectional message bridge",
     "type": "module",
     "license": "MIT",
@@ -20,6 +20,7 @@
         ".": "./src/shell/index.ts",
         "./embedded": "./src/shell/embedded.ts",
         "./debug": "./src/shell/debug.ts",
+        "./state": "./src/shell/state.ts",
         "./native": "./dist/libshell.dll",
         "./package.json": "./package.json"
     },

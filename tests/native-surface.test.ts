@@ -28,6 +28,8 @@ const DECLARED = [
     "shell_is_dark",
     "shell_error_text",
     // 输入与视图面
+    "shell_get_bounds",
+    "shell_restore_bounds",
     "shell_set_zoom",
     "shell_get_zoom",
     "shell_reload",
@@ -59,14 +61,14 @@ test("libshell.dll 是合法 PE 映像", async () => {
     expect(bytes[lfanew + 1]).toBe(0x45); // E
 });
 
-test("dlopen 成功且 27 个声明符号全部存在", async () => {
+test("dlopen 成功且 29 个声明符号全部存在", async () => {
     const info = await resolveNativeLib();
     const lib = openNativeLib(info.path);
     const keys = new Set(Object.keys(lib.symbols));
 
     const missing = DECLARED.filter((name) => !keys.has(name));
     expect(missing).toEqual([]);
-    expect(DECLARED.length).toBe(27);
+    expect(DECLARED.length).toBe(29);
 
     lib.close();
 });

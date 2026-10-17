@@ -146,6 +146,32 @@
 - **证据**：`实测`。`WM_KEYDOWN F11` 后窗口变为 `3072x1920`，再按一次精确回到
   `pos=776,392 win=1520x1040`，`与基线一致: True`。
 
+### 2.4g `webview_terminate` 从宿主线程调用是静默无效
+
+- **症状**：`shell.stop()` 之后窗口还在、`isAlive()` 仍为真；紧接着在同一个进程里
+  `start()` 会报 `shell already started`。全过程没有任何错误提示。
+- **原因**：vendor 的 `terminate_impl` 只有一句 `PostQuitMessage(0)`
+  （`win32_edge.hh`）。`PostQuitMessage` 把 `WM_QUIT` 投给**调用线程**的消息队列——
+  从宿主的 Bun 线程调用，退出消息落在一个没有消息循环的线程上，UI 线程的
+  `webview_run` 永远收不到。
+- **修法**：`shell_stop` 改为 `webview_dispatch(g_webview, terminate_on_ui, nullptr)`，
+  让 terminate 在 UI 线程执行。实测修复后 teardown 在 50 ms 内完成，连续三轮
+  start/stop 正常。
+- **连带后果**：`stop()` 之后必须等 `isAlive()` 变假再 `start()`，不能只 sleep 固定时间。
+  进程单例（`g_webview`）在 UI 线程退出前仍占位。
+- **证据**：`实测`。修复前三轮全部 `teardown 未在 2s 内完成`；修复后三轮均 50 ms。
+
+### 2.4h 窗口位置持久化的三个必踩点
+
+- **最大化存错矩形**：`GetWindowRect` 对最大化窗口返回整屏尺寸。直接存下来，下次启动
+  会先铺满再最大化，用户点「还原」看到的还是全屏。必须用
+  `WINDOWPLACEMENT.rcNormalPosition`（实测：整屏 3072×1824，还原矩形 1426×1111）。
+- **DPI 变化**：存的是物理像素。换了缩放比例不换算，同一份配置在 125% 与 200% 的
+  机器上是两个大小。按 `MulDiv(w, 当前dpi, 保存dpi)` 归一（实测 1300×900@96 → 2600×1800@192）。
+- **显示器不在了**：外接屏拔掉后保存的坐标可能整块在屏外。判据取「与某块工作区交叠
+  至少 80×40」——够看到标题栏并抓住窗口；不满足则居中，而不是沿用坐标。
+  实测 `(40000,30000)` 被纠正为 `(1136,612)`。
+
 ### 2.5 最大化矩形不能靠 `SM_CXSIZEFRAME` 推算
 
 - **症状**：最大化后客户区超出工作区（@192dpi 时溢出明显）。

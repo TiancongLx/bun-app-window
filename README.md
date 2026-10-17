@@ -102,6 +102,43 @@ window.addEventListener("shell-msg", (e) => {
 提权进程（High 完整性）下资源管理器属 Medium，默认收不到 `WM_DROPFILES`；壳已用
 `ChangeWindowMessageFilterEx` 放行，无需调用方处理。
 
+### 窗口位置持久化（独立入口）
+
+库主体有一条硬约束：`index.ts` 不引入副作用。持久化按定义就是副作用，所以它是
+**显式调用**的可选件，放在 `webview-shell/state`——不调用就不会有任何文件产生。
+
+```ts
+import { openShell } from "webview-shell";
+import { attachPlacementStore, loadPlacement, restorePlacement } from "webview-shell/state";
+
+const FILE = "C:\\Users\\me\\AppData\\Roaming\\MyApp\\window.json";
+const shell = await openShell({ url, width: 900, height: 700, flags: FLAG_DEFER_SHOW });
+
+// 启动时恢复（没有记录就保持默认）
+const saved = await loadPlacement(FILE);
+if (saved) restorePlacement(shell, saved);
+
+shell.show();
+
+// 运行期跟踪位置；静止时不写盘
+const store = attachPlacementStore(shell, FILE);
+process.on("beforeExit", () => store.flush());
+```
+
+原生侧已处理三个跨会话必踩点，调用方不需要关心：
+
+| 情况 | 处理 |
+| --- | --- |
+| 用户最大化后关闭 | 存「还原后」的矩形，不是整屏尺寸 |
+| 缩放比例变了 | 按 DPI 比例换算尺寸 |
+| 外接屏拔掉 / 分辨率变了 | 坐标与某块工作区交叠不足 80×40 则在屏内居中 |
+
+`attachPlacementStore` 是轮询（默认 700 ms）：宿主拿不到原生→回调的通道，
+而 `GetWindowRect` 是微秒级。窗口静止时不产生任何写入（内容比对），
+写入用「临时文件 + 改名」保证原子——避免关闭时被强杀留下半截 JSON。
+
+只需要一次性读写时用 `capturePlacement` / `savePlacement`，不需要开定时器。
+
 ### 排障面（独立入口）
 
 诊断接口不放在主入口——留在主入口等于把它们也变成契约，改一次诊断输出就成了破坏性

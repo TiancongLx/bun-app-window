@@ -90,6 +90,29 @@ export type Shell = {
   /** 最近一次失败的原因；无错误时为空串。走拷贝式读出，不受并发写影响 */
   lastError(): string;
 
+  // ---- 窗口位置 ----
+  /**
+   * 当前窗口矩形，格式 "x,y,w,h,maximized,dpi"（物理像素）。
+   * 最大化时返回的是「还原后」的矩形。窗口未启动时返回空串。
+   *
+   * 一般不需要直接解析它——用 webview-shell/state 的 capturePlacement()。
+   */
+  getBounds(): string;
+  /**
+   * 恢复窗口矩形。savedDpi 是保存时的 DPI，用于跨缩放比例换算；
+   * 原生侧还会校验矩形是否仍在某块屏上，不在则居中。
+   *
+   * 一般不需要直接调用——用 webview-shell/state 的 estorePlacement()。
+   */
+  restoreBounds(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    savedDpi: number,
+    maximized: boolean,
+  ): number;
+
   // ---- 输入与视图 ----
   /**
    * 页面缩放倍率（0.25 ~ 3.0）。也支持用户键盘操作：Ctrl± / Ctrl+0 / Ctrl+滚轮。
@@ -188,6 +211,10 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
     isAlive: () => symbols.shell_is_alive() !== 0,
 
     lastError,
+
+    getBounds: () => readBuffer((p, len) => symbols.shell_get_bounds(p, len), 256),
+    restoreBounds: (x, y, w, h, savedDpi, maximized) =>
+      symbols.shell_restore_bounds(x, y, w, h, savedDpi, maximized ? 1 : 0),
 
     setZoom: (factor) => symbols.shell_set_zoom(factor),
     getZoom: () => symbols.shell_get_zoom(),

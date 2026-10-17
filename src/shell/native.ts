@@ -38,6 +38,13 @@ export function openNativeLib(path: string) {
     shell_pick_folder: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
     shell_error_text: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
 
+    // 窗口位置面
+    shell_get_bounds: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    shell_restore_bounds: {
+      args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32],
+      returns: FFIType.i32,
+    },
+
     // 输入与视图面
     shell_set_zoom: { args: [FFIType.f64], returns: FFIType.i32 },
     shell_get_zoom: { args: [], returns: FFIType.f64 },
