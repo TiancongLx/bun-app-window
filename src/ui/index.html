@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>WebView Shell</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1115;
+        --panel: #161a21;
+        --line: #242a33;
+        --fg: #d7dbe0;
+        --dim: #8b939f;
+        --accent: #7ee2a8;
+        --bad: #ff8f8f;
+        --titlebar: 36px;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+        background: var(--bg);
+        color: var(--fg);
+        display: grid;
+        grid-template-rows: var(--titlebar) 1fr;
+        overflow: hidden;
+        /* 无边框模式：窗口外沿不应被选中/拖拽文本 */
+        user-select: none;
+      }
+
+      /* ---------- 自绘标题栏 ---------- */
+      .titlebar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 0 0 12px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
+        -webkit-user-select: none;
+      }
+      .titlebar .title {
+        flex: 1;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        cursor: default;
+        font-size: 12px;
+        color: var(--dim);
+      }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: #3d4654; }
+      .controls { display: flex; height: 100%; }
+      .controls button {
+        width: 46px;
+        height: 100%;
+        border: 0;
+        background: transparent;
+        color: var(--dim);
+        font: inherit;
+        font-size: 13px;
+        cursor: default;
+        display: grid;
+        place-items: center;
+      }
+      .controls button:hover { background: #1f242d; color: var(--fg); }
+      .controls button.close:hover { background: #c0392b; color: #fff; }
+
+      /* ---------- 内容区 ---------- */
+      main { padding: 16px 18px; overflow: auto; display: grid; gap: 14px; align-content: start; }
+      h1 { font-size: 14px; margin: 0 0 2px; font-weight: 600; }
+      .sub { color: var(--dim); font-size: 12px; }
+
+      .row { display: flex; gap: 8px; flex-wrap: wrap; }
+      .badge {
+        padding: 2px 9px;
+        border-radius: 999px;
+        background: #1b2a1f;
+        color: var(--accent);
+        font-size: 12px;
+      }
+      .badge.bad { background: #2a1b1b; color: var(--bad); }
+      .badge.idle { background: #1e2229; color: var(--dim); }
+
+      pre {
+        margin: 0;
+        padding: 12px 14px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font: inherit;
+        font-size: 12px;
+        color: var(--dim);
+        max-height: 42vh;
+        overflow: auto;
+        white-space: pre-wrap;
+        user-select: text;
+      }
+      kbd {
+        background: #1e2229;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 0 5px;
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="titlebar" id="titlebar">
+      <div class="dot"></div>
+      <div class="title" id="titleText">WebView Shell</div>
+      <div class="controls">
+        <button id="btnMin" title="最小化">─</button>
+        <button id="btnMax" title="最大化/还原">□</button>
+        <button id="btnClose" class="close" title="关闭">✕</button>
+      </div>
+    </header>
+
+    <main>
+      <div>
+        <h1>自绘标题栏 + 原生缩放边框</h1>
+        <div class="sub">
+          拖动标题栏移动窗口；鼠标移到窗口边缘应出现缩放光标（由 C 层 WM_NCHITTEST 提供）
+        </div>
+      </div>
+
+      <div class="row">
+        <span class="badge idle" id="bWs">ws: 连接中</span>
+        <span class="badge idle" id="bHttp">http: ?</span>
+        <span class="badge idle" id="bGpu">webgpu: ?</span>
+        <span class="badge idle" id="bWin">win: ?</span>
+      </div>
+
+      <pre id="log"></pre>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const out = $("log");
+      const log = (...a) => {
+        const line = a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
+        out.textContent += line + "\n";
+        out.scrollTop = out.scrollHeight;
+      };
+      const badge = (id, text, state) => {
+        const el = $(id);
+        el.textContent = text;
+        el.className = "badge" + (state === true ? "" : state === false ? " bad" : " idle");
+      };
+
+      const token = new URLSearchParams(location.search).get("t");
+      const ws = new WebSocket(`ws://${location.host}/ws?t=${token}`);
+      const pending = [];
+      const send = (o) => (ws.readyState === 1 ? ws.send(JSON.stringify(o)) : pending.push(o));
+
+      ws.onopen = () => {
+        badge("bWs", "ws: open", true);
+        send({ t: "hello", ua: navigator.userAgent });
+        for (const m of pending.splice(0)) ws.send(JSON.stringify(m));
+        log("[ws] open");
+      };
+      ws.onclose = () => badge("bWs", "ws: closed", false);
+
+      // ---- 标题栏交互：拖拽 / 三个按钮 ----
+      const bar = $("titlebar");
+      bar.addEventListener("pointerdown", (e) => {
+        if (e.target.closest(".controls")) return;
+        if (e.button !== 0) return;
+        e.preventDefault();
+        send({ t: "ui", action: "drag" });
+      });
+      bar.addEventListener("dblclick", (e) => {
+        if (e.target.closest(".controls")) return;
+        send({ t: "ui", action: "maximize" });
+      });
+      $("btnMin").addEventListener("click", () => send({ t: "ui", action: "minimize" }));
+      $("btnMax").addEventListener("click", () => send({ t: "ui", action: "maximize" }));
+      $("btnClose").addEventListener("click", () => send({ t: "ui", action: "close" }));
+
+      // ---- 宿主动作回推的窗口状态 ----
+      window.addEventListener("shell-msg", (e) => {
+        const m = e.detail;
+        if (!m || typeof m !== "object") return;
+
+        if (m.t === "win") {
+          // width/height 已是 CSS 像素（96 DPI 基准），pixelWidth/Height 为物理像素
+          badge(
+            "bWin",
+            `win: ${m.width}×${m.height} css · ${m.pixelWidth}×${m.pixelHeight} px @${m.dpi}dpi${m.maximized ? " · 最大化" : ""}`,
+            true,
+          );
+          $("btnMax").textContent = m.maximized ? "❐" : "□";
+          log("[win]", m);
+          // 回传给宿主，便于在日志里核对 NCCALCSIZE 的最大化补偿
+          send({
+            t: "win-report",
+            width: m.width,
+            height: m.height,
+            pixelWidth: m.pixelWidth,
+            pixelHeight: m.pixelHeight,
+            dpi: m.dpi,
+            maximized: m.maximized,
+          });
+        }
+        if (m.t === "from-host") {
+          log("[shell] <-", m);
+          send({ t: "shell-echo", got: m });
+        }
+      });
+
+      // ---- 环境自检 ----
+      fetch("/api/ping")
+        .then((r) => r.json())
+        .then((j) => {
+          badge("bHttp", "http: ok", true);
+          log("[http] ping ->", j);
+        })
+        .catch((e) => {
+          badge("bHttp", "http: 失败", false);
+          log("[http] FAILED", String(e));
+        });
+
+      if (navigator.gpu) {
+        navigator.gpu
+          .requestAdapter()
+          .then((a) => {
+            badge("bGpu", a ? "webgpu: adapter" : "webgpu: 无 adapter", !!a);
+            log("[gpu]", a ? a.info?.description || a.info?.vendor || "adapter present" : "null");
+          })
+          .catch((e) => {
+            badge("bGpu", "webgpu: 出错", false);
+            log("[gpu] FAILED", String(e));
+          });
+      } else {
+        badge("bGpu", "webgpu: undefined", false);
+      }
+
+      // ---- 边框命中自检：把 9 个点交给 C 层核对 ----
+      function probeHittest() {
+        const dpr = window.devicePixelRatio || 1;
+        const w = Math.round(innerWidth * dpr);
+        const h = Math.round(innerHeight * dpr);
+        const pts = [
+          ["左上", 2, 2],
+          ["上中", (w / 2) | 0, 2],
+          ["右上", w - 3, 2],
+          ["左中", 2, (h / 2) | 0],
+          ["中心", (w / 2) | 0, (h / 2) | 0],
+          ["右中", w - 3, (h / 2) | 0],
+          ["左下", 2, h - 3],
+          ["下中", (w / 2) | 0, h - 3],
+          ["右下", w - 3, h - 3],
+        ];
+        log(`[hittest] client=${w}×${h} dpr=${dpr}`);
+        for (const [label, x, y] of pts) send({ t: "hittest-probe", label, x, y });
+      }
+
+      ws.addEventListener("message", (e) => {
+        const m = JSON.parse(e.data);
+        if (m.t === "hittest-result") {
+          const names = {
+            0: "HTNOWHERE", 1: "HTCLIENT", 2: "HTCAPTION", 10: "HTLEFT", 11: "HTRIGHT",
+            12: "HTTOP", 13: "HTTOPLEFT", 14: "HTTOPRIGHT", 15: "HTBOTTOM",
+            16: "HTBOTTOMLEFT", 17: "HTBOTTOMRIGHT",
+          };
+          log(`  ${m.label ?? ""}(${m.x},${m.y}) -> ${m.code} ${names[m.code] ?? ""}`);
+        }
+      });
+
+      // ---- 窗口几何自检：页面侧事实（CSS px） ----
+      function geo() {
+        const g = {
+          t: "geo",
+          screenX: window.screenX,
+          screenY: window.screenY,
+          outerW: window.outerWidth,
+          outerH: window.outerHeight,
+          innerW: window.innerWidth,
+          innerH: window.innerHeight,
+          screenW: screen.width,
+          screenH: screen.height,
+          availW: screen.availWidth,
+          availH: screen.availHeight,
+          dpr: window.devicePixelRatio,
+        };
+        log("[geo]", g);
+        send(g);
+      }
+      setTimeout(geo, 700);
+
+      setTimeout(probeHittest, 600);
+      log("[page] ready");
+    </script>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+# 构建与发布产物（可由 native/build.ps1 + native/build-pack.ps1 重建）
+/build/
+/dist/
+
+# 运行日志
+*.log
+
+# Bun / Node
+node_modules/
+bun.lockb
+
+# 临时与编辑器
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
