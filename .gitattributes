@@ -16,3 +16,15 @@
 *.db binary
 *.db-wal binary
 *.db-shm binary
+
+# vendor/ 为第三方源码与 SDK 解包件，只读参考（见 AGENTS.md）。
+# 设 -text 使其完全脱离 EOL 归一化：git 既不转换也不校正它们，
+# 避免 `git add --renormalize` 把 NuGet 包内容（webview2 下有 10 个 CRLF 文件）
+# 改写成偏离上游的形态。这不是 LF 政策的例外——它们是只读外部件，
+# 不属于本仓「写」的范围；本仓自管文本仍统一 LF。
+#
+# 必须写 vendor/** 而不是 vendor/：gitattributes 与 .gitignore 有一处关键差异——
+# 匹配目录的 pattern 不递归匹配其内部文件（gitattributes 文档 "patterns that
+# match a directory do not recursively match paths inside that directory"）。
+# 写 vendor/ 会静默失效（check-attr 仍返回 text: auto）。
+vendor/** -text
