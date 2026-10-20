@@ -349,7 +349,7 @@
     - 本次两种场景均实测确认修复生效。
 - **证据**：`实测`（2026-10-20，`scripts/gate.ps1` 首版实测复现并修复）。
 - **延伸**：`Write-Host` 不进入管道（写的是主机流），所以日志用 `Write-Host` 是安全的；危险的是**裸调用外部命令**和 `Write-Output`。
-- **后续**：该脚本已于 2026-10-20 迁为 `scripts/gate.ts`（ADR 0012）。TS 里不存在「函数输出混进返回值」这个语义，`Bun.spawn` 的 `exited` 也是每次调用绑定的值，因此这类 bug 在新实现中不再可能发生——但留在 `.ps1` 里的其他脚本仍适用本条。
+- **适用范围**：本条只对仓库里残留的 `.ps1` 成立。`gate.ts` 之后新写的 TS 脚本不存在「函数输出混进返回值」这个语义，`Bun.spawn` 的 `exited` 也是每次调用绑定的值，因此不受影响。
 
 ### 5.4 npm registry 写入后立即读取可能拿到旧值
 
@@ -368,7 +368,7 @@
 - **修法**：判据换成 `native/build.ps1` 自己校验的那三个文件（`webview.h` / `EventToken.h` / `WebView2.h`），缺哪个补哪个；联网动作（clone 上游、下载 nupkg）改为显式开关 `-Webview` / `-Sdk`，默认路径全程离线。clone 后剥掉 `.git`，与入库状态保持同构。
 - **验证**（四种目录状态各跑一次，均在 `-Root` 隔离目录内进行）：不完整 → `exit 1` 并指路 `-Webview`；缺 SDK 但 nupkg 在 → `exit 0` 且离线解压出 927,399 B 的头文件；三份齐备 → `exit 0` 且文件数不变；目录整个不存在 → 走 clone 分支。
 - **证据**：`实测`（2026-10-20）。`git clone` 到非空目录返回 `128`、clone 到空目录返回 `0`，两者均为实测。
-- **后续**：该脚本已于 2026-10-20 迁为 `native/fetch.ts`（ADR 0012）。四种目录状态的决策逻辑抽成了纯函数 `decideWebview` / `decideSdk`，由 `tests/fetch.test.ts` 的 14 个用例覆盖——「目录存在但不完整」这一态此前从未被验证过（旧版判据恒为真，根本进不去），现在被钉住了。另加一条静态断言：`INPUTS` 的每条路径都必须出现在 `native/build.ps1` 的前置校验里，防止两个脚本再次漂移。
+- **适用范围**：`native/fetch.ts` 的 `decideWebview` / `decideSdk` 已把四种目录状态的决策抽成纯函数，由 `tests/fetch.test.ts` 覆盖；`INPUTS` 与 `native/build.ts` 共享同一份常量定义，判据不会再分叉。本条作为「为什么这么设计」的由来保留。
 
 ### 5.6 PowerShell 的 `Set-Content` 会静默改写换行符
 
@@ -379,7 +379,7 @@
 - **修法**：PS 脚本要改文件时显式指定——`Set-Content -NoNewline` 配 `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))`，或者干脆用 TS 改文件。回滚后用 `git diff --stat` 确认，再用逐字节扫描复核（见验证）。
 - **验证**：写一个 40 行的逐字节扫描器，统计每个文件的 `CR LF` 相邻对；一次性验证脚本跑完后全仓应为 0。
 - **证据**：`实测`（2026-10-20，冒烟验证 `.ps1` 语法门禁时污染了 `scripts/install-hooks.ps1`，内容 diff 为空但 EOL 已变）。
-- **后续**：`install-hooks` 与 `bump-version` 均已迁为 `.ts`（ADR 0012）。TS 里 `writeFileSync(path, text, "utf8")` 写的是调用方给的字节，不做 EOL 转换，这类污染在结构上不再可能发生。剩下 14 个 `.ps1` 只做诊断，不负责改写仓库文件，因此不受影响。
+- **适用范围**：仓库里还剩 14 个 `.ps1`，它们只做诊断、不负责改写仓库文件，因此不受本条影响。凡是**写文件**的脚本都应当是 `.ts`——`writeFileSync(path, text, "utf8")` 写的是调用方给的字节，不做 EOL 转换。
 
 ### 5.7 Git 的 `sh` 与 pwsh 是两个环境：`tar` 和 `import.meta.main` 都会变
 
@@ -402,6 +402,26 @@
 
 ---
 
+### 5.8 判断「当前模块是不是入口」不能用 import.meta.main 单独决定，也不能把它写在 helper 里
+
+- **症状**：某个 TS 脚本在 pwsh 下正常、在 `pre-push` 钩子里**零输出、退出码 0**，什么都不做却报成功。
+- **原因（两层）**：
+    1. `bun run <path>` 保留调用方 cwd 的**字面大小写**（`_repositories`），而 `import.meta.path` 是真实路径（`_Repositories`）。两者只差大小写，`import.meta.main` 就变成 `false`，入口被 `if (import.meta.main)` 挡掉。
+    2. 第一版修复把判定写成无参函数、在 helper 模块内部读 `import.meta.main` / `import.meta.path`。**`import.meta` 是模块作用域的**——在被 import 的模块里 `main` 恒为 `false`、`path` 恒指向 helper 自己。函数恒返回 `false`，把三个脚本的入口全挡掉，同样静默。
+- **修法**：判定写成纯函数 `isEntrypoint(moduleMain, modulePath, argv1?)`，两个值由调用方传入：`import.meta.main` 为真，**或者** `argv[1]` 与 `modulePath` 在规范化（解析 + 正斜杠 + 小写）后相等。
+- **教训**：守护逻辑自身必须被测试。`tests/entrypoint.test.ts` 里专门有一条「守卫不能恒为假」——上一版正是恒为假。
+- **证据**：`实测`（2026-10-20）。三种调用组合：pwsh 里 `bun run` → true；Git 的 `sh` 里 `bun run`（cwd 小写）→ false；Git 的 `sh` 里 `bun` 直跑 → true。
+
+### 5.9 .NET / Node 的相对路径按**进程 cwd** 解析，不跟 PowerShell 的 Location
+
+- **症状**：`cd` 到仓库目录后，用 `[System.IO.File]::ReadAllBytes('AGENTS.md')` 读到的大小与 `Get-Item` 报的差一半；一度以为文档被截断，实际是读到了另一个位置的文件。
+- **原因**：PowerShell 的 `cd`（`Set-Location`）只改变 **PowerShell 的 Location**，不改变进程工作目录。而 `.NET` 的 `File.*`、Node 的 `process.cwd()` 以及很多原生库都按**进程 cwd** 解析相对路径。
+    - 表现是「命令没报错，但读/写到了别处」——比抛错危险得多。
+- **修法**：脚本里一律用**绝对路径**；需要换目录时用工具调用提供的 `cwd` 参数（它设置进程工作目录），而不是在命令里拼 `cd xxx;`。
+- **证据**：`实测`（2026-10-20，核对 `AGENTS.md` 字节数时误判为文件被截断）。
+
+---
+
 ## 六、已确认的运行时行为基线
 
 供后续对比回归：
@@ -419,13 +439,3 @@
 | 单文件 exe 体积 | 约 92.6 MiB（Bun 运行时占绝大部分） |
 | DLL 体积 | 约 913 KB |
 | 签名开销 | 约 7.2 KB |
-
-### 5.8 判断「当前模块是不是入口」不能用 import.meta.main 单独决定，也不能把它写在 helper 里
-
-- **症状**：某个 TS 脚本在 pwsh 下正常、在 `pre-push` 钩子里**零输出、退出码 0**，什么都不做却报成功。
-- **原因（两层）**：
-    1. `bun run <path>` 保留调用方 cwd 的**字面大小写**（`_repositories`），而 `import.meta.path` 是真实路径（`_Repositories`）。两者只差大小写，`import.meta.main` 就变成 `false`，入口被 `if (import.meta.main)` 挡掉。
-    2. 第一版修复把判定写成无参函数、在 helper 模块内部读 `import.meta.main` / `import.meta.path`。**`import.meta` 是模块作用域的**——在被 import 的模块里 `main` 恒为 `false`、`path` 恒指向 helper 自己。函数恒返回 `false`，把三个脚本的入口全挡掉，同样静默。
-- **修法**：判定写成纯函数 `isEntrypoint(moduleMain, modulePath, argv1?)`，两个值由调用方传入：`import.meta.main` 为真，**或者** `argv[1]` 与 `modulePath` 在规范化（解析 + 正斜杠 + 小写）后相等。
-- **教训**：守护逻辑自身必须被测试。`tests/entrypoint.test.ts` 里专门有一条「守卫不能恒为假」——上一版正是恒为假。
-- **证据**：`实测`（2026-10-20）。三种调用组合：pwsh 里 `bun run` → true；Git 的 `sh` 里 `bun run`（cwd 小写）→ false；Git 的 `sh` 里 `bun` 直跑 → true。
