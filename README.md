@@ -1,8 +1,8 @@
 # bun-app-window
 
-Windows 上用系统 WebView2 承载界面的**原生窗口壳**，给 Bun 应用用。无边框、DPI 感知、缩放边框、双向消息通道，ABI 与原生层都在你自己的代码里。
+Windows 上用系统 WebView2 承载界面的原生窗口壳，供 Bun 应用使用。
 
-不是 Electron 的替代品，也不是应用框架：它只负责一个窗口，业务与 UI 都在壳之外。
+只负责窗口：开窗、几何、DPI、边框、消息通道。业务逻辑与 UI 都在壳之外。
 
 ---
 
@@ -17,40 +17,23 @@ const server = serveOnSafePort({ fetch: () => new Response("<h1>Hello</h1>") });
 await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS });
 ```
 
-Read the platform notes below before adopting this — the scope is deliberately narrow.
-
 ---
 
 ## 采用前请先读这三条
 
-本项目刻意把边界画得很窄。以下三点不是免责声明，是会直接影响你能否使用的事实：
-
 | 事实 | 后果 |
 | --- | --- |
-| **仅 Windows x64** | `package.json` 的 `os` / `cpu` 字段会**直接拒绝**为其他平台安装。名字里的平台中立只是预留，不是能力 |
-| **发布的是 TypeScript 源码** | 包内没有编译产物（`dist/` 只有 `.dll`）。消费者必须用 **Bun ≥ 1.4.3**；Node.js 装得上也跑不了 |
-| **`bun:ffi` 在 Bun 中标注为 experimental** | Bun 官方建议生产环境改用 Node-API。本项目的取舍是用这一点换「零第三方依赖 + 全栈同源」，理由见 `docs/pitfalls.md` 与 `.internal/adr/0007`（后者不进版本控制） |
+| 仅 Windows x64 | `os` / `cpu` 字段会直接拒绝为其他平台安装。包名的平台中立是预留，不是能力 |
+| 发布的是 TypeScript 源码 | 必须使用 Bun ≥ 1.4.3。Node.js 装得上，跑不了 |
+| `bun:ffi` 在 Bun 中标注为 experimental | Bun 官方建议生产环境改用 Node-API，本项目的取舍是换取零第三方依赖 |
 
-另外：需要**交互式桌面会话**（Session 0 的服务里 WebView2 起不来），且系统需已安装 WebView2 Runtime（Win11 自带）。
-
----
-
-```
-你的 Bun 进程
-├─ 业务逻辑（原样）
-├─ 本地 HTTP + WebSocket（自己起，或用 serveOnSafePort）
-└─ bun-app-window  ← 开窗、几何、DPI、消息桥
-        └─ libshell.dll  →  WebView2
-```
-
+另有两条运行前提：需要交互式桌面会话（Session 0 的服务里 WebView2 起不来），系统需已安装 WebView2 Runtime（Win11 自带）。
 
 ## 安装
 
 ```bash
 bun add bun-app-window
 ```
-
-要求：Windows 10/11 x64、Bun ≥ 1.4、系统已安装 WebView2 Runtime（Win11 自带）。
 
 ## 最小用法
 
@@ -77,341 +60,144 @@ shell.post(JSON.stringify({ t: "ready" }));   // 宿 → 页面
 shell.setTitle("Doing work…");
 ```
 
-## API
+`createShell(opts)` 只解析原生库、不开窗；`openShell(opts)` 是创建并启动，失败抛错。
 
-`createShell(opts)` → `Promise<Shell>`，只解析原生库不开窗；`openShell(opts)` = 创建 + 启动，失败抛错。
+## API
 
 | 成员 | 说明 |
 | --- | --- |
-| `start()` | 开窗，返回 `{ rc, error }`；立即返回，UI 在原生线程 |
+| `start()` | 开窗，返回 `{ rc, error }`。立即返回，UI 在原生线程 |
+| `stop()` | 销毁窗口，可重复调用 |
 | `post(json)` | 宿 → 页面，单向投递，不等结果 |
 | `setTitle` / `minimize` / `toggleMaximize` / `close` | 窗口操作，返回 rc |
 | `drag()` | 页面 `pointerdown` → 原生拖拽（保留贴边分屏） |
 | `beginResize(edge)` | 页面 `pointermove` → 边框缩放，edge 取 `RESIZE_EDGE.*` |
 | `setMinSize(w, h)` | 最小尺寸，逻辑像素 |
+| `show()` | 配合 `FLAG_DEFER_SHOW`：页面就绪后再显示 |
 | `state()` | `{ maximized, minimized, focused, dark, raw }` |
-| `isAlive()` | 窗口是否仍存在；`state()` 无法区分「未启动」与「已销毁」 |
-| `lastError()` | 最近失败原因，无错为空串（互斥读出的拷贝，不受并发写影响） |
-| `show()` | 配合 `FLAG_DEFER_SHOW`：页面就绪后再显示，消除首帧闪烁 |
-| `pickFolder(title?)` | 原生文件夹选择框。**同步阻塞**调用线程，需要并发请放 Worker |
+| `isAlive()` | 窗口是否仍存在。`state()` 无法区分「未启动」与「已销毁」 |
+| `lastError()` | 最近失败原因，无错为空串 |
+| `pickFolder(title?)` | 原生文件夹选择框。同步阻塞调用线程 |
 | `setZoom(f)` / `getZoom()` | 页面缩放 0.25–3.0，越界自动钳制 |
 | `reload()` / `openDevTools()` / `toggleFullscreen()` | 等同 Ctrl+R / F12 / F11 |
-| `stop()` | 销毁窗口，可重复调用 |
+| `setBrowserUi(mask)` | 关闭浏览器行为，取 `BROWSER_UI_*` 按位或 |
+| `showContextMenu(x, y, items)` | 弹原生上下文菜单，见下 |
 | `libInfo` | 原生库解析结果（路径、来源、sha256） |
-| `symbols` | 逃生舱：直接拿 dlopen 出来的符号 |
+| `symbols` | 逃生舱：直接访问 dlopen 出来的符号 |
 
-标志位（按位或）：`FLAG_FRAMELESS`、`FLAG_TOPMOST`、`FLAG_CENTER`、`FLAG_RESIZABLE`、
-`FLAG_DEFER_SHOW`、`FLAG_ACCEPT_DROP`、`FLAG_START_MAXIMIZED`。
+标志位（按位或）：
 
-`FLAG_START_MAXIMIZED` 让窗口第一次出现就是最大化。不要用「`show()` 之后再
-`toggleMaximize()`」代替——那会先闪一个小窗再撑满。与 `FLAG_CENTER` 同时给时
-以最大化为准（它会覆盖位置）。
-
-### 内置的键盘与鼠标行为
-
-窗口建好即可用，不需要应用侧接线：
-
-| 操作 | 行为 |
+| 标志 | 作用 |
 | --- | --- |
-| `Ctrl` `+` / `Ctrl` `-` / `Ctrl+0` | 页面缩放：上/下一档 / 复位 |
-| `Ctrl+滚轮` | 同上，按滚轮方向 |
-| `F11` | 全屏切换（连边框与任务栏一起让出，与「最大化」不同） |
-| `F5` / `Ctrl+R` | 重新加载 |
-| `F12` | 打开 WebView2 开发者工具 |
-| `Alt+Space` / 右键标题栏 | 系统菜单 |
-| 拖入文件/文件夹 | 需 `FLAG_ACCEPT_DROP`，见下 |
+| `FLAG_FRAMELESS` | 自建无边框窗口，标题栏由页面绘制 |
+| `FLAG_RESIZABLE` | 可缩放 |
+| `FLAG_CENTER` | 启动时居中到工作区，两种窗口模式都生效 |
+| `FLAG_TOPMOST` | 置顶 |
+| `FLAG_DEFER_SHOW` | 创建后不显示，等 `show()` |
+| `FLAG_ACCEPT_DROP` | 接受文件/文件夹拖放 |
+| `FLAG_START_MAXIMIZED` | 首次出现即最大化，无中间帧 |
 
-### 拖放
+## 子路径入口
+
+主入口之外的能力放在独立子路径，按需引入。
+
+### `bun-app-window/ipc` — 类型化调用与事件
+
+宿主与页面共享一份类型声明，客户端用泛型在编译期校验：
 
 ```ts
-const shell = await openShell({ url, flags: FLAG_ACCEPT_DROP });
+// api.ts —— 宿主与页面 import 同一个文件
+export type Api = { greet(name: string): string };
+export type Events = { windowState: { maximized: boolean } };
 ```
 
-落下的路径以 shell-msg 推送：
+```ts
+// 宿主
+import { createIpcServer } from "bun-app-window/ipc";
 
-```js
-window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "drop") console.log(e.detail.paths); // ["C:\\题库"]
+const ipc = createIpcServer({
+  service: { greet: (name: string) => `Hello ${name}` },
 });
+
+serveOnSafePort({
+  fetch(req) { /* 页面与鉴权 */ },
+  websocket: {
+    open: (ws) => ipc.attach(ws),
+    message: (ws, raw) => ipc.handle(ws, raw),
+    close: (ws) => ipc.detach(ws),
+  },
+});
+
+ipc.emit("windowState", { maximized: false });   // 主动推送
 ```
-
-提权进程（High 完整性）下资源管理器属 Medium，默认收不到 `WM_DROPFILES`；壳已用
-`ChangeWindowMessageFilterEx` 放行，无需调用方处理。
-
-### 让它像原生应用而不是网页
-
-WebView2 的默认设置是**浏览器**语义。这不是缺陷——对浏览器是对的，对桌面应用
-每一条都是「这是个网页」的破绽。壳提供两件事把它掰回来。
-
-#### 1. 关掉浏览器行为
-
-```ts
-import { openShell, BROWSER_UI_ALL } from "bun-app-window";
-
-const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
-```
-
-| 位 | 关掉的东西 | 不关的话 |
-| --- | --- | --- |
-| `BROWSER_UI_MENU` | 默认右键菜单 | 右键出现「重新加载 / 检查 / 另存为 / 打印 / 翻译成中文 / Web 捕获」 |
-| `BROWSER_UI_KEYS` | 浏览器快捷键 | `Ctrl+P` 打印网页、`Ctrl+F` 查找、`Ctrl+S` 保存网页 |
-| `BROWSER_UI_STATUSBAR` | 悬停状态栏 | 鼠标划过任何元素左下角跳出链接地址 |
-| `BROWSER_UI_SWIPE` | 触控板滑动导航 | 横滑会前进/后退，整页被替换 |
-| `BROWSER_UI_AUTOFILL` | 表单自动填充 | 输入框弹出历史值下拉、密码保存提示 |
-
-运行中也可切换：`shell.setBrowserUi(mask)`。
-
-`F11` 全屏、`F12` 开发者工具、`Ctrl±` 缩放不受这项影响——它们由壳自己处理，
-不是 WebView2 的浏览器快捷键。
-
-#### 2. 用原生菜单替掉默认右键菜单
-
-关掉默认菜单后右键就成了「点了没反应」，那也不像原生应用。原生应用的右键是有
-菜单的，只是菜单属于应用：
 
 ```ts
 // 页面
-document.addEventListener("contextmenu", (e) => {
-  e.preventDefault();
-  fetch("/api/menu", {
-    method: "POST",
-    body: JSON.stringify({
-      x: Math.round(e.screenX),
-      y: Math.round(e.screenY),
-      items: "open|打开题库\nrefresh|刷新\n-\nquit|退出",
-    }),
-  });
-});
-
-window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "menu") console.log("选中", e.detail.id);
-});
-```
-
-菜单本身是 Win32 的 `TrackPopupMenu`：跟随系统主题、支持键盘导航、带阴影、
-贴边自动翻向。`items` 用行描述，`id|label` 每行一项，单独 `-` 是分隔线。
-
-壳不做 JSON 解析——只切分字符串，所以页面不必担心跨进程传结构的兼容性。
-
-#### 3. 页面侧还剩三件事
-
-壳管不到 DOM，这三条要应用自己做：
-
-```css
-/* 光标：网页默认 I 形，桌面应用是箭头 */
-html, body { cursor: default; }
-/* 选择：整块文字可拖选是网页特征；输入区与日志要留出选择能力 */
-body { user-select: none; }
-input, textarea, .log { user-select: text; cursor: auto; }
-/* 焦点环：鼠标点进来不该出现，Tab 过来才该有 */
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-```
-
-输入框还要关掉拼写检查与自动填充：
-
-```html
-<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off">
-```
-
-拼写检查会给路径与数值标红波浪线——这是最容易被忽略、也最能暴露「这是网页」的一条。
-
-### 类型化 IPC（独立入口）
-
-宿主与页面之间需要双向通信：页面调宿主的原生能力，宿主向页面推状态。壳本身只提供
-一条单向的 `post()`，收发的形状要应用自己约定——于是每个接入方都要手写一遍
-「消息类型 + 路由 + 错误处理」。
-
-`bun-app-window/ipc` 把这件事收敛成一份声明：**方法表**。
-
-#### 与 MyGo 的差别：不生成代码
-
-MyGo 用 Go 写宿主，所以必须从 Go 代码生成 TypeScript 客户端——那是在两门语言之间
-造一座桥。这里宿主和页面**都是 TypeScript**，共享一份 `type` 就够：
-
-```ts
-// api.ts —— 宿主与页面 import 同一个文件，不需要任何构建步骤
-export type Api = {
-    greet(name: string): string;
-    pickFolder(title?: string): Promise<string | null>;
-};
-
-export type Events = {
-    windowState: { width: number; height: number; maximized: boolean };
-};
-```
-
-生成器会多出一个「生成物与源不一致」的故障源，却不带来任何新类型信息。
-类型安全由泛型在编译期保证，和生成代码等价。
-
-#### 宿主侧
-
-```ts
-import { createIpcServer } from "bun-app-window/ipc";
-import { serveOnSafePort } from "bun-app-window";
-
-const ipc = createIpcServer({
-    service: {
-        greet: (name: string) => `Hello ${name}`,
-        pickFolder: () => shell.pickFolder(),
-    },
-});
-
-const server = serveOnSafePort({
-    fetch(req) { /* 页面与鉴权，见最小用法 */ },
-    websocket: {
-        open: (ws) => ipc.attach(ws),
-        message: (ws, raw) => ipc.handle(ws, raw),
-        close: (ws) => ipc.detach(ws),
-    },
-});
-
-// 主动推送
-ipc.emit("windowState", { width: 900, height: 700, maximized: false });
-```
-
-`attach` / `detach` 必须成对——`emit` 只向已登记连接广播。
-
-#### 页面侧
-
-```ts
 import { connect } from "bun-app-window/ipc";
 import type { Api, Events } from "./api";
 
 const api = await connect<Api, Events>();
-
-const hello = await api.greet("Ada");       // string，返回值有类型
-const dir = await api.pickFolder();         // string | null
+await api.greet("Ada");                        // string
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
-`connect` 会自动从页面 URL 的 `?t=` 取 token 连 `/ws`——和 `src/host.ts` 的约定一致。
-要接到别处就传 `url` 或现成的 `channel`。
+`connect` 从页面 URL 的 `?t=` 取 token 连 `/ws`。要接到别处就传 `url` 或现成的 `channel`。
 
-#### 值得知道的几条
-
-| 行为 | 说明 |
-| --- | --- |
-| 未知方法 | 回 `unknown method: xxx`，不会命中 `constructor` 等原型链名字 |
-| 抛错 | 只回 `message`；宿主 stack 默认不回传，`exposeStack: true` 才带 |
-| 返回 `undefined` | 归一成 `null`（JSON 没有 undefined） |
-| 并发调用 | 按 id 配对，不依赖顺序 |
-| 超时 | 默认 30s，`timeoutMs: 0` 关闭；迟到的回复被丢弃 |
-| 通道断开 | 所有未完成调用立刻 reject |
-| 非 IPC 消息 | 静默忽略，可以和自己的协议共用一条 WebSocket |
-
-`service` 里可以放任何函数，包括 `async`——`handle` 会 `await`。
-
-### Win 11 标题栏组件（独立入口）
-
-无边框模式下窗口没有系统标题栏，得自己画。自己画容易画出「网页顶上贴了三个按钮」
-的效果，差在尺寸、悬停色、按钮字形这些细节上。
-
-`bun-app-window/titlebar` 是一份调好的实现：32px 高、46×32 按钮、关闭键悬停 `#c42b1c`、
-深色/浅色两套配色、最大化与还原按钮自动换字形。
+### `bun-app-window/titlebar` — Win 11 标题栏
 
 ```ts
 import { mountTitleBar, bridgeFromWindowService } from "bun-app-window/titlebar";
-import { connect } from "bun-app-window/ipc";
 
-const api = await connect<WindowApi, Events>();
 const bar = mountTitleBar({
-    title: "我的应用",
-    icon: "/icon.svg",
-    bridge: bridgeFromWindowService(api.window),
+  title: "我的应用",
+  icon: "/icon.svg",
+  bridge: bridgeFromWindowService(api.window),
 });
 
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
-对应的宿主服务只要四个方法：
+对应的宿主服务需要四个方法：
 
 ```ts
-const ipc = createIpcServer({
-    service: {
-        window: {
-            minimize: () => shell.minimize(),
-            toggleMaximize: () => shell.toggleMaximize(),
-            close: () => shell.close(),
-            drag: () => shell.drag(),
-        },
+createIpcServer({
+  service: {
+    window: {
+      minimize: () => shell.minimize(),
+      toggleMaximize: () => shell.toggleMaximize(),
+      close: () => shell.close(),
+      drag: () => shell.drag(),
     },
+  },
 });
 ```
 
-拖拽走 `shell.drag()`，由原生发 `WM_NCLBUTTONDOWN HTCAPTION`——所以**贴边分屏、
-双击最大化、按住 Shift 右键系统菜单全都保留**，不是自己模拟的拖动。
+拖拽走 `shell.drag()`，由原生发 `WM_NCLBUTTONDOWN HTCAPTION`，贴边分屏与双击最大化均保留。
 
-#### 两点设计取舍
+配色与尺寸全走 CSS 变量（`--ws-tb-*`），覆盖即可换肤。按钮字形默认用几何符号；`icons: "fluent"` 走 Segoe Fluent Icons，该字体缺失时会显示成豆腐块。
 
-**不依赖 `bun-app-window` 的任何内部模块。** 窗口控制走注入的 `bridge`，所以这个组件
-也能用在 Electron 或 Tauri 里。要接别的壳，实现 `TitleBarBridge` 四个方法即可。
-
-**配色和尺寸全走 CSS 变量**，覆盖 `--ws-tb-*` 就能换肤：
-
-```css
-.ws-titlebar {
-    --ws-tb-height: 40px;
-    --ws-tb-bg: #1b1b1b;
-    --ws-tb-close-hover: #d13438;
-}
-```
-
-#### 按钮字形
-
-默认用几何符号（`─ □ ❐ ✕`），任何字体都有，零依赖。想要更接近 Win 11 原生观感：
+### `bun-app-window/state` — 窗口位置持久化
 
 ```ts
-mountTitleBar({ icons: "fluent", /* ... */ });
-```
-
-这走 Segoe Fluent Icons 的私有区码位。**该字体缺失时会显示成豆腐块**，所以不是默认值。
-
-#### 别忘了关掉浏览器行为
-
-标题栏只是外观。要让它真的像桌面应用，还得配 `BROWSER_UI_ALL`——否则右键弹出的是
-Edge 菜单、`Ctrl+P` 会打印页面。见上一节。
-
-### 窗口位置持久化（独立入口）
-
-库主体有一条硬约束：`index.ts` 不引入副作用。持久化按定义就是副作用，所以它是
-**显式调用**的可选件，放在 `bun-app-window/state`——不调用就不会有任何文件产生。
-
-```ts
-import { openShell } from "bun-app-window";
 import { attachPlacementStore, loadPlacement, restorePlacement } from "bun-app-window/state";
 
 const FILE = "C:\\Users\\me\\AppData\\Roaming\\MyApp\\window.json";
-const shell = await openShell({ url, width: 900, height: 700, flags: FLAG_DEFER_SHOW });
+const shell = await openShell({ url, flags: FLAG_DEFER_SHOW });
 
-// 启动时恢复（没有记录就保持默认）
 const saved = await loadPlacement(FILE);
 if (saved) restorePlacement(shell, saved);
 
 shell.show();
 
-// 运行期跟踪位置；静止时不写盘
-const store = attachPlacementStore(shell, FILE);
+const store = attachPlacementStore(shell, FILE);   // 轮询，静止时不写盘
 process.on("beforeExit", () => store.flush());
 ```
 
-原生侧已处理三个跨会话必踩点，调用方不需要关心：
+原生侧已处理最大化存还原矩形、DPI 换算、屏外坐标校验三种情况。一次性读写用 `capturePlacement` / `savePlacement`，不需要开定时器。
 
-| 情况 | 处理 |
-| --- | --- |
-| 用户最大化后关闭 | 存「还原后」的矩形，不是整屏尺寸 |
-| 缩放比例变了 | 按 DPI 比例换算尺寸 |
-| 外接屏拔掉 / 分辨率变了 | 坐标与某块工作区交叠不足 80×40 则在屏内居中 |
+### `bun-app-window/debug` — 排障面
 
-`attachPlacementStore` 是轮询（默认 700 ms）：宿主拿不到原生→回调的通道，
-而 `GetWindowRect` 是微秒级。窗口静止时不产生任何写入（内容比对），
-写入用「临时文件 + 改名」保证原子——避免关闭时被强杀留下半截 JSON。
-
-只需要一次性读写时用 `capturePlacement` / `savePlacement`，不需要开定时器。
-
-### 排障面（独立入口）
-
-诊断接口不放在主入口——留在主入口等于把它们也变成契约，改一次诊断输出就成了破坏性
-变更。它们随时可能变化，生产代码不应依赖：
+诊断接口不属稳定契约，随时可能变化：
 
 ```ts
 import { debugOf } from "bun-app-window/debug";
@@ -422,6 +208,93 @@ d.dpi();       // 感知级别与缩放
 d.hittest(x, y);
 ```
 
+## 常见任务
+
+### 关掉浏览器行为
+
+WebView2 默认是浏览器语义。桌面应用通常全关：
+
+```ts
+import { BROWSER_UI_ALL } from "bun-app-window";
+
+const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
+```
+
+| 位 | 关掉的东西 |
+| --- | --- |
+| `BROWSER_UI_MENU` | 默认右键菜单（Edge 菜单） |
+| `BROWSER_UI_KEYS` | `Ctrl+P` / `Ctrl+F` / `Ctrl+S` |
+| `BROWSER_UI_STATUSBAR` | 左下角悬停状态栏 |
+| `BROWSER_UI_SWIPE` | 触控板横滑前进/后退 |
+| `BROWSER_UI_AUTOFILL` | 表单自动填充 |
+
+`F11` / `F12` / `Ctrl±` 由壳自己处理，不受影响。
+
+### 右键菜单
+
+关掉默认菜单后，右键需应用提供：
+
+```ts
+// 页面
+document.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  shell.showContextMenu(Math.round(e.screenX), Math.round(e.screenY),
+    "open|打开\nrefresh|刷新\n-\nquit|退出");
+});
+
+window.addEventListener("shell-msg", (e) => {
+  if (e.detail.t === "menu") console.log("选中", e.detail.id);
+});
+```
+
+`items` 用行描述，`id|label` 每行一项，单独 `-` 是分隔线。菜单由 Win32 `TrackPopupMenu` 绘制。
+
+### 拖放
+
+```ts
+const shell = await openShell({ url, flags: FLAG_ACCEPT_DROP });
+```
+
+```js
+window.addEventListener("shell-msg", (e) => {
+  if (e.detail.t === "drop") console.log(e.detail.paths);
+});
+```
+
+提权进程下资源管理器属 Medium，壳已用 `ChangeWindowMessageFilterEx` 放行。
+
+### 页面侧建议
+
+壳不注入 DOM，这三条要应用自己做：
+
+```css
+html, body { cursor: default; }
+body { user-select: none; }
+input, textarea, .log { user-select: text; cursor: auto; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+```
+
+```html
+<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off">
+```
+
+拼写检查会给路径与数值标红波浪线，是最容易暴露「这是个网页」的一条。
+
+### 打成单文件 exe
+
+```ts
+import { createShell } from "bun-app-window";
+import { embeddedDll } from "bun-app-window/embedded";   // 把 DLL 带进包
+
+const shell = await createShell({ url, embedded: embeddedDll });
+```
+
+```bash
+bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
+```
+
+只写 `import "bun-app-window/embedded";` 也可以。不加 `--windows-hide-console` 会出现黑色控制台窗口。
+
 ## 原生库怎么被找到
 
 按顺序尝试：
@@ -431,97 +304,51 @@ d.hittest(x, y);
 3. 编译产物同级 —— exe 旁放 `libshell.dll`
 4. 开发态 —— 包根 `.build/libshell.dll` → `dist/libshell.dll`
 
-## 打成单文件 exe
+## 内置的键盘与鼠标行为
 
-```ts
-import { createShell } from "bun-app-window";
-import { embeddedDll } from "bun-app-window/embedded";   // 关键：把 DLL 带进包
-
-const shell = await createShell({ url, embedded: embeddedDll });
-```
-
-```bash
-bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
-```
-
-只写 `import "bun-app-window/embedded";` 也可以——resolve 会自动从 `Bun.embeddedFiles` 里找到它。
-
-不需要 `--windows-hide-console` 之外的特殊参数；不加会出现黑色控制台窗口。
-
-## 页面侧
-
-页面是普通 web 页面，跟壳的接口只有一个 JSON 通道。约定由你定，本仓的自检页给了一份参考：
-
-```js
-// 页面 → 宿
-ws.send(JSON.stringify({ t: "ui", action: "drag" }));
-// 宿 → 页面
-window.__shellRecv = (payload) => { /* ... */ };
-```
-
-`shell.post()` 投递的文本，页面侧用 WS 或 `window.__shellRecv` 接收——**这一点由你的页面侧实现决定，壳不注入 DOM**。
+| 操作 | 行为 |
+| --- | --- |
+| `Ctrl+` / `Ctrl-` / `Ctrl+0` | 页面缩放：上/下一档 / 复位 |
+| `Ctrl+滚轮` | 同上 |
+| `F11` | 全屏（连边框与任务栏一起让出） |
+| `F5` / `Ctrl+R` | 重新加载 |
+| `F12` | 开发者工具 |
+| `Alt+Space` / 右键标题栏 | 系统菜单 |
 
 ## 平台与边界
 
-- 仅 Windows x64。`libshell.dll` 预编译随包分发，不在安装期编译（很多环境禁 lifecycle scripts）。
-- 需要交互式会话：服务（Session 0）里 WebView2 起不来，这是 Windows 的会话隔离，不是本项目限制。
-- 提权不影响 WebView2：实测 High 完整性级别下正常，无需降权中介。
-- 不支持：托盘、系统菜单、自动更新、多窗口、跨平台。要做就自己在壳外面加。
+- 仅 Windows x64。`libshell.dll` 预编译随包分发，不在安装期编译。
+- 需要交互式会话：Session 0 里 WebView2 起不来，属 Windows 会话隔离。
+- 提权不影响 WebView2：实测 High 完整性级别下正常。
+- 不支持：托盘、系统菜单、自动更新、多窗口、跨平台。
 
 ## 开发与验证
 
-工具链对齐 `bun-ts-project-template`：Bun 1.4.3 + TypeScript 7.0.2，`tsconfig.json` 开了
-`exactOptionalPropertyTypes` / `noUncheckedIndexedAccess` / `verbatimModuleSyntax` /
-`erasableSyntaxOnly` / `noUnusedLocals` 等全套严格项。
-
-门禁是原生命令，本仓不设同名脚本：
+工具链：Bun 1.4.3 + TypeScript 7.0.2，`tsconfig.json` 开启全套严格项。门禁为原生命令，不设同名脚本：
 
 ```bash
-bun check          # 类型（bun >= 1.4.3 内置，与 tsc 7 同规则）
+bun check          # 类型
 bun test           # 行为（tests/，103 例）
 bun run demo       # 自检程序，需要交互式会话
 ```
 
-改 `src/shell/` 或 `package.json` 后，除了两条门禁，还要跑一次「装进外部工程」的冒烟——
-`bun test` 覆盖不到 `files` 清单与 `node_modules` 安装态，详见 `AGENTS.md` 的「依赖包验收」。
+改 `src/shell/` 或 `package.json` 后还要跑一次「装进外部工程」的冒烟，见 `AGENTS.md` 的「依赖包验收」。
 
-## 调试提示
+窗口类名按模式不同，`EnumWindows` 过滤或截图脚本要用对应值：
 
-窗口类名按模式不同，用于 `tools/capture-window.ps1 -Class <name>` 或 `EnumWindows` 过滤：
-
-| 模式 | 类名 | 说明 |
-| --- | --- | --- |
-| 带边框（不传 `FLAG_FRAMELESS`） | `webview` | 由 webview 库自建顶层窗口 |
-| 无边框（传 `FLAG_FRAMELESS`） | `webview_shell` | 本项目自建窗口，再以嵌入模式交给 webview |
-
-传错类名会表现为「窗口明明在，却枚举不到」。
+| 模式 | 类名 |
+| --- | --- |
+| 带边框（不传 `FLAG_FRAMELESS`） | `webview` |
+| 无边框（传 `FLAG_FRAMELESS`） | `webview_shell` |
 
 ## 致谢
 
-本项目的平台层不是从零写的，它站在两个上游之上。
+平台层为 [webview/webview](https://github.com/webview/webview) `0.12.0`（MIT，Serge Zaitsev · Steffen André Langnes）。`vendor/webview/` 是其原样拷贝，未做源码改动。
 
-### [webview/webview](https://github.com/webview/webview) — 平台层
+WebView2 SDK 来自 [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) `1.0.1150.38`（NuGet 包随仓库分发供离线构建）。Runtime 由系统提供。
 
-| 项 | 值 |
-| --- | --- |
-| 版本 | `0.12.0` |
-| 许可 | MIT |
-| 作者 | Serge Zaitsev · Steffen André Langnes |
-
-`vendor/webview/` 是它的原样拷贝，**未做任何源码改动**（`git log` 里只有一次初始导入）。它承担 COM 样板、DPI 换算、WebView2 环境创建与重试；本项目在它之上写 `native/shell.cc` 负责窗口所有权、命中测试与消息队列。
-
-选它的理由与依赖边界记录在 `.internal/adr/0001`（本地文档，不进版本控制）；升级时要留意的三处时序依赖见 `.internal/adr/0007`。
-
-### [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) — 运行时 SDK
-
-`vendor/webview2/` 由 `native/fetch.ps1` 从 `Microsoft.Web.WebView2.1.0.1150.38.nupkg` 解压得到（该 nupkg 随仓库分发，供离线构建）。WebView2 Runtime 本身由系统提供，不随包分发。
-
-### 本项目
-
-原生层 `native/shell.cc`、TypeScript 层（`src/shell/`、`src/ui/titlebar.ts`）与测试由 **Dolores（[TiancongLx](https://github.com/TiancongLx)）** 与 **DeepSeek** 共同完成——调研、实现、调试与反复修改都是一起做的。
-
----
+Co-authored-by DeepSeek
 
 ## 许可
 
-MIT，见 [LICENSE](./LICENSE)。上游 `vendor/webview/` 亦为 MIT，其著作权声明保留在原文件中。
+MIT，见 [LICENSE](./LICENSE)。`vendor/webview/` 亦为 MIT，其著作权声明保留在原文件中。
