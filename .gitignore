@@ -12,6 +12,10 @@
 # Bun / Node
 node_modules/
 
+# 内部开发文档：不属于公开产物，也不进版本库
+/AGENTS.md
+/doc/
+
 # 临时与编辑器
 *.tmp
 *.swp

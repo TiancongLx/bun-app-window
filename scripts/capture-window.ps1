@@ -1,5 +1,5 @@
 #Requires -Version 7.0
-param([string]$Out = 'C:\Users\root\_Projects\webview-shell\build\win.png')
+param([string]$Out = 'C:\Users\root\_Projects\bunframe\build\win.png')
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 

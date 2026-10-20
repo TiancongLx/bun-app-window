@@ -6,7 +6,7 @@ import { expect, test } from "bun:test";
  */
 
 test("主入口可按包名解析，并暴露门面 API", async () => {
-    const mod = await import("webview-shell");
+    const mod = await import("bunframe");
     expect(typeof mod.createShell).toBe("function");
     expect(typeof mod.openShell).toBe("function");
     expect(typeof mod.serveOnSafePort).toBe("function");
@@ -16,7 +16,7 @@ test("主入口可按包名解析，并暴露门面 API", async () => {
 });
 
 test("主入口暴露标志位与常量", async () => {
-    const mod = await import("webview-shell");
+    const mod = await import("bunframe");
     expect(mod.FLAG_FRAMELESS).toBe(1);
     expect(mod.FLAG_TOPMOST).toBe(2);
     expect(mod.FLAG_CENTER).toBe(4);
@@ -25,27 +25,53 @@ test("主入口暴露标志位与常量", async () => {
 });
 
 test("embedded 子路径可解析，且导出 embeddedDll", async () => {
-    const mod = await import("webview-shell/embedded");
+    const mod = await import("bunframe/embedded");
     expect(typeof mod.embeddedDll).toBe("function");
 });
 
 test("embeddedDll 在非编译产物下返回 null（不抛错）", async () => {
-    const mod = await import("webview-shell/embedded");
+    const mod = await import("bunframe/embedded");
     // 测试进程不是 bun build --compile 产物，Bun.embeddedFiles 里没有 DLL
     expect(await mod.embeddedDll()).toBeNull();
 });
 
 test("package.json 子路径可解析，且 os/cpu 受限", async () => {
-    const pkg = await import("webview-shell/package.json");
+    const pkg = await import("bunframe/package.json");
     const json = (pkg as { default: Record<string, unknown> }).default;
-    expect(json["name"]).toBe("webview-shell");
+    expect(json["name"]).toBe("bunframe");
     expect(json["os"]).toEqual(["win32"]);
     expect(json["cpu"]).toEqual(["x64"]);
 });
 
 test("cstr / readCStr 往返", async () => {
-    const { cstr, readCStr } = await import("webview-shell");
+    const { cstr, readCStr } = await import("bunframe");
     expect(readCStr(cstr("hello"))).toBe("hello");
     expect(readCStr(cstr("中文与 ascii 混合"))).toBe("中文与 ascii 混合");
     expect(readCStr(null)).toBe("");
+});
+
+test("ipc 子路径可解析，且导出服务端与客户端", async () => {
+    const mod = await import("bunframe/ipc");
+    expect(typeof mod.createIpcServer).toBe("function");
+    expect(typeof mod.connect).toBe("function");
+    expect(typeof mod.webSocketChannel).toBe("function");
+});
+
+test("ipc 子路径不引入副作用（导入即可用，不碰 DOM 与网络）", async () => {
+    // 服务端侧构造不需要连接；这条同时守住「import 不触发任何 I/O」
+    const { createIpcServer } = await import("bunframe/ipc");
+    const server = createIpcServer({ service: { a: () => 1 } });
+    expect(server.methods).toEqual(["a"]);
+    expect(server.peers).toBe(0);
+});
+
+test("titlebar 子路径可解析，且导出组件与纯函数", async () => {
+    const mod = await import("bunframe/titlebar");
+    expect(typeof mod.mountTitleBar).toBe("function");
+    expect(typeof mod.glyphFor).toBe("function");
+    expect(typeof mod.labelFor).toBe("function");
+    expect(typeof mod.titleBarCss).toBe("function");
+    expect(typeof mod.bridgeFromWindowService).toBe("function");
+    // 字形表是常量，导出后应可直接读
+    expect(mod.TITLEBAR_GLYPHS.unicode.maximize).toBe("\u25A1");
 });

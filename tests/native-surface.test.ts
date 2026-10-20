@@ -26,6 +26,7 @@ const DECLARED = [
     "shell_show",
     "shell_set_app_id",
     "shell_is_dark",
+    "shell_pick_folder",
     "shell_error_text",
     // 输入与视图面
     "shell_set_browser_ui",
@@ -63,14 +64,15 @@ test("libshell.dll 是合法 PE 映像", async () => {
     expect(bytes[lfanew + 1]).toBe(0x45); // E
 });
 
-test("dlopen 成功且 31 个声明符号全部存在", async () => {
+test("dlopen 成功且 32 个声明符号全部存在", async () => {
     const info = await resolveNativeLib();
     const lib = openNativeLib(info.path);
     const keys = new Set(Object.keys(lib.symbols));
 
     const missing = DECLARED.filter((name) => !keys.has(name));
     expect(missing).toEqual([]);
-    expect(DECLARED.length).toBe(31);
+    // 与 native.ts 的声明数、DLL 的 33 个导出（含遗留 shell_start）保持一致
+    expect(DECLARED.length).toBe(32);
 
     lib.close();
 });

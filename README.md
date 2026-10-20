@@ -1,4 +1,4 @@
-# webview-shell
+# bunframe
 
 Windows 上用系统 WebView2 承载界面的**原生窗口壳**，给 Bun 应用用。无边框、DPI 感知、缩放边框、双向消息通道，ABI 与原生层都在你自己的代码里。
 
@@ -8,14 +8,14 @@ Windows 上用系统 WebView2 承载界面的**原生窗口壳**，给 Bun 应�
 你的 Bun 进程
 ├─ 业务逻辑（原样）
 ├─ 本地 HTTP + WebSocket（自己起，或用 serveOnSafePort）
-└─ webview-shell  ← 开窗、几何、DPI、消息桥
+└─ bunframe  ← 开窗、几何、DPI、消息桥
         └─ libshell.dll  →  WebView2
 ```
 
 ## 安装
 
 ```bash
-bun add webview-shell
+bun add bunframe
 ```
 
 要求：Windows 10/11 x64、Bun ≥ 1.4、系统已安装 WebView2 Runtime（Win11 自带）。
@@ -23,7 +23,7 @@ bun add webview-shell
 ## 最小用法
 
 ```ts
-import { openShell, serveOnSafePort, FLAG_FRAMELESS, FLAG_CENTER } from "webview-shell";
+import { openShell, serveOnSafePort, FLAG_FRAMELESS, FLAG_CENTER } from "bunframe";
 
 const server = serveOnSafePort({
   fetch: () => new Response("<h1>Hello</h1>", {
@@ -114,7 +114,7 @@ WebView2 的默认设置是**浏览器**语义。这不是缺陷——对浏览�
 #### 1. 关掉浏览器行为
 
 ```ts
-import { openShell, BROWSER_UI_ALL } from "webview-shell";
+import { openShell, BROWSER_UI_ALL } from "bunframe";
 
 const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 ```
@@ -183,14 +183,170 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 拼写检查会给路径与数值标红波浪线——这是最容易被忽略、也最能暴露「这是网页」的一条。
 
+### 类型化 IPC（独立入口）
+
+宿主与页面之间需要双向通信：页面调宿主的原生能力，宿主向页面推状态。壳本身只提供
+一条单向的 `post()`，收发的形状要应用自己约定——于是每个接入方都要手写一遍
+「消息类型 + 路由 + 错误处理」。
+
+`bunframe/ipc` 把这件事收敛成一份声明：**方法表**。
+
+#### 与 MyGo 的差别：不生成代码
+
+MyGo 用 Go 写宿主，所以必须从 Go 代码生成 TypeScript 客户端——那是在两门语言之间
+造一座桥。这里宿主和页面**都是 TypeScript**，共享一份 `type` 就够：
+
+```ts
+// api.ts —— 宿主与页面 import 同一个文件，不需要任何构建步骤
+export type Api = {
+    greet(name: string): string;
+    pickFolder(title?: string): Promise<string | null>;
+};
+
+export type Events = {
+    windowState: { width: number; height: number; maximized: boolean };
+};
+```
+
+生成器会多出一个「生成物与源不一致」的故障源，却不带来任何新类型信息。
+类型安全由泛型在编译期保证，和生成代码等价。
+
+#### 宿主侧
+
+```ts
+import { createIpcServer } from "bunframe/ipc";
+import { serveOnSafePort } from "bunframe";
+
+const ipc = createIpcServer({
+    service: {
+        greet: (name: string) => `Hello ${name}`,
+        pickFolder: () => shell.pickFolder(),
+    },
+});
+
+const server = serveOnSafePort({
+    fetch(req) { /* 页面与鉴权，见最小用法 */ },
+    websocket: {
+        open: (ws) => ipc.attach(ws),
+        message: (ws, raw) => ipc.handle(ws, raw),
+        close: (ws) => ipc.detach(ws),
+    },
+});
+
+// 主动推送
+ipc.emit("windowState", { width: 900, height: 700, maximized: false });
+```
+
+`attach` / `detach` 必须成对——`emit` 只向已登记连接广播。
+
+#### 页面侧
+
+```ts
+import { connect } from "bunframe/ipc";
+import type { Api, Events } from "./api";
+
+const api = await connect<Api, Events>();
+
+const hello = await api.greet("Ada");       // string，返回值有类型
+const dir = await api.pickFolder();         // string | null
+api.on("windowState", (s) => bar.setMaximized(s.maximized));
+```
+
+`connect` 会自动从页面 URL 的 `?t=` 取 token 连 `/ws`——和 `src/host.ts` 的约定一致。
+要接到别处就传 `url` 或现成的 `channel`。
+
+#### 值得知道的几条
+
+| 行为 | 说明 |
+| --- | --- |
+| 未知方法 | 回 `unknown method: xxx`，不会命中 `constructor` 等原型链名字 |
+| 抛错 | 只回 `message`；宿主 stack 默认不回传，`exposeStack: true` 才带 |
+| 返回 `undefined` | 归一成 `null`（JSON 没有 undefined） |
+| 并发调用 | 按 id 配对，不依赖顺序 |
+| 超时 | 默认 30s，`timeoutMs: 0` 关闭；迟到的回复被丢弃 |
+| 通道断开 | 所有未完成调用立刻 reject |
+| 非 IPC 消息 | 静默忽略，可以和自己的协议共用一条 WebSocket |
+
+`service` 里可以放任何函数，包括 `async`——`handle` 会 `await`。
+
+### Win 11 标题栏组件（独立入口）
+
+无边框模式下窗口没有系统标题栏，得自己画。自己画容易画出「网页顶上贴了三个按钮」
+的效果，差在尺寸、悬停色、按钮字形这些细节上。
+
+`bunframe/titlebar` 是一份调好的实现：32px 高、46×32 按钮、关闭键悬停 `#c42b1c`、
+深色/浅色两套配色、最大化与还原按钮自动换字形。
+
+```ts
+import { mountTitleBar, bridgeFromWindowService } from "bunframe/titlebar";
+import { connect } from "bunframe/ipc";
+
+const api = await connect<WindowApi, Events>();
+const bar = mountTitleBar({
+    title: "我的应用",
+    icon: "/icon.svg",
+    bridge: bridgeFromWindowService(api.window),
+});
+
+api.on("windowState", (s) => bar.setMaximized(s.maximized));
+```
+
+对应的宿主服务只要四个方法：
+
+```ts
+const ipc = createIpcServer({
+    service: {
+        window: {
+            minimize: () => shell.minimize(),
+            toggleMaximize: () => shell.toggleMaximize(),
+            close: () => shell.close(),
+            drag: () => shell.drag(),
+        },
+    },
+});
+```
+
+拖拽走 `shell.drag()`，由原生发 `WM_NCLBUTTONDOWN HTCAPTION`——所以**贴边分屏、
+双击最大化、按住 Shift 右键系统菜单全都保留**，不是自己模拟的拖动。
+
+#### 两点设计取舍
+
+**不依赖 `bunframe` 的任何内部模块。** 窗口控制走注入的 `bridge`，所以这个组件
+也能用在 Electron 或 Tauri 里。要接别的壳，实现 `TitleBarBridge` 四个方法即可。
+
+**配色和尺寸全走 CSS 变量**，覆盖 `--ws-tb-*` 就能换肤：
+
+```css
+.ws-titlebar {
+    --ws-tb-height: 40px;
+    --ws-tb-bg: #1b1b1b;
+    --ws-tb-close-hover: #d13438;
+}
+```
+
+#### 按钮字形
+
+默认用几何符号（`─ □ ❐ ✕`），任何字体都有，零依赖。想要更接近 Win 11 原生观感：
+
+```ts
+mountTitleBar({ icons: "fluent", /* ... */ });
+```
+
+这走 Segoe Fluent Icons 的私有区码位。**该字体缺失时会显示成豆腐块**，所以不是默认值。
+
+#### 别忘了关掉浏览器行为
+
+标题栏只是外观。要让它真的像桌面应用，还得配 `BROWSER_UI_ALL`——否则右键弹出的是
+Edge 菜单、`Ctrl+P` 会打印页面。见上一节。
+
 ### 窗口位置持久化（独立入口）
 
 库主体有一条硬约束：`index.ts` 不引入副作用。持久化按定义就是副作用，所以它是
-**显式调用**的可选件，放在 `webview-shell/state`——不调用就不会有任何文件产生。
+**显式调用**的可选件，放在 `bunframe/state`——不调用就不会有任何文件产生。
 
 ```ts
-import { openShell } from "webview-shell";
-import { attachPlacementStore, loadPlacement, restorePlacement } from "webview-shell/state";
+import { openShell } from "bunframe";
+import { attachPlacementStore, loadPlacement, restorePlacement } from "bunframe/state";
 
 const FILE = "C:\\Users\\me\\AppData\\Roaming\\MyApp\\window.json";
 const shell = await openShell({ url, width: 900, height: 700, flags: FLAG_DEFER_SHOW });
@@ -226,7 +382,7 @@ process.on("beforeExit", () => store.flush());
 变更。它们随时可能变化，生产代码不应依赖：
 
 ```ts
-import { debugOf } from "webview-shell/debug";
+import { debugOf } from "bunframe/debug";
 
 const d = debugOf(shell);
 d.metrics();   // pos / win / client / work / border / round
@@ -246,8 +402,8 @@ d.hittest(x, y);
 ## 打成单文件 exe
 
 ```ts
-import { createShell } from "webview-shell";
-import { embeddedDll } from "webview-shell/embedded";   // 关键：把 DLL 带进包
+import { createShell } from "bunframe";
+import { embeddedDll } from "bunframe/embedded";   // 关键：把 DLL 带进包
 
 const shell = await createShell({ url, embedded: embeddedDll });
 ```
@@ -256,7 +412,7 @@ const shell = await createShell({ url, embedded: embeddedDll });
 bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 ```
 
-只写 `import "webview-shell/embedded";` 也可以——resolve 会自动从 `Bun.embeddedFiles` 里找到它。
+只写 `import "bunframe/embedded";` 也可以——resolve 会自动从 `Bun.embeddedFiles` 里找到它。
 
 不需要 `--windows-hide-console` 之外的特殊参数；不加会出现黑色控制台窗口。
 
@@ -290,7 +446,7 @@ window.__shellRecv = (payload) => { /* ... */ };
 
 ```bash
 bun check          # 类型（bun >= 1.4.3 内置，与 tsc 7 同规则）
-bun test           # 行为（tests/，29 例）
+bun test           # 行为（tests/，103 例）
 bun run demo       # 自检程序，需要交互式会话
 ```
 

@@ -10,8 +10,8 @@ import type { Pointer } from "bun:ffi";
 /**
  * 打开 libshell.dll。
  *
- * 导出面说明：DLL 实际导出 18 个符号，其中 `shell_start` 是 1.x 遗留入口，
- * TS 侧不声明、也不对外承诺；`shell_debug_*` / `shell_self_*` 属排障面。
+ * 导出面说明：DLL 实际导出 33 个符号，其中 `shell_start` 是 1.x 遗留入口，
+ * TS 侧不声明、也不对外承诺（故下方声明 32 个）；`shell_debug_*` / `shell_self_*` 属排障面。
  */
 export function openNativeLib(path: string) {
   return dlopen(path, {

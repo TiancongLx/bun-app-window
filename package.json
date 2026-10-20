@@ -1,10 +1,19 @@
 {
     "$schema": "https://json.schemastore.org/package.json",
-    "name": "webview-shell",
+    "name": "bunframe",
     "version": "0.7.0",
-    "description": "Native frameless WebView2 window shell for Bun — window control, DPI-aware geometry, bidirectional message bridge",
+    "description": "Native WebView2 window shell for Bun — frameless or system-decorated windows, DPI-aware geometry, typed IPC, system-accurate title bar",
     "type": "module",
     "license": "MIT",
+    "author": "Dolores <tiancong.li@hotmail.com> (https://github.com/TiancongLx)",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/TiancongLx/bunframe.git"
+    },
+    "homepage": "https://github.com/TiancongLx/bunframe#readme",
+    "bugs": {
+        "url": "https://github.com/TiancongLx/bunframe/issues"
+    },
     "os": ["win32"],
     "cpu": ["x64"],
     "keywords": [
@@ -14,18 +23,23 @@
         "frameless",
         "window",
         "desktop",
-        "ffi"
+        "ffi",
+        "titlebar",
+        "ipc"
     ],
     "exports": {
         ".": "./src/shell/index.ts",
         "./embedded": "./src/shell/embedded.ts",
         "./debug": "./src/shell/debug.ts",
         "./state": "./src/shell/state.ts",
+        "./ipc": "./src/shell/ipc.ts",
+        "./titlebar": "./src/ui/titlebar.ts",
         "./native": "./dist/libshell.dll",
         "./package.json": "./package.json"
     },
     "files": [
         "src/shell",
+        "src/ui/titlebar.ts",
         "dist/libshell.dll",
         "native/shell.cc",
         "native/build.ps1",
@@ -34,7 +48,7 @@
         "vendor/webview/compatibility",
         "vendor/webview2/build/native/include",
         "README.md",
-        "AGENTS.md"
+        "LICENSE"
     ],
     "scripts": {
         "build:native": "pwsh -NoProfile -ExecutionPolicy Bypass -File native/build.ps1",

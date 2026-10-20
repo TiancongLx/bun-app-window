@@ -2,11 +2,11 @@
  * embedded.ts — 可选入口：让 `bun build --compile` 把原生库打进 exe
  *
  * 用法（编译型消费者）：
- *   import { createShell } from "webview-shell";
- *   import { embeddedDll } from "webview-shell/embedded";
+ *   import { createShell } from "bunframe";
+ *   import { embeddedDll } from "bunframe/embedded";
  *   const shell = await createShell({ url, embedded: embeddedDll });
  *
- * 也可以只写 `import "webview-shell/embedded";` —— resolve 会自动从
+ * 也可以只写 `import "bunframe/embedded";` —— resolve 会自动从
  * `Bun.embeddedFiles` 里找到它，不需要显式传参。
  *
  * 非编译型消费者**不要**导入本文件：它带来的静态 `type: "file"` 依赖

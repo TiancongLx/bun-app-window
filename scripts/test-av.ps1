@@ -11,8 +11,8 @@ $mp = 'C:\ProgramData\Microsoft\Windows Defender\Platform\CurrentVersion\MpCmdRu
 if (-not (Test-Path $mp)) { throw "MpCmdRun not found: $mp" }
 
 $targets = @(
-    (Join-Path $Root 'dist\webview-shell.exe'),
-    (Join-Path $Root 'dist\webview-shell.signed.exe'),
+    (Join-Path $Root 'dist\bunframe.exe'),
+    (Join-Path $Root 'dist\bunframe.signed.exe'),
     (Join-Path $Root 'build\libshell.dll')
 ) |
     Where-Object { Test-Path $_ } |
