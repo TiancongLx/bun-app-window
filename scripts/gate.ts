@@ -320,7 +320,8 @@ async function runCheck(cwd: string): Promise<StageResult> {
 /**
  * 剩余 `.ps1` 的语法校验。
  *
- * 依赖 pwsh 存在：本仓开发环境本来就需要它（`install-hooks.ps1`、`build.ps1` 还没迁），
+ * 依赖 pwsh 存在：本仓还剩 14 个依赖 Win32 API 的 `.ps1`（`capture-window`、
+ * `make-icon`、签名脚本等），它们不打算迁——用 `bun:ffi` 重写要另起一套 FFI 声明。
  * 但门禁不该因为缺一个可选的检查工具而整体失败——缺 pwsh 时判为跳过并说明。
  * 一旦这些脚本全部迁走，这一段就该删掉，而不是留着当永久负担。
  */

@@ -205,7 +205,7 @@ export async function resolveNativeLib(opts: ResolveOptions = {}): Promise<Nativ
 
   throw new Error(
     "libshell.dll not found. Build the native layer first: " +
-      "`pwsh -File native/build.ps1`. " +
+      "`bun run native/build.ts`. " +
       `Searched under ${PKG_ROOT}`,
   );
 }

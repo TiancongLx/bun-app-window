@@ -63,7 +63,7 @@ test("exe 版本与 package.json 同源（前三段必须相等）", () => {
     // 失败时提示怎么修，而不是让人对着两个字符串猜
     const hint =
         `package.json=${PKG.version} build-pack.ps1=${win}。` +
-        `发版前请运行 scripts/bump-version.ps1 <version> 同步两处。`;
+        `发版前请运行 bun run scripts/bump-version.ts <version> 同步两处。`;
     expect(`${win} ${hint}`).toContain(`${expected} `);
 });
 

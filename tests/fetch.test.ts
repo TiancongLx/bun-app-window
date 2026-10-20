@@ -23,20 +23,24 @@ describe("INPUTS 与实际构建脚本的依赖", () => {
         expect(INPUTS.map((i) => i.name)).toEqual(["webview.h", "EventToken.h", "WebView2.h"]);
     });
 
-    test("每份输入的相对路径都被 build.ps1 校验", () => {
-        // 静态断言：两个脚本对「准备好了没有」的定义必须一致。
-        // 旧版 fetch.ps1 判的是 .git 是否存在，与 build.ps1 的实际依赖脱节，
+    test("判据与构建脚本同源", () => {
+        // 两个 fetch / build 脚本对「准备好了没有」的定义必须一致。
+        // 旧版 fetch.ps1 判的是 .git 是否存在，与构建脚本的实际依赖脱节，
         // 结果新机器 clone 后必然 exit 128（docs/pitfalls.md 5.5）。
         //
-        // 注意 build.ps1 是分段拼接的——`$wv = Join-Path $Root 'vendor\webview'` 之后
-        // 只传 `'core\include\webview\webview.h'`。所以整串在源文本里并不连续，
-        // 断言必须按同样的结构剥掉第一段再比。这一点由本测试的首次失败暴露出来。
-        const build = readFileSync(join(REPO_ROOT, "native", "build.ps1"), "utf8");
+        // build.ps1 已迁为 build.ts，两边现在共享 INPUTS 常量本身，
+        // 这条断言退化为「常量确实被 build 侧引用」的守卫。
+        const buildTs = readFileSync(join(REPO_ROOT, "native", "build.ts"), "utf8");
+        expect(buildTs).toContain('from "./fetch"');
+        expect(buildTs).toContain("INPUTS");
+
+        // 三份输入的实际路径都能被 buildPaths 的 include 目录覆盖
         for (const input of INPUTS) {
-            const segments = input.rel.split("/");
-            // segments[0] 是 vendor 下的目录名（webview / webview2），其余是 Join-Path 的第二参
-            const tail = segments.slice(1).join("\\");
-            expect(build).toContain(tail);
+            const header = join(REPO_ROOT, "vendor", input.rel);
+            expect({ rel: input.rel, exists: Bun.file(header).size > 0 }).toEqual({
+                rel: input.rel,
+                exists: true,
+            });
         }
     });
 

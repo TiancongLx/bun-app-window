@@ -51,7 +51,7 @@
         "LICENSE"
     ],
     "scripts": {
-        "build:native": "pwsh -NoProfile -ExecutionPolicy Bypass -File native/build.ps1",
+        "build:native": "bun run native/build.ts",
         "build:exe": "pwsh -NoProfile -ExecutionPolicy Bypass -File native/build-pack.ps1",
         "demo": "bun run ./src/host.ts",
         "pack": "bun pm pack"

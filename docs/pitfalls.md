@@ -379,6 +379,7 @@
 - **修法**：PS 脚本要改文件时显式指定——`Set-Content -NoNewline` 配 `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))`，或者干脆用 TS 改文件。回滚后用 `git diff --stat` 确认，再用逐字节扫描复核（见验证）。
 - **验证**：写一个 40 行的逐字节扫描器，统计每个文件的 `CR LF` 相邻对；一次性验证脚本跑完后全仓应为 0。
 - **证据**：`实测`（2026-10-20，冒烟验证 `.ps1` 语法门禁时污染了 `scripts/install-hooks.ps1`，内容 diff 为空但 EOL 已变）。
+- **后续**：`install-hooks` 与 `bump-version` 均已迁为 `.ts`（ADR 0012）。TS 里 `writeFileSync(path, text, "utf8")` 写的是调用方给的字节，不做 EOL 转换，这类污染在结构上不再可能发生。剩下 14 个 `.ps1` 只做诊断，不负责改写仓库文件，因此不受影响。
 
 ### 5.7 Git 的 `sh` 与 pwsh 是两个环境：`tar` 和 `import.meta.main` 都会变
 
@@ -418,3 +419,13 @@
 | 单文件 exe 体积 | 约 92.6 MiB（Bun 运行时占绝大部分） |
 | DLL 体积 | 约 913 KB |
 | 签名开销 | 约 7.2 KB |
+
+### 5.8 判断「当前模块是不是入口」不能用 import.meta.main 单独决定，也不能把它写在 helper 里
+
+- **症状**：某个 TS 脚本在 pwsh 下正常、在 `pre-push` 钩子里**零输出、退出码 0**，什么都不做却报成功。
+- **原因（两层）**：
+    1. `bun run <path>` 保留调用方 cwd 的**字面大小写**（`_repositories`），而 `import.meta.path` 是真实路径（`_Repositories`）。两者只差大小写，`import.meta.main` 就变成 `false`，入口被 `if (import.meta.main)` 挡掉。
+    2. 第一版修复把判定写成无参函数、在 helper 模块内部读 `import.meta.main` / `import.meta.path`。**`import.meta` 是模块作用域的**——在被 import 的模块里 `main` 恒为 `false`、`path` 恒指向 helper 自己。函数恒返回 `false`，把三个脚本的入口全挡掉，同样静默。
+- **修法**：判定写成纯函数 `isEntrypoint(moduleMain, modulePath, argv1?)`，两个值由调用方传入：`import.meta.main` 为真，**或者** `argv[1]` 与 `modulePath` 在规范化（解析 + 正斜杠 + 小写）后相等。
+- **教训**：守护逻辑自身必须被测试。`tests/entrypoint.test.ts` 里专门有一条「守卫不能恒为假」——上一版正是恒为假。
+- **证据**：`实测`（2026-10-20）。三种调用组合：pwsh 里 `bun run` → true；Git 的 `sh` 里 `bun run`（cwd 小写）→ false；Git 的 `sh` 里 `bun` 直跑 → true。
