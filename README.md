@@ -84,7 +84,8 @@ Note: `createShell(opts)` only resolves and loads the native DLL without opening
 | `start()` | Opens the window and returns `{ rc, error }`. Returns immediately while the UI message loop runs on a dedicated native thread |
 | `stop()` | Destroys the window and releases native resources. Safe to call multiple times (idempotent) |
 | `show()` | Reveals the window. Typically paired with `FLAG_DEFER_SHOW` to display the window only after the web UI is ready |
-| `isAlive()` | Checks whether the native window still exists (unlike `state()`, which cannot distinguish between unstarted and destroyed states) |
+| `isAlive()` | Checks whether the native window still exists (unlike `state()`, which cannot distinguish between unstarted and destroyed states). To wait for close, use `pollEvents()` and watch for `CLOSED` instead of polling this |
+| `pollEvents(max?)` | Drains window lifecycle events (`STATE` / `CLOSED`); synchronous and consuming. See "Window events" below |
 | `state()` | Returns current window state: `{ maximized, minimized, focused, dark, raw }` |
 | `lastError()` | Returns the most recent failure message, or an empty string if no error occurred |
 | `setTitle` / `minimize` / `toggleMaximize` / `close` | Standard window control operations; each returns a status code `rc` |
@@ -143,7 +144,7 @@ Additional capabilities outside core window management are modularized into dedi
 The first app you write with this package is about 30 lines of business code and **180 lines of
 host boilerplate**: picking a safe port, minting an auth token, handling the WebSocket upgrade,
 serving the HTML as a string, wiring `createIpcServer` into Bun's websocket callbacks, composing
-window flags, handling `openShell` failure, polling `isAlive()` for window close, and calling
+window flags, handling `openShell` failure, waiting for close (`EVENT_CLOSED`), and calling
 `stop()` on two things in the right order. Each piece is easy; they are only correct in a specific
 order (`stop()` must wait for the window to actually die before closing the server, or the next
 start hits "already started"). `app` collapses all of it into one call:
@@ -183,7 +184,10 @@ What it does for you:
   that a channel exists.
 - Wires `createIpcServer` into the websocket `open` / `message` / `close` callbacks so
   `ipc.emit()` reaches the page.
-- `stop()` is ordered and idempotent: `shell.stop()` → poll `isAlive()` → `server.stop()`.
+- `stop()` is ordered and idempotent: `shell.stop()` → wait for `EVENT_CLOSED` (5 s ceiling) →
+  `server.stop()`.
+- Starts exactly one window-event pump: `app.events`. It is also what waits for close, so it is
+  the single consumer. Pass `{ events: app.events }` when you need `attachPlacementStore`.
 - Startup failures leave nothing half-started: if `openShell` throws, the bound port is released.
 
 Notes:
@@ -298,7 +302,7 @@ if (saved) restorePlacement(shell, saved);
 
 shell.show();
 
-const store = attachPlacementStore(shell, FILE);   // Polls state; skips disk writes when idle
+const store = attachPlacementStore(shell, FILE);   // Subscribes to window events; writes once the drag settles
 process.on("beforeExit", () => store.flush());
 ```
 
@@ -308,7 +312,60 @@ The native placement layer handles edge cases automatically:
 - Translates coordinates across monitors with different DPI scaling factors.
 - Validates and clamps off-screen coordinates when monitor topology changes.
 
-For one-off reads and writes without polling timers, use `capturePlacement` and `savePlacement` directly.
+Writes are event-driven: a state change takes a snapshot **immediately** (a microsecond-scale
+read), and the disk write is batched 300 ms after the window settles. A window at rest costs
+neither a native call nor a disk write. Tune the write delay with `debounceMs`; tune the
+internal event pump's cadence with `pumpMs`.
+
+If you already have an event pump (for example from `createApp`), pass it in so two consumers
+do not race for the same events:
+
+```ts
+import { createApp } from "bun-app-window/app";
+import { attachPlacementStore } from "bun-app-window/state";
+
+const app = await createApp({ html });
+const store = attachPlacementStore(app.shell, FILE, { events: app.events });
+```
+
+For one-off reads and writes without any subscription, use `capturePlacement` and
+`savePlacement` directly.
+
+### Window events
+
+The host does not have to poll to learn that the window changed — `pollEvents()` returns the
+event stream directly:
+
+```ts
+import { EVENT_CLOSED, EVENT_STATE } from "bun-app-window/events";
+
+for (const e of shell.pollEvents()) {
+  if (e.type === EVENT_CLOSED) break;          // window is gone, the native singleton is released
+  if (e.type === EVENT_STATE && e.maximized) { /* ... */ }
+}
+```
+
+`pollEvents()` is **consuming**: drained records never come back, so a process should have
+exactly one consumer. For a fixed cadence plus multi-subscriber fan-out, use
+`attachEventPump()` from `./events`:
+
+```ts
+import { EVENT_CLOSED, attachEventPump } from "bun-app-window/events";
+
+const pump = attachEventPump(shell, { intervalMs: 16 });
+pump.on((e) => { if (e.type === EVENT_CLOSED) pump.stop(); });
+pump.onGap((missing) => console.warn(`missed ${missing} events`));
+```
+
+- A `STATE` payload is a **snapshot**: `width` / `height` / `dpi` plus four flags
+  (`maximized` / `minimized` / `focused` / `dark`).
+- `CLOSED` is terminal. It is emitted by the native layer after teardown has fully completed
+  and the window handle is gone, so "seeing `CLOSED`" is equivalent to "safe to restart the
+  window" — that is what makes it stronger than `isAlive()`.
+- The native ring buffer holds 128 records and drops the oldest when full. Losses are reported
+  faithfully as gaps in `seq` (via `onGap`), never disguised as "nothing happened".
+- The pump timer is `unref`'d by default (it will not keep the process alive). Pass
+  `keepAlive: true` when you rely on it to wait for window close.
 
 ### `bun-app-window/debug` — Diagnostics
 

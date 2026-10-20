@@ -84,7 +84,8 @@ shell.setTitle("Doing work…");
 | `start()` | 建立並啟動視窗，回傳 `{ rc, error }`。呼叫後立即回傳，UI 訊息迴圈執行於獨立原生執行緒 |
 | `stop()` | 銷毀視窗並釋放底層資源，支援冪等重複呼叫 |
 | `show()` | 顯示視窗。常搭配 `FLAG_DEFER_SHOW` 使用，實現在頁面渲染就緒後再展現視窗 |
-| `isAlive()` | 檢測視窗是否存活（註：`state()` 無法區分「尚未啟動」與「已銷毀」狀態） |
+| `isAlive()` | 檢測視窗是否存活（註：`state()` 無法區分「尚未啟動」與「已銷毀」狀態）。等視窗關閉請用 `pollEvents()` 的 `CLOSED`，別輪詢它 |
+| `pollEvents(max?)` | 批次拉取視窗生命週期事件（`STATE` / `CLOSED`），同步、消費式。詳見下文「視窗事件」 |
 | `state()` | 取得目前視窗狀態：`{ maximized, minimized, focused, dark, raw }` |
 | `lastError()` | 取得最近一次操作失敗的錯誤訊息，無錯誤時回傳空字串 |
 | `setTitle` / `minimize` / `toggleMaximize` / `close` | 基礎視窗控制操作，回傳狀態碼 `rc` |
@@ -140,8 +141,8 @@ shell.setTitle("Doing work…");
 
 用這個套件寫第一個應用程式時，業務程式碼可能只有 30 行，但**宿主樣板是 180 行**：挑安全埠、
 產生驗證 token、處理 WebSocket 升級、把 HTML 當字串吐出去、把 `createIpcServer`
-接到 Bun 的 websocket 回呼上、拼視窗旗標、處理 `openShell` 失敗、輪詢 `isAlive()`
-等視窗關閉、依序 `stop()` 兩個東西。每一段單看都不難，但它們**只在特定順序下正確**
+接到 Bun 的 websocket 回呼上、拼視窗旗標、處理 `openShell` 失敗、等視窗關閉
+（`EVENT_CLOSED`）、依序 `stop()` 兩個東西。每一段單看都不難，但它們**只在特定順序下正確**
 （`stop()` 不先等視窗真的銷毀就關服務，下次啟動會撞上 "already started"）。
 `app` 把這些收成一次呼叫：
 
@@ -178,7 +179,9 @@ await api.greet("Ada");
 - 每次執行產生一個 token，並在**升級之前**用它校驗 `/ws` —— 升級之後就沒有機會拒絕了。
   `ipc` 未開啟時 `/ws` 是 `404` 而不是 `403`：403 等於告訴對方「這裡有通道」。
 - 把 `createIpcServer` 接到 websocket 的 `open` / `message` / `close` 上，`ipc.emit()` 才能到頁面。
-- `stop()` 有序且冪等：`shell.stop()` → 輪詢 `isAlive()` → `server.stop()`。
+- `stop()` 有序且冪等：`shell.stop()` → 等 `EVENT_CLOSED`（帶 5 秒上限）→ `server.stop()`。
+- 起一個視窗事件泵並且只起一個：`app.events`。它同時承擔「等視窗關閉」，
+  所以是唯一的事件消費者；`attachPlacementStore` 要用它時傳 `{ events: app.events }`。
 - 啟動失敗不留半啟動狀態：`openShell` 拋錯時，已綁定的埠會被釋放。
 
 注意事項：
@@ -290,7 +293,7 @@ if (saved) restorePlacement(shell, saved);
 
 shell.show();
 
-const store = attachPlacementStore(shell, FILE);   // 定時輪詢狀態，視窗靜止時不觸發寫入磁碟
+const store = attachPlacementStore(shell, FILE);   // 訂閱視窗事件，拖曳停下後寫入一次
 process.on("beforeExit", () => store.flush());
 ```
 
@@ -300,7 +303,53 @@ process.on("beforeExit", () => store.flush());
 - 跨顯示器不同縮放比例下的 DPI 座標換算。
 - 螢幕拓撲變化（如拔除外接螢幕）後的螢幕外座標越界驗證與修正。
 
-若無需背景輪詢，亦可直接呼叫 `capturePlacement` 與 `savePlacement` 執行單次手動讀寫。
+寫入是事件驅動的：收到狀態變化**立刻**取得快照（微秒級），寫入磁碟則攢到停下 300 ms 後
+做一次。視窗靜止時既沒有原生呼叫也沒有磁碟寫入。用 `debounceMs` 調整寫入延遲；用
+`pumpMs` 調整內部事件泵的拉取節奏。
+
+若已有事件泵（例如用了 `createApp`），把它傳進來，避免兩個消費者爭搶同一批事件：
+
+```ts
+import { createApp } from "bun-app-window/app";
+import { attachPlacementStore } from "bun-app-window/state";
+
+const app = await createApp({ html });
+const store = attachPlacementStore(app.shell, FILE, { events: app.events });
+```
+
+若無需背景訂閱，亦可直接呼叫 `capturePlacement` 與 `savePlacement` 執行單次手動讀寫。
+
+### 視窗事件
+
+宿主想知道「視窗狀態變了」，不必輪詢——`pollEvents()` 直接給出事件串流：
+
+```ts
+import { EVENT_CLOSED, EVENT_STATE } from "bun-app-window/events";
+
+for (const e of shell.pollEvents()) {
+  if (e.type === EVENT_CLOSED) break;          // 視窗已銷毀，原生單例已釋放
+  if (e.type === EVENT_STATE && e.maximized) { /* ... */ }
+}
+```
+
+`pollEvents()` 是**消費式**的：讀走的記錄不會再來，所以一個行程只應有一個消費者。
+想要固定節奏與多路訂閱時，用 `./events` 的 `attachEventPump()`：
+
+```ts
+import { EVENT_CLOSED, attachEventPump } from "bun-app-window/events";
+
+const pump = attachEventPump(shell, { intervalMs: 16 });
+pump.on((e) => { if (e.type === EVENT_CLOSED) pump.stop(); });
+pump.onGap((missing) => console.warn(`漏了 ${missing} 條事件`));
+```
+
+- `STATE` 酬載是**快照**：`width` / `height` / `dpi` 與四位狀態
+  （`maximized` / `minimized` / `focused` / `dark`）。
+- `CLOSED` 是終態。它由原生側在 teardown 全部做完、視窗代碼已置空之後寫出，所以
+  「看到 `CLOSED`」等價於「可以安全重啟視窗」——這是它優於 `isAlive()` 的地方。
+- 原生側環形佇列容量 128 條，滿時丟最舊。遺失量透過 `seq` 缺口如實上報（`onGap`），
+  不會偽裝成「什麼都沒發生」。
+- 事件泵的計時器預設 `unref`（不阻止行程退出）。若靠它等視窗關閉，傳 `keepAlive: true`。
 
 ### `bun-app-window/debug` — 診斷與除錯介面
 

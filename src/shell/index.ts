@@ -24,6 +24,7 @@ import { cstr, openNativeLib, readBuffer } from "./native";
 import { ptr } from "bun:ffi";
 import type { NativeSymbols } from "./native";
 import { resolveNativeLib } from "./resolve";
+import { EVENT_QUEUE_CAPACITY, EVENT_RECORD_BYTES, decodeEvents, type WindowEvent } from "./events";
 import {
   STATE_FOCUSED,
   STATE_MAXIMIZED,
@@ -41,6 +42,11 @@ export { serveOnSafePort, isRestrictedPort } from "./port";
 export type { ServeOptions } from "./port";
 export { cstr, readCStr } from "./native";
 export type { NativeSymbols, NativeLib } from "./native";
+export type {
+  ClosedEvent,
+  StateEvent,
+  WindowEvent,
+} from "./events";
 
 export type Shell = {
   /** 创建窗口并加载 URL。返回码 0 表示成功；失败原因见 lastError() */
@@ -85,8 +91,31 @@ export type Shell = {
    * `state()` 无法区分「未启动」与「已销毁」（两者都返回全 false），
    * 宿主需要这个信号才能判断窗口是否已被用户关掉，进而回收自己的进程——
    * 窗口销毁后原生 UI 线程会返回，但宿主进程与它起的本地服务不会自己退出。
+   *
+   * 想要「等窗口关闭」而不是「每一拍问一次」时，用 `pollEvents()` 的
+   * `EVENT_CLOSED`（或 `bun-app-window/events` 的 `attachEventPump()`）。
+   * 两者不等价：`isAlive()` 读的是此刻的 `g_webview` 是否为空，而 `CLOSED`
+   * 是原生侧在 teardown 全部做完之后写进队列的显式终态。
    */
   isAlive(): boolean;
+  /**
+   * 批量拉取窗口生命周期事件（`EVENT_STATE` / `EVENT_CLOSED`）。
+   *
+   * **消费式**：读走的记录不会再来。所以一个进程只应有一个消费者——
+   * 要么用 `bun-app-window/events` 的 `attachEventPump()`，要么自己按节奏调
+   * 这个方法，别两者都来：两个消费者会各自拿到一部分，谁也看不全。
+   *
+   * 同步、零分配以外的副作用；`max` 是记录条数，内部夹在
+   * `1..EVENT_QUEUE_CAPACITY`。窗口未启动时返回空数组。
+   *
+   * ```ts
+   * for (const e of shell.pollEvents()) {
+   *   if (e.type === EVENT_CLOSED) break;
+   *   if (e.maximized) { ... }
+   * }
+   * ```
+   */
+  pollEvents(max?: number): WindowEvent[];
   /** 最近一次失败的原因；无错误时为空串。走拷贝式读出，不受并发写影响 */
   lastError(): string;
 
@@ -241,6 +270,14 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
     },
 
     isAlive: () => symbols.shell_is_alive() !== 0,
+
+    pollEvents(max = 64): WindowEvent[] {
+      // 原生侧环容量是 128，一次要更多没有意义；下限 1 免得 0 变成「永远拉不到」
+      const cap = Math.max(1, Math.min(Math.trunc(max), EVENT_QUEUE_CAPACITY));
+      const buf = new Uint8Array(cap * EVENT_RECORD_BYTES);
+      const n = symbols.shell_poll_events(ptr(buf), cap);
+      return n > 0 ? decodeEvents(buf, n) : [];
+    },
 
     lastError,
 

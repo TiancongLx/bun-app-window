@@ -1,6 +1,7 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
+import { EVENT_STATE, attachEventPump, type EventPump, unrefTimer } from "./events";
 import type { Shell } from "./index";
 
 /**
@@ -14,6 +15,21 @@ import type { Shell } from "./index";
  *   - DPI 变化：存的是物理像素 + 当时的 DPI，恢复时按比例换算
  *   - 显示器不在了：矩形要与某块工作区有足够交叠才算可用，否则居中
  *   - 最大化状态：存「还原后」的矩形，而不是整屏尺寸
+ *
+ * ## 为什么现在是事件驱动，不是轮询
+ *
+ * 这个模块曾经每 700 ms 调一次 `getBounds()`。理由是「原生侧的窗口状态推送是发给
+ * **页面**的（shell-msg），宿主拿不到」。0.4.0 起那个理由不成立了：`shell_poll_events`
+ * 给了宿主一条自己的通道。
+ *
+ * 换成事件驱动之后，两件事同时变好：
+ *   - 窗口静止时**一次 FFI 都不发生**（轮询时代是每秒 1.4 次）
+ *   - 拖动期间不再每帧写盘。事件到一条就即时 `getBounds()` 存快照（微秒级），
+ *     但**写盘**攒到停手后 `debounceMs` 才做一次
+ *
+ * 快照与写盘分离是有意的：窗口关闭后原生侧 `getBounds()` 立刻返回空串
+ * （`format_bounds` 里 `!g_hwnd` 直接返回 0），若等到防抖到点才去读，最后那次
+ * 位置变化就永久丢了——用户「拖完立刻点 X」是最常见的关闭方式。
  */
 
 export type WindowPlacement = {
@@ -28,8 +44,10 @@ export type WindowPlacement = {
 };
 
 const DEFAULTS = {
-    /** 轮询间隔。GetWindowRect 是微秒级，700 ms 足够了 */
-    intervalMs: 700,
+    /** 收到变化事件后攒多久再写盘。拖动期间事件每帧一条，攒到停手写一次 */
+    debounceMs: 300,
+    /** 自建事件泵（未由调用方提供）时的拉取节奏 */
+    pumpMs: 16,
 } as const;
 
 /** 把原生返回的一行文本解析成 WindowPlacement；格式不对返回 null。 */
@@ -131,31 +149,60 @@ export async function savePlacement(file: string, p: WindowPlacement): Promise<v
 export type PlacementStore = {
     /** 立即抓一次并写盘（关闭前调用） */
     flush(): Promise<void>;
-    /** 停止轮询。不清盘——最后写入的值保留 */
+    /** 停止拉取事件与防抖定时器。不清盘——最后写入的值保留 */
     dispose(): void;
-    /** 当前已知的 placement（最近一次成功写入的） */
+    /** 当前已知的 placement（最近一次快照） */
     readonly current: WindowPlacement | null;
 };
 
+export type PlacementStoreOptions = {
+    /**
+     * 变化后攒多久再写盘。默认 300 ms。
+     *
+     * 设成 0 表示「每条事件都立刻写」——只适合测试，真实应用会给磁盘造成
+     * 每秒几十次的写入。
+     */
+    debounceMs?: number;
+    /**
+     * 复用宿主已有的事件泵。
+     *
+     * **`shell.pollEvents()` 是消费式的**：一个窗口只该有一个消费者。用
+     * `./app` 的骨架时传 `{ events: app.events }`，别再让它自己起一个——
+     * 两个泵会各自拿到一部分事件，位置持久化会随机漏掉一些变化。
+     *
+     * 不给时本模块自建一个（内部泵定时器 unref，不阻止进程退出）。
+     */
+    events?: EventPump;
+    /** 自建事件泵时的拉取节奏，默认 16 ms。给了 `events` 时忽略 */
+    pumpMs?: number;
+};
+
 /**
- * 轮询窗口矩形并在变化时写盘。
+ * 订阅窗口状态变化并在停手后写盘。
  *
- * 为什么轮询而不是事件：原生侧的窗口状态推送是发给**页面**的（shell-msg），宿主
- * 拿不到；加一条原生→宿主的回调通道要多一套生命周期管理，而 GetWindowRect 是
- * 微秒级调用，700 ms 一次的代价可以忽略。
+ * 变化检测按内容比较：窗口静止时不产生任何磁盘写入，也不产生任何调度。
  *
- * 变化检测按内容比较：窗口静止时不产生任何磁盘写入。
+ * 首次 `attach` 会立刻抓一次快照并写盘——程序若在用户操作前崩溃，也还有
+ * 初始位置可恢复。
  */
 export function attachPlacementStore(
     shell: Shell,
     file: string,
-    opts: { intervalMs?: number } = {},
+    opts: PlacementStoreOptions = {},
 ): PlacementStore {
-    const intervalMs = opts.intervalMs ?? DEFAULTS.intervalMs;
+    const debounceMs = Math.max(0, opts.debounceMs ?? DEFAULTS.debounceMs);
+    const pump =
+        opts.events ??
+        attachEventPump(shell, { intervalMs: Math.max(1, opts.pumpMs ?? DEFAULTS.pumpMs) });
+    const ownsPump = opts.events === undefined;
+
     let last: WindowPlacement | null = null;
     let lastKey = "";
     let disposed = false;
     let pending: Promise<void> = Promise.resolve();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    /** 已取到快照、但还没写盘的值 */
+    let dirty: WindowPlacement | null = null;
 
     const same = (a: WindowPlacement, b: WindowPlacement): boolean =>
         a.x === b.x &&
@@ -165,15 +212,20 @@ export function attachPlacementStore(
         a.maximized === b.maximized &&
         a.dpi === b.dpi;
 
-    const tick = (): void => {
+    /**
+     * 抓一次快照，变了就记进 `dirty`。
+     *
+     * 与写盘分开：这一步是微秒级的 FFI 读，必须在窗口还活着的时候做。写盘可以晚。
+     */
+    const snapshot = (): void => {
         if (disposed) {
             return;
         }
         const now = capturePlacement(shell);
+        // 窗口销毁过程中会短暂读到 0 尺寸，parseBounds 已过滤
         if (!now) {
             return;
         }
-        // 窗口销毁过程中会短暂读到 0 尺寸，上面已过滤
         if (last && same(now, last)) {
             return;
         }
@@ -183,26 +235,68 @@ export function attachPlacementStore(
         }
         last = now;
         lastKey = key;
+        dirty = now;
+    };
+
+    const write = (): void => {
+        const now = dirty;
+        dirty = null;
+        if (!now) {
+            return;
+        }
         // 串行化写入：并发 rename 同一目标会互相踩
         pending = pending.then(() => savePlacement(file, now)).catch(() => {
-            // 写盘失败不该打断应用；下一次 tick 会重试
+            // 写盘失败不该打断应用；下一次变化会重试
         });
     };
 
-    const timer = setInterval(tick, intervalMs);
-    // 不阻止进程退出：应用退出时不该因为一个定时器挂住
-    if (typeof timer === "object" && timer !== null && "unref" in timer) {
-        (timer as { unref(): void }).unref();
-    }
+    const scheduleWrite = (): void => {
+        if (disposed) {
+            return;
+        }
+        if (timer !== null) {
+            clearTimeout(timer);
+        }
+        timer = setTimeout(() => {
+            timer = null;
+            write();
+        }, debounceMs);
+        unrefTimer(timer);
+    };
+
+    const off = pump.on((e) => {
+        if (e.type !== EVENT_STATE) {
+            return;
+        }
+        // 立刻取快照（窗口还活着），但写盘交给防抖
+        snapshot();
+        scheduleWrite();
+    });
+
+    // 首次快照：不等到第一条事件就有初始值可恢复
+    snapshot();
+    write();
 
     return {
         async flush(): Promise<void> {
-            tick();
+            if (timer !== null) {
+                clearTimeout(timer);
+                timer = null;
+            }
+            snapshot();
+            write();
             await pending;
         },
         dispose(): void {
             disposed = true;
-            clearInterval(timer);
+            off();
+            if (timer !== null) {
+                clearTimeout(timer);
+                timer = null;
+            }
+            if (ownsPump) {
+                pump.stop();
+            }
         },
         get current(): WindowPlacement | null {
             return last;

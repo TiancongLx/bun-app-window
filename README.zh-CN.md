@@ -84,7 +84,8 @@ shell.setTitle("Doing work…");
 | `start()` | 创建并启动窗口，返回 `{ rc, error }`。调用后立即返回，UI 消息循环运行于独立原生线程 |
 | `stop()` | 销毁窗口并释放底层资源，支持幂等重复调用 |
 | `show()` | 显示窗口。常配合 `FLAG_DEFER_SHOW` 使用，实现在页面渲染就绪后再展现窗口 |
-| `isAlive()` | 检测窗口是否存活（注：`state()` 无法区分「尚未启动」与「已销毁」状态） |
+| `isAlive()` | 检测窗口是否存活（注：`state()` 无法区分「尚未启动」与「已销毁」状态）。等窗口关闭请用 `pollEvents()` 的 `CLOSED`，别轮询它 |
+| `pollEvents(max?)` | 批量拉取窗口生命周期事件（`STATE` / `CLOSED`），同步、消费式。详见下文「窗口事件」 |
 | `state()` | 获取当前窗口状态：`{ maximized, minimized, focused, dark, raw }` |
 | `lastError()` | 获取最近一次操作失败的错误信息，无错误时返回空字符串 |
 | `setTitle` / `minimize` / `toggleMaximize` / `close` | 基础窗口控制操作，返回状态码 `rc` |
@@ -140,8 +141,8 @@ shell.setTitle("Doing work…");
 
 用这个包写第一个应用时，业务代码可能只有 30 行，但**宿主样板是 180 行**：挑安全端口、
 生成鉴权 token、处理 WebSocket 升级、把 HTML 当字符串吐出去、把 `createIpcServer`
-接到 Bun 的 websocket 回调上、拼窗口 flags、处理 `openShell` 失败、轮询 `isAlive()`
-等窗口关闭、按顺序 `stop()` 两个东西。每一段单看都不难，但它们**只在特定顺序下正确**
+接到 Bun 的 websocket 回调上、拼窗口 flags、处理 `openShell` 失败、等窗口关闭
+（`EVENT_CLOSED`）、按顺序 `stop()` 两个东西。每一段单看都不难，但它们**只在特定顺序下正确**
 （`stop()` 不先等窗口真的销毁就关服务，下次启动会撞上 "already started"）。
 `app` 把这些收成一次调用：
 
@@ -178,7 +179,9 @@ await api.greet("Ada");
 - 每次运行生成一个 token，并在**升级之前**用它校验 `/ws` —— 升级之后就没有机会拒绝了。
   `ipc` 没开时 `/ws` 是 `404` 而不是 `403`：403 等于告诉对方「这里有通道」。
 - 把 `createIpcServer` 接到 websocket 的 `open` / `message` / `close` 上，`ipc.emit()` 才能到页面。
-- `stop()` 有序且幂等：`shell.stop()` → 轮询 `isAlive()` → `server.stop()`。
+- `stop()` 有序且幂等：`shell.stop()` → 等 `EVENT_CLOSED`（带 5 秒上限）→ `server.stop()`。
+- 起一个窗口事件泵并且只起一个：`app.events`。它同时承担「等窗口关闭」，
+  所以是唯一的事件消费者；`attachPlacementStore` 要用它时传 `{ events: app.events }`。
 - 启动失败不留半启动状态：`openShell` 抛错时，已绑定的端口会被释放。
 
 注意事项：
@@ -290,7 +293,7 @@ if (saved) restorePlacement(shell, saved);
 
 shell.show();
 
-const store = attachPlacementStore(shell, FILE);   // 定时轮询状态，窗口静止时不触发写盘
+const store = attachPlacementStore(shell, FILE);   // 订阅窗口事件，拖动停手后写一次盘
 process.on("beforeExit", () => store.flush());
 ```
 
@@ -300,7 +303,52 @@ process.on("beforeExit", () => store.flush());
 - 跨显示器不同缩放比下的 DPI 坐标换算。
 - 屏幕拓扑变化（如拔除副屏）后的屏外坐标越界校验与修正。
 
-若无需后台轮询，也可直接调用 `capturePlacement` 与 `savePlacement` 执行单次手动读写。
+写入是事件驱动的：收到状态变化**立刻**取快照（微秒级），写盘攒到停手 300 ms 后做一次。
+窗口静止时既没有原生调用也没有磁盘写入。用 `debounceMs` 调整写盘延迟；用 `pumpMs`
+调整内部事件泵的拉取节奏。
+
+若已有事件泵（例如用了 `createApp`），把它传进来，避免两个消费者争抢同一批事件：
+
+```ts
+import { createApp } from "bun-app-window/app";
+import { attachPlacementStore } from "bun-app-window/state";
+
+const app = await createApp({ html });
+const store = attachPlacementStore(app.shell, FILE, { events: app.events });
+```
+
+若无需后台订阅，也可直接调用 `capturePlacement` 与 `savePlacement` 执行单次手动读写。
+
+### 窗口事件
+
+宿主要知道「窗口状态变了」，不必轮询——`pollEvents()` 直接给出事件流：
+
+```ts
+import { EVENT_CLOSED, EVENT_STATE } from "bun-app-window/events";
+
+for (const e of shell.pollEvents()) {
+  if (e.type === EVENT_CLOSED) break;          // 窗口已销毁，原生单例已释放
+  if (e.type === EVENT_STATE && e.maximized) { /* ... */ }
+}
+```
+
+`pollEvents()` 是**消费式**的：读走的记录不会再来。所以一个进程只应有一个消费者。
+想要固定节奏与多路订阅时，用 `./events` 的 `attachEventPump()`：
+
+```ts
+import { EVENT_CLOSED, attachEventPump } from "bun-app-window/events";
+
+const pump = attachEventPump(shell, { intervalMs: 16 });
+pump.on((e) => { if (e.type === EVENT_CLOSED) pump.stop(); });
+pump.onGap((missing) => console.warn(`漏了 ${missing} 条事件`));
+```
+
+- `STATE` 载荷是**快照**：`width` / `height` / `dpi` 与四位状态（`maximized` / `minimized` / `focused` / `dark`）。
+- `CLOSED` 是终态。它由原生侧在 teardown 全部做完、窗口句柄已置空之后写出，所以
+  「看到 `CLOSED`」等价于「可以安全重启窗口」——这是它优于 `isAlive()` 的地方。
+- 原生侧环形队列容量 128 条，满时丢最旧。丢失量通过 `seq` 缺口如实上报（`onGap`），
+  不会伪装成「什么都没发生」。
+- 事件泵的定时器默认 `unref`（不阻止进程退出）。若靠它等窗口关闭，传 `keepAlive: true`。
 
 ### `bun-app-window/debug` — 诊断与排障接口
 

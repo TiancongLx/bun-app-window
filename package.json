@@ -1,7 +1,7 @@
 {
     "$schema": "https://json.schemastore.org/package.json",
     "name": "bun-app-window",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Native WebView2 window shell for Bun — frameless or system-decorated windows, DPI-aware geometry, typed IPC, system-accurate title bar",
     "type": "module",
     "license": "MIT",
@@ -30,6 +30,7 @@
     "exports": {
         ".": "./src/shell/index.ts",
         "./app": "./src/shell/app.ts",
+        "./events": "./src/shell/events.ts",
         "./embedded": "./src/shell/embedded.ts",
         "./debug": "./src/shell/debug.ts",
         "./state": "./src/shell/state.ts",

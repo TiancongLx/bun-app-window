@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ptr } from "bun:ffi";
 
 import { openNativeLib } from "@/shell/native";
 import { resolveNativeLib } from "@/shell/resolve";
@@ -20,6 +21,7 @@ const DECLARED = [
     "shell_set_min_size",
     "shell_get_state",
     "shell_is_alive",
+    "shell_poll_events",
     "shell_stop",
     "shell_error",
     // 系统集成面
@@ -64,15 +66,15 @@ test("libshell.dll 是合法 PE 映像", async () => {
     expect(bytes[lfanew + 1]).toBe(0x45); // E
 });
 
-test("dlopen 成功且 32 个声明符号全部存在", async () => {
+test("dlopen 成功且 33 个声明符号全部存在", async () => {
     const info = await resolveNativeLib();
     const lib = openNativeLib(info.path);
     const keys = new Set(Object.keys(lib.symbols));
 
     const missing = DECLARED.filter((name) => !keys.has(name));
     expect(missing).toEqual([]);
-    // 与 native.ts 的声明数、DLL 的 33 个导出（含遗留 shell_start）保持一致
-    expect(DECLARED.length).toBe(32);
+    // 与 native.ts 的声明数、DLL 的 34 个导出（含遗留 shell_start）保持一致
+    expect(DECLARED.length).toBe(33);
 
     lib.close();
 });
@@ -90,6 +92,23 @@ test("未启动时的调用是安全的（消费者可能在 start 之前就查�
 
         // 停过一次之后状态仍可读
         expect(lib.symbols.shell_get_state()).toBe(0);
+    } finally {
+        lib.close();
+    }
+});
+
+test("shell_poll_events 在未启动时返回 0 而不是 -1", async () => {
+    // 这条是事件通道的核心契约：CLOSED 在 g_webview 置空**之后**才产生，
+    // 早退成 -1 会让宿主永远读不到「窗口已关闭」。所以「没有事件」与
+    // 「没有窗口」必须同义（都是 0），不能靠 -1 区分。
+    const info = await resolveNativeLib();
+    const lib = openNativeLib(info.path);
+    try {
+        const buf = new Uint8Array(32 * 4);
+        expect(lib.symbols.shell_poll_events(ptr(buf), 4)).toBe(0);
+        // 空指针与非法容量一律 0，不崩
+        expect(lib.symbols.shell_poll_events(null, 4)).toBe(0);
+        expect(lib.symbols.shell_poll_events(ptr(buf), 0)).toBe(0);
     } finally {
         lib.close();
     }

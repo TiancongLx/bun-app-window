@@ -1,7 +1,7 @@
 /**
  * win32.ts — 诊断脚本用的 Win32 FFI 通用层
  *
- * 与 `src/shell/native.ts` 的区别：那个是**产品契约**（libshell.dll 的 32 个符号），
+ * 与 `src/shell/native.ts` 的区别：那个是**产品契约**（libshell.dll 的 33 个符号），
  * 这个是**诊断工具**用的系统 API 声明，不随包发布。
  *
  * ## 三条来自实测的硬性约束

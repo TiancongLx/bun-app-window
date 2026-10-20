@@ -6,7 +6,7 @@
  * 用这个包做第一个应用时，真正要写的业务代码可能只有 30 行，但**宿主样板**是
  * 另外 180 行：挑安全端口、生成鉴权 token、处理 WebSocket 升级、把 HTML 当字符串
  * 吐出去、把 `createIpcServer` 接到 Bun 的 websocket 回调上、拿窗口 flags、
- * 处理 `openShell` 失败、轮询 `isAlive()` 等窗口关闭、按顺序 `stop()` 两次。
+ * 处理 `openShell` 失败、等窗口关闭（`EVENT_CLOSED`）、按顺序 `stop()` 两次。
  *
  * 每一段单看都不难，但它们**必须按特定顺序且互相依赖**——`stop()` 不先等窗口
  * 销毁就去关服务，下次启动会撞上「进程级单例还在」；WS 升级不在 `fetch` 里做，
@@ -28,6 +28,7 @@
  */
 
 import { createIpcServer, type IpcServer, type ServiceMethods } from "./ipc";
+import { EVENT_CLOSED, attachEventPump, type EventPump } from "./events";
 import { openShell, type Shell } from "./index";
 import { serveOnSafePort } from "./port";
 import { FLAG_CENTER, FLAG_RESIZABLE, type ShellOptions } from "./types";
@@ -36,6 +37,16 @@ import { FLAG_CENTER, FLAG_RESIZABLE, type ShellOptions } from "./types";
 export type App = {
     /** 内核对象。标题、缩放、全屏、原生菜单、位置持久化都从这里拿 */
     readonly shell: Shell;
+    /**
+     * 窗口生命周期事件流。骨架替你起的**唯一**一个消费者。
+     *
+     * `shell.pollEvents()` 是消费式的，一个窗口只能有一个消费者。要用
+     * `attachPlacementStore` 时传 `{ events: app.events }`，别再自己 attach
+     * 一个泵——两个泵会各自拿到一部分事件。
+     *
+     * 定时器是 keepAlive 的（不 unref）：`wait()` 靠它让进程活到窗口关闭。
+     */
+    readonly events: EventPump;
     /** 本地服务实际绑定的端口（已避开浏览器受限端口表） */
     readonly port: number;
     /** 页面 URL：带鉴权 token 的查询参数，直接交给 `openShell` 用的就是它 */
@@ -47,10 +58,13 @@ export type App = {
     /**
      * 停止窗口与本地服务。
      *
-     * 顺序是有意的：先 `shell.stop()`，再**轮询等窗口真的销毁**，最后才关服务。
-     * 原生层是进程级单例，`shell_stop()` 只是投了一个 `WM_QUIT`，UI 线程真正退出
-     * 约需 50 ms；抢在前面关服务或重新 start，会撞上「shell already started」
-     * （详见 `pitfalls` 2.4g / 7.1）。
+     * 顺序是有意的：先 `shell.stop()`，再**等 `EVENT_CLOSED`**，最后才关服务。
+     * 原生层是进程级单例，`shell_stop()` 只是投了一个 `WM_QUIT`；抢在前面关服务
+     * 或重新 start，会撞上「shell already started」（详见 `pitfalls` 2.4g / 7.1）。
+     *
+     * 等的是事件不是 `isAlive()`：`CLOSED` 由原生侧在 teardown 全部做完、
+     * `g_webview` 已置空之后写进队列，它出现的时刻就等于「单例已释放」。
+     * 仍然保留超时上限——事件通道若因故失效，宿主不能被永久挂住。
      *
      * 幂等：重复调用立即返回。
      */
@@ -59,7 +73,10 @@ export type App = {
      * 等窗口被关闭（用户点 X，或调用了 `stop()`）。
      *
      * 宿主进程不会因为窗口没了就自动退出——它自己起的本地服务还在跑。所以
-     * 「应用该结束了」的判据是 `isAlive()` 变假，不是任何信号。
+     * 「应用该结束了」的判据是收到 `EVENT_CLOSED`，不是任何信号。
+     *
+     * 这个 promise 靠 `events` 的 keepAlive 定时器撑住事件循环；别在等它的同时
+     * 把 `events.stop()` 掉，那样两边都收不到关闭信号。
      */
     wait(): Promise<void>;
 };
@@ -115,9 +132,24 @@ export type AppOptions = {
     onReady?: (app: App) => void;
 };
 
-/** 默认端口关掉时最多等多久。50 ms × 100 = 5 s，远大于实测的 50 ms */
-const STOP_POLL_MS = 50;
-const STOP_POLL_MAX = 100;
+/** 事件拉取节奏，约一帧 */
+const EVENT_POLL_MS = 16;
+/**
+ * 等 `EVENT_CLOSED` 的上限。
+ *
+ * 实测关闭约 50 ms，5 s 是三个数量级的余量。存在的理由不是「怕关得慢」，
+ * 而是「事件通道若因故失效，宿主不能被永久挂住」——超时后照旧关服务。
+ */
+const CLOSE_TIMEOUT_MS = 5000;
+
+/** 一个只能 resolve 一次的 promise。等窗口关闭用它，比轮询一个布尔值清楚 */
+function defer(): { promise: Promise<void>; resolve: () => void } {
+    let resolve: () => void = () => {};
+    const promise = new Promise<void>((r) => {
+        resolve = r;
+    });
+    return { promise, resolve };
+}
 
 /**
  * 不给 `flags` 时用的默认值：**带边框** + 可缩放 + 居中。
@@ -267,8 +299,20 @@ export async function createApp(opts: AppOptions): Promise<App> {
 
     let stopped = false;
 
+    // 窗口事件的唯一消费者。`keepAlive: true` 是 `wait()` 成立的前提：
+    // unref 的定时器不撑事件循环，而「等一个永不兑现的 promise」也撑不住——
+    // 宿主会在窗口还开着的时候直接退出。
+    const events = attachEventPump(shell, { intervalMs: EVENT_POLL_MS, keepAlive: true });
+    const closed = defer();
+    events.on((e) => {
+        if (e.type === EVENT_CLOSED) {
+            closed.resolve();
+        }
+    });
+
     const app: App = {
         shell,
+        events,
         port,
         url,
         token,
@@ -279,16 +323,19 @@ export async function createApp(opts: AppOptions): Promise<App> {
             }
             stopped = true;
             shell.stop();
-            // 必须等窗口真的销毁：原生层是进程级单例，WM_QUIT 投出去不等于已退出
-            for (let i = 0; i < STOP_POLL_MAX && shell.isAlive(); i++) {
-                await Bun.sleep(STOP_POLL_MS);
-            }
+            // 等 `EVENT_CLOSED` 而不是轮询 `isAlive()`：CLOSED 由原生侧在 teardown
+            // 全部做完、g_webview 已置空之后写进队列，它出现的时刻就等于「单例已释放」。
+            // 超时上限保留，且超时后也 resolve 一次——否则 `wait()` 会永远挂着。
+            await Promise.race([closed.promise, Bun.sleep(CLOSE_TIMEOUT_MS)]);
+            closed.resolve();
+            events.stop();
             server.stop(true);
         },
         async wait(): Promise<void> {
-            while (!stopped && shell.isAlive()) {
-                await Bun.sleep(STOP_POLL_MS);
+            if (stopped) {
+                return;
             }
+            await closed.promise;
         },
     };
 

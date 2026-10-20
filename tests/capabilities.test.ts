@@ -12,6 +12,20 @@ const SHELL_CC = await Bun.file(
     `${import.meta.dir}/../native/shell.cc`,
 ).text();
 
+/**
+ * 剔掉整行注释后的源码。
+ *
+ * 结构性断言必须跑在它上面：否则注释掉一行实现、再在注释里写上那串字，断言照样通过
+ * ——那就是在测注释（`pitfalls` 2.9）。既有的几条断言仍跑在原文上，因为其中一条
+ * 查的正是「注释里有没有写理由」。
+ */
+const SHELL_CODE = SHELL_CC.split(/\r?\n/)
+    .filter((line) => {
+        const t = line.trim();
+        return !(t.startsWith("//") || t.startsWith("*") || t.startsWith("/*"));
+    })
+    .join("\n");
+
 test("FLAG_ACCEPT_DROP 是独立位，不与既有标志冲突", () => {
     expect(FLAG_ACCEPT_DROP).toBe(32);
     for (const f of [FLAG_FRAMELESS, FLAG_CENTER, FLAG_DEFER_SHOW, FLAG_ACCEPT_DROP]) {
@@ -124,4 +138,103 @@ test("窗口位置：读的是还原矩形，且对外部坐标做屏幕校验",
     expect(SHELL_CC).toContain("EnumDisplayMonitors");
     // DPI 变化要按比例换算
     expect(SHELL_CC).toContain("MulDiv(w, static_cast<int>(dpi), saved_dpi)");
+});
+
+// ---- G2 窗口生命周期事件 ----
+
+/**
+ * 这一节守的三件事都属于「写错了门禁也不会红」：
+ *
+ * 1. **带边框模式的事件入队点**。那个窗口由 webview 库创建，`shell_wnd_proc`
+ *    根本不在它的消息链上——只有 `toplevel_proc` 在。只改一处的话，默认
+ *    （带边框）配置下宿主永远收不到尺寸与最大化事件，而所有测试照样绿。
+ * 2. **环容量与满时策略**。丢最旧还是丢最新决定了宿主会不会看到「冻结的旧状态」。
+ * 3. **`CLOSED` 的位置**。它必须发生在 teardown 全部做完之后，否则
+ *    「看到 CLOSED 就能 restart」这条等式不成立。
+ */
+test("两个窗口过程都给宿主事件留了入队点", () => {
+    const shellProcAt = SHELL_CODE.indexOf("LRESULT CALLBACK shell_wnd_proc");
+    const toplevelProcAt = SHELL_CODE.indexOf("LRESULT CALLBACK toplevel_proc");
+    expect(shellProcAt).toBeGreaterThan(0);
+    expect(toplevelProcAt).toBeGreaterThan(0);
+
+    const shellBody = SHELL_CODE.slice(shellProcAt, toplevelProcAt);
+    const toplevelBody = SHELL_CODE.slice(toplevelProcAt);
+    expect(shellBody).toContain("emit_state_event()");
+    expect(toplevelBody).toContain("emit_state_event()");
+
+    // 带边框分支不许顺手调 push_state()：页面推送的 16 ms 节流是给跨进程
+    // webview_eval 设计的，新开一条会让页面突然收到以前没有的 win 消息。
+    // 切片到 `case WM_TIMER:` 之前——再往后就跨到下一个分支了，
+    // 而那个分支里正好有 `flush_push_state()`（判据写到那里就成了测别人的代码）。
+    const sizeAt = toplevelBody.indexOf("case WM_SIZE:");
+    const timerAt = toplevelBody.indexOf("case WM_TIMER:", sizeAt);
+    expect(sizeAt).toBeGreaterThan(0);
+    expect(timerAt).toBeGreaterThan(sizeAt);
+    const sizeBlock = toplevelBody.slice(sizeAt, timerAt);
+    expect(sizeBlock).toContain("emit_state_event()");
+    expect(sizeBlock).not.toContain("push_state(");
+});
+
+test("事件环容量 128，满时丢最旧", () => {
+    expect(SHELL_CODE).toContain("kEventCapacity = 128");
+    const emitAt = SHELL_CODE.indexOf("void emit_event(");
+    expect(emitAt).toBeGreaterThan(0);
+    const body = SHELL_CODE.slice(emitAt, emitAt + 900);
+    // 满时推进读游标（丢最旧）。拒收最新会让环冻结在旧状态上，
+    // 宿主看到的是「窗口一直没变」——比丢历史危险得多
+    expect(body).toContain("++g_ev_tail;");
+    expect(body).toContain("kEventCapacity");
+});
+
+test("记录布局由编译期断言钉住", () => {
+    expect(SHELL_CODE).toContain("static_assert(sizeof(EventRecord) == 32");
+    // 容量必须是 2 的幂：入队用位与取模
+    expect(SHELL_CODE).toContain("kEventCapacity & (kEventCapacity - 1)");
+});
+
+test("CLOSED 在 teardown 之后发，且轮询不因 g_webview 为空而早退", () => {
+    const nullAt = SHELL_CODE.indexOf("g_webview = nullptr;");
+    const closedAt = SHELL_CODE.indexOf("emit_closed_event();");
+    expect(nullAt).toBeGreaterThan(0);
+    expect(closedAt).toBeGreaterThan(nullAt);
+
+    // 早退成 -1 会让 CLOSED 永远读不到——它恰恰产生于 g_webview 为空之后
+    const pollAt = SHELL_CODE.indexOf("int shell_poll_events(void *buf, int capacity)");
+    expect(pollAt).toBeGreaterThan(0);
+    const pollBody = SHELL_CODE.slice(pollAt, pollAt + 800);
+    expect(pollBody).not.toContain("!g_webview");
+});
+
+test("事件类型与位掩码在两侧逐值一致", async () => {
+    const ev = await import("@/shell/events");
+    expect(SHELL_CODE).toContain("SHELL_EVENT_STATE = 1");
+    expect(SHELL_CODE).toContain("SHELL_EVENT_CLOSED = 2");
+    expect(SHELL_CODE).toContain("SHELL_EV_MAXIMIZED = 1");
+    expect(SHELL_CODE).toContain("SHELL_EV_MINIMIZED = 2");
+    expect(SHELL_CODE).toContain("SHELL_EV_FOCUSED = 4");
+    expect(SHELL_CODE).toContain("SHELL_EV_DARK = 8");
+
+    expect(ev.EVENT_STATE).toBe(1);
+    expect(ev.EVENT_CLOSED).toBe(2);
+    expect(ev.EV_MAXIMIZED).toBe(1);
+    expect(ev.EV_MINIMIZED).toBe(2);
+    expect(ev.EV_FOCUSED).toBe(4);
+    expect(ev.EV_DARK).toBe(8);
+});
+
+test("两侧的环容量与记录长度同一个数", async () => {
+    const ev = await import("@/shell/events");
+    expect(ev.EVENT_QUEUE_CAPACITY).toBe(128);
+    expect(ev.EVENT_RECORD_BYTES).toBe(32);
+    expect(SHELL_CODE).toContain("kEventCapacity = 128");
+});
+
+test("事件环用自己的锁，不与生命周期锁 / 命令锁嵌套", () => {
+    // 锁序表里它是孤点：合并进 g_life_mu 或 g_queue_mu 都会在销毁期带来死锁风险
+    expect(SHELL_CODE).toContain("SRWLOCK g_ev_mu = SRWLOCK_INIT;");
+    const emitAt = SHELL_CODE.indexOf("void emit_event(");
+    const body = SHELL_CODE.slice(emitAt, emitAt + 900);
+    expect(body).not.toContain("g_life_mu");
+    expect(body).not.toContain("g_queue_mu");
 });

@@ -496,6 +496,138 @@ void post_json(const std::string &json) {
   webview_eval(g_webview, expr.c_str());
 }
 
+// ---- 窗口生命周期事件：固定容量环形队列 ----
+//
+// 为什么是队列而不是回调：`webview_run` 会阻塞 UI 线程，而 `bun:ffi` 的 JSCallback
+// 依赖空闲的 JS 主线程，二者叠加会跨线程重入死锁（ADR 0002、`AGENTS.md` §5 第 5 条）。
+// 唯一可行的形态是「UI 线程往定长环里写，宿主在自己的节奏里批量拉走」。
+//
+// 为什么不复用 push_state 的两道闸：那两道闸（变化检测 + 16 ms 节流）是为跨进程
+// `webview_eval` 服务的。宿主事件是同进程内存写，成本低几个数量级，而且**消费者不同**
+// ——共用一份缓存会让页面推送的「跳过」把宿主事件一起吃掉。所以事件侧自持 g_ev_last。
+//
+// 为什么满时丢最旧：事件是状态迁移，最新的状态才是真相。丢最新会让环冻结在旧状态上，
+// 宿主看到的是「窗口一直没变」——比丢历史危险得多。丢失量由 seq 缺口如实上报。
+
+enum ShellEventType : unsigned {
+  SHELL_EVENT_STATE = 1,
+  SHELL_EVENT_CLOSED = 2,
+};
+
+// 与 TS 侧 src/shell/events.ts 的 EV_* 逐位一致
+enum ShellEventFlag : unsigned {
+  SHELL_EV_MAXIMIZED = 1,
+  SHELL_EV_MINIMIZED = 2,
+  SHELL_EV_FOCUSED = 4,
+  SHELL_EV_DARK = 8,
+};
+
+// 32 字节定长，小端直排：FFI 侧不做序列化，宿主拿到 Uint8Array 直接按偏移读。
+// 改布局 = 改 ABI，必须同步 events.ts 的 EVENT_RECORD_BYTES 与 decodeEvents。
+struct EventRecord {
+  unsigned int seq;    // 单调递增，从 1 起；新一次 shell_start_ex 归零
+  unsigned int type;   // ShellEventType
+  int a;               // STATE: 客户区宽（物理像素）
+  int b;               // STATE: 客户区高
+  int c;               // STATE: DPI
+  int d;               // 保留（0）
+  unsigned int flags;  // ShellEventFlag 按位或
+  unsigned int reserved;
+};
+static_assert(sizeof(EventRecord) == 32, "event record must stay 32 bytes");
+
+// 容量必须是 2 的幂（下面用位与取模）。128 × 32 B = 4 KiB：
+// 16 ms 节奏下一次拖动约 60 条，留一倍余量；宿主完全不拉时 seq 缺口会如实上报。
+const unsigned kEventCapacity = 128;
+static_assert((kEventCapacity & (kEventCapacity - 1)) == 0,
+              "event capacity must be a power of two");
+
+// 事件环的锁，独立于 g_life_mu / g_queue_mu，从不与它们嵌套——锁序表里它是孤点。
+// 写侧只有 UI 线程；读侧是宿主线程的批量拷贝，**也**要独占（它要推进 g_ev_tail）。
+// 临界区最长是一次 4 KiB memcpy（微秒级），UI 线程感知不到。
+// 不用无锁 SPSC 的理由很具体：溢出时写侧要推进读游标，「丢最旧」让环出现第二个
+// 写者，正确性成本远高于一把 SRW。
+SRWLOCK g_ev_mu = SRWLOCK_INIT;
+EventRecord g_events[kEventCapacity];
+unsigned g_ev_head = 0;  // 单调递增的写游标；占有量 = head - tail
+unsigned g_ev_tail = 0;  // 单调递增的读游标
+unsigned g_ev_seq = 0;
+bool g_ev_has_last = false;
+EventRecord g_ev_last{};  // 仅 UI 线程读写，用于「同态不入队」
+
+// 入队一条记录（仅 UI 线程调用）。
+void emit_event(unsigned type, int a, int b, int c, int d, unsigned flags) {
+  AcquireSRWLockExclusive(&g_ev_mu);
+  EventRecord rec{};
+  rec.seq = ++g_ev_seq;
+  rec.type = type;
+  rec.a = a;
+  rec.b = b;
+  rec.c = c;
+  rec.d = d;
+  rec.flags = flags;
+  if (g_ev_head - g_ev_tail >= kEventCapacity) {
+    ++g_ev_tail;  // 满：丢最旧，保住最新状态
+  }
+  g_events[g_ev_head & (kEventCapacity - 1)] = rec;
+  ++g_ev_head;
+  ReleaseSRWLockExclusive(&g_ev_mu);
+}
+
+// 抓一次窗口状态，**状态没变就不入队**。
+//
+// 无边框模式的 WM_SIZE / WM_ACTIVATE 会经 shell_wnd_proc 走到这里；带边框模式的
+// 窗口由 webview 库创建，消息只经过 toplevel_proc——两条路都必须显式调用本函数，
+// 否则默认（带边框）配置下宿主永远收不到尺寸与最大化事件，而门禁照样全绿。
+void emit_state_event() {
+  if (!g_hwnd) {
+    return;
+  }
+  const bool maxed = IsZoomed(g_hwnd) != FALSE;
+  const bool minned = IsIconic(g_hwnd) != FALSE;
+  const bool focused = GetForegroundWindow() == g_hwnd;
+  RECT rc{};
+  GetClientRect(g_hwnd, &rc);
+  const int px_w = rc.right - rc.left;
+  const int px_h = rc.bottom - rc.top;
+  const int dpi = static_cast<int>(GetDpiForWindow(g_hwnd));
+  const bool dark = system_uses_dark();
+
+  unsigned flags = 0;
+  if (maxed) flags |= SHELL_EV_MAXIMIZED;
+  if (minned) flags |= SHELL_EV_MINIMIZED;
+  if (focused) flags |= SHELL_EV_FOCUSED;
+  if (dark) flags |= SHELL_EV_DARK;
+
+  if (g_ev_has_last && g_ev_last.a == px_w && g_ev_last.b == px_h &&
+      g_ev_last.c == dpi && g_ev_last.flags == flags) {
+    return;
+  }
+  g_ev_has_last = true;
+  g_ev_last = EventRecord{0, SHELL_EVENT_STATE, px_w, px_h, dpi, 0, flags, 0};
+  emit_event(SHELL_EVENT_STATE, px_w, px_h, dpi, 0, flags);
+}
+
+// 终态事件。必须在 teardown 全部做完、g_webview 已置空**之后**调用：
+// 「看到 CLOSED」于是等价于「进程级单例已释放，可以 restart」，宿主不必再轮询
+// is_alive()（见 AGENTS.md §7.1）。
+void emit_closed_event() {
+  g_ev_has_last = false;
+  g_ev_last = EventRecord{};
+  emit_event(SHELL_EVENT_CLOSED, 0, 0, 0, 0, 0);
+}
+
+// 新一轮启动前清空：丢弃上一轮未读的记录（否则宿主可能先拿到上一次的 CLOSED，
+// 误判「当前窗口已经关了」），并把序号归零。宿主侧据此判定新一轮——seq 变小即重启。
+void reset_events() {
+  AcquireSRWLockExclusive(&g_ev_mu);
+  g_ev_tail = g_ev_head;
+  g_ev_seq = 0;
+  ReleaseSRWLockExclusive(&g_ev_mu);
+  g_ev_has_last = false;
+  g_ev_last = EventRecord{};
+}
+
 // 上一次真正推送出去的状态。放在这里而不是函数内，供变化检测比对。
 struct PushedState {
   int px_w = -1;
@@ -1608,11 +1740,13 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     apply_round_corners(hwnd, !IsZoomed(hwnd));
     fit_widget();
     push_state();
+    emit_state_event();
     break;
 
   case WM_ACTIVATE:
   case WM_SETFOCUS:
     push_state();
+    emit_state_event();
     break;
 
   case WM_SETTINGCHANGE:
@@ -1620,6 +1754,7 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // 系统切换深/浅色时重新应用，并把新状态推给页面
     apply_dark_mode(hwnd);
     push_state();
+    emit_state_event();
     break;
 
   case WM_NCRBUTTONUP:
@@ -1657,6 +1792,7 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                  SWP_NOZORDER | SWP_NOACTIVATE);
     fit_widget();
     push_state();
+    emit_state_event();
     return 0;
   }
 
@@ -1718,6 +1854,19 @@ LRESULT CALLBACK toplevel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     break;
+  // 带边框模式的顶层窗口由 webview 库创建，`shell_wnd_proc` 根本不在它的消息链上
+  // ——只有这里能看见 WM_SIZE / WM_ACTIVATE。所以宿主事件必须在这里补一遍，
+  // 否则默认（带边框）配置下宿主永远收不到尺寸与最大化事件，而门禁全绿。
+  //
+  // 这里**只**发宿主事件，不调 push_state()：页面推送的 16 ms 节流 + 变化检测是
+  // 为跨进程 webview_eval 设计的，给带边框模式新开一条页面推送会改变既有消费者的
+  // 可见行为（页面突然开始收到以前没有的 win 消息）。两件事分开。
+  case WM_SIZE:
+  case WM_ACTIVATE:
+  case WM_SETFOCUS:
+  case WM_DPICHANGED:
+    emit_state_event();
+    break;
   case WM_TIMER:
     if (wp == kPushTimerId) {
       flush_push_state();
@@ -1728,6 +1877,7 @@ LRESULT CALLBACK toplevel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_THEMECHANGED:
     apply_dark_mode(hwnd);
     push_state();
+    emit_state_event();
     break;
   case WM_NCRBUTTONUP:
     if (static_cast<WPARAM>(wp) == HTCAPTION) {
@@ -2062,6 +2212,10 @@ DWORD WINAPI ui_thread(LPVOID param) {
   g_push_pending = false;
   g_pushed = PushedState{};
 
+  // 终态事件放在**所有清理之后**：宿主看到它就可以安全 restart，不必再轮询
+  // is_alive()——原生层是进程级单例，而此刻 g_webview 已经是 nullptr。
+  emit_closed_event();
+
   if (g_frameless) {
     CoUninitialize();
   }
@@ -2118,6 +2272,9 @@ __declspec(dllexport) int shell_start_ex(const char *url, const char *title,
     g_app_doc = strip_fragment(wurl);
   }
   g_allow_external_nav = (flags & SHELL_FLAG_ALLOW_EXTERNAL_NAV) != 0;
+  // 丢弃上一轮未读的事件记录并归零序号：否则宿主可能先拿到上一次的 CLOSED，
+  // 误判「当前窗口已经关了」。宿主侧以「seq 变小」判定新一轮。
+  reset_events();
   clear_err();
 
   g_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -2391,6 +2548,30 @@ __declspec(dllexport) int shell_get_state(void) {
 // 调用方无法区分。宿主需要这个信号来回收进程——窗口销毁后 webview_run 会在
 // UI 线程返回，但宿主进程（以及它起的本地服务）不会自己退出。
 __declspec(dllexport) int shell_is_alive(void) { return g_webview ? 1 : 0; }
+
+// 批量拉取窗口生命周期事件。capacity 是**记录条数**（不是字节数），
+// buf 需至少 capacity * 32 字节；返回本次写入的条数。
+//
+// 与其它导出不同，这里**不**检查 g_webview：CLOSED 恰好在它被置空之后才产生，
+// 早退会让宿主永远读不到「窗口已关闭」。未启动时返回 0，与「没有新事件」同义。
+//
+// 线程契约：约定单读者。多个线程同时拉会各自拿到不同的子集——不会崩，但谁也看不全。
+__declspec(dllexport) int shell_poll_events(void *buf, int capacity) {
+  if (!buf || capacity <= 0) return 0;
+  auto *out = static_cast<EventRecord *>(buf);
+  // 读侧也要独占：它要推进 g_ev_tail。临界区最长是一次 4 KiB 拷贝。
+  AcquireSRWLockExclusive(&g_ev_mu);
+  const unsigned avail = g_ev_head - g_ev_tail;
+  const unsigned want = static_cast<unsigned>(capacity);
+  const unsigned n = avail < want ? avail : want;
+  const unsigned start = g_ev_tail;
+  for (unsigned i = 0; i < n; ++i) {
+    out[i] = g_events[(start + i) & (kEventCapacity - 1)];
+  }
+  g_ev_tail = start + n;
+  ReleaseSRWLockExclusive(&g_ev_mu);
+  return static_cast<int>(n);
+}
 
 // 调试用：入参为顶层窗口客户区坐标（设备像素），与页面 CSS 像素按 dpr 换算。
 __declspec(dllexport) int shell_debug_hittest(int x, int y) {

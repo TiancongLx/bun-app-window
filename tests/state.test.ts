@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { EVENT_STATE, type EventPump, type WindowEvent } from "@/shell/events";
 import {
     capturePlacement,
     loadPlacement,
@@ -16,10 +17,14 @@ import {
 /**
  * 窗口位置持久化。
  *
- * 这里的断言分三类，各自对应一种真实故障：
+ * 这里的断言分四类，各自对应一种真实故障：
  *   1) 解析/形状校验 —— 配置文件被手改坏、被截断、旧版本写的
  *   2) 原子写 —— 关闭时被强杀，半截 JSON 让下次启动读不到位置
- *   3) 变化检测 —— 窗口静止时不该有磁盘写入（轮询 700 ms，一天能写十万次）
+ *   3) 变化检测 —— 窗口静止时不该有磁盘写入
+ *   4) 快照先于写盘 —— 窗口关闭后 `getBounds()` 立刻返回空串，若等防抖到点才去读，
+ *      最后那次位置变化就永久丢了（「拖完立刻点 X」是最常见的关闭方式）
+ *
+ * 事件源用假泵注入，不靠真定时器：靠 sleep 竞速的断言在慢机器上会随机红。
  */
 
 const dirs: string[] = [];
@@ -34,6 +39,59 @@ afterEach(() => {
         if (d) rmSync(d, { recursive: true, force: true });
     }
 });
+
+/** 一条 STATE 事件；载荷对本测试无意义，只有 `type` 与到达时机起作用 */
+function stateEvent(seq: number): WindowEvent {
+    return {
+        type: EVENT_STATE,
+        seq,
+        width: 1,
+        height: 1,
+        dpi: 96,
+        maximized: false,
+        minimized: false,
+        focused: false,
+        dark: false,
+    };
+}
+
+/** 可控的事件泵替身：`emit()` 就是「宿主拉到一条事件」 */
+function fakePump(): { pump: EventPump; emit: (e: WindowEvent) => void } {
+    const fns = new Set<(e: WindowEvent) => void>();
+    let seq = 0;
+    const pump: EventPump = {
+        on(fn) {
+            fns.add(fn);
+            return () => {
+                fns.delete(fn);
+            };
+        },
+        onGap() {
+            return () => {};
+        },
+        stop() {
+            // 假泵没有定时器
+        },
+        running: true,
+        get seq() {
+            return seq;
+        },
+    };
+    return {
+        pump,
+        emit(e) {
+            seq = e.seq;
+            for (const fn of fns) fn(e);
+        },
+    };
+}
+
+/** 只提供 getBounds 的壳替身（pollEvents 由注入的泵取代） */
+function fakeShell(read: () => string): Parameters<typeof attachPlacementStore>[0] {
+    return { getBounds: read, pollEvents: () => [] } as unknown as Parameters<
+        typeof attachPlacementStore
+    >[0];
+}
 
 // ---- parseBounds：原生文本 → 结构 ----
 
@@ -137,34 +195,36 @@ test("loadPlacement 容忍手改后多余字段", async () => {
     });
 });
 
-// ---- 轮询存储：变化检测 ----
+// ---- 事件驱动的存储：变化检测 ----
 
 test("attachPlacementStore 首次写一次，静止时不再重复写，变化后更新", async () => {
-    const file = join(tmpDir(), "poll.json");
-    const fake = { text: "100,200,800,600,0,96" };
-    // 用一个最小壳替身：只提供 getBounds
-    const shell = { getBounds: () => fake.text } as unknown as Parameters<
-        typeof attachPlacementStore
-    >[0];
+    const file = join(tmpDir(), "event.json");
+    const text = { value: "100,200,800,600,0,96" };
+    const { pump, emit } = fakePump();
 
-    const store = attachPlacementStore(shell, file, { intervalMs: 20 });
+    const store = attachPlacementStore(fakeShell(() => text.value), file, {
+        debounceMs: 10,
+        events: pump,
+    });
 
-    // 首次读数应该落盘一次：程序若在用户操作前崩溃，也还有初始位置可恢复
-    await Bun.sleep(60);
+    // 首次快照应该落盘一次：程序若在用户操作前崩溃，也还有初始位置可恢复
+    await store.flush();
     expect(await Bun.file(file).exists()).toBe(true);
     const first = JSON.parse(readFileSync(file, "utf8")) as WindowPlacement;
     expect(first.x).toBe(100);
 
-    // 静止：再不产生写入。用 mtime 判断——内容比较测不出「重复写了同样的值」
+    // 静止：事件到了但读数没变，不产生写入。
+    // 用 mtime 判断——内容比较测不出「重复写了同样的值」
     const mtime = statSync(file).mtimeMs;
-    await Bun.sleep(80);
+    emit(stateEvent(1));
+    await Bun.sleep(40);
     expect(statSync(file).mtimeMs).toBe(mtime);
 
-    // 变化：应写出新值
-    fake.text = "300,400,900,700,0,96";
-    await Bun.sleep(80);
+    // 变化：事件到达即取快照，防抖到点写盘
+    text.value = "300,400,900,700,0,96";
+    emit(stateEvent(2));
+    await Bun.sleep(40);
     store.dispose();
-    await store.flush();
 
     const saved = JSON.parse(readFileSync(file, "utf8")) as WindowPlacement;
     expect(saved.x).toBe(300);
@@ -173,14 +233,62 @@ test("attachPlacementStore 首次写一次，静止时不再重复写，变化�
 
 test("attachPlacementStore 忽略解析不出意义的读数（窗口建好前）", async () => {
     const file = join(tmpDir(), "zero.json");
-    const shell = { getBounds: () => "0,0,0,0,0,0" } as unknown as Parameters<
-        typeof attachPlacementStore
-    >[0];
-    const store = attachPlacementStore(shell, file, { intervalMs: 20 });
-    await Bun.sleep(60);
+    const { pump, emit } = fakePump();
+    const store = attachPlacementStore(fakeShell(() => "0,0,0,0,0,0"), file, {
+        debounceMs: 10,
+        events: pump,
+    });
+    emit(stateEvent(1));
+    await Bun.sleep(40);
     store.dispose();
     await store.flush();
     expect(await Bun.file(file).exists()).toBe(false);
+});
+
+/**
+ * 快照必须早于写盘。
+ *
+ * 反过来的写法（防抖到点才去 `getBounds()`）在真机上会静默丢掉最后一次变化：
+ * 窗口一旦销毁，原生侧 `format_bounds()` 里 `!g_hwnd` 直接返回 0 长度文本。
+ * 用户「拖完立刻点 X」正好命中这个窗口期。
+ */
+test("getBounds 变空之后，已取到的快照仍会落盘", async () => {
+    const file = join(tmpDir(), "close.json");
+    const text = { value: "10,20,700,500,0,96" };
+    const { pump, emit } = fakePump();
+
+    const store = attachPlacementStore(fakeShell(() => text.value), file, {
+        debounceMs: 30,
+        events: pump,
+    });
+
+    text.value = "40,50,900,700,0,96";
+    emit(stateEvent(2)); // 快照在这一刻取到真实值
+    text.value = ""; // 窗口随即销毁，之后再读是空串
+    await Bun.sleep(60);
+    store.dispose();
+
+    const saved = JSON.parse(readFileSync(file, "utf8")) as WindowPlacement;
+    expect(saved.x).toBe(40);
+    expect(saved.width).toBe(900);
+});
+
+test("dispose 之后不再写盘", async () => {
+    const file = join(tmpDir(), "disposed.json");
+    const text = { value: "1,2,300,200,0,96" };
+    const { pump, emit } = fakePump();
+    const store = attachPlacementStore(fakeShell(() => text.value), file, {
+        debounceMs: 10,
+        events: pump,
+    });
+    await store.flush();
+    store.dispose();
+
+    text.value = "9,9,999,999,0,96";
+    emit(stateEvent(2));
+    await Bun.sleep(30);
+    const saved = JSON.parse(readFileSync(file, "utf8")) as WindowPlacement;
+    expect(saved.x).toBe(1);
 });
 
 test("capturePlacement 在读数无意义时返回 null", () => {

@@ -4,11 +4,35 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-21
 
 ### Added
 
-- `bun-app-window/app` — an application skeleton, and the answer to a specific number: **180**. That is how much host boilerplate a first app needed before this release, against roughly 30 lines of business code. Picking a browser-safe port, minting a per-run auth token, handling the WebSocket upgrade, serving HTML as a string, wiring `createIpcServer` into Bun's websocket callbacks, composing window flags, handling `openShell` failure, polling `isAlive()` for window close, and calling `stop()` on two things — each piece is easy, but they are only correct in one order. `createApp()` collapses it:
+- `bun-app-window/events` — window lifecycle events, and the end of polling. Until this release the host had exactly one way to learn that the window changed: ask again. `shell.isAlive()` every 50 ms to notice a close, and `attachPlacementStore` calling `getBounds()` every 700 ms. The module comment in `state.ts` gave the reason — "the native side pushes window state to the **page** (shell-msg); the host cannot see it, and adding a native→host callback channel means a whole lifecycle to manage".
+
+    A callback is not available: `webview_run` blocks the native UI thread while `bun:ffi`'s `JSCallback` needs an idle JS thread, and the two together deadlock (ADR 0002). So the channel is a fixed ring plus a pull:
+
+    ```text
+    native: UI thread appends 32-byte records to a 128-slot ring,
+            holding one SRWLOCK for at most a 4 KiB copy
+    host:   shell_poll_events(buf, capacity) → shell.pollEvents() / attachEventPump()
+    ```
+
+    Four decisions, each with a failure mode behind it:
+
+    **Capacity 128, drop the oldest.** A one-second drag at a 16 ms cadence is about 60 events, so 128 is a two-fold margin. Dropping the *newest* instead would freeze the ring at a stale state and the host would see "the window never changed" — far worse than losing history. Losses are reported as gaps in `seq` rather than synthesised into an overflow event: the gap carries the exact count, and no new `seq` special case is needed.
+
+    **`CLOSED` is emitted after teardown completes.** That is the whole point: "saw `CLOSED`" must be equivalent to "the process-wide singleton is released, restart is safe". It follows that `shell_poll_events` must **not** return -1 when `g_webview` is null, unlike every other export — `CLOSED` is produced precisely after the handle is gone.
+
+    **Both window procedures enqueue.** `shell_wnd_proc` is only registered for the `webview_shell` class, which only `FLAG_FRAMELESS` uses. A framed window is created by the webview library, and only the `toplevel_proc` subclass sees its `WM_SIZE`. Enqueueing next to `push_state()` alone would leave the **default** configuration permanently silent about size and maximize events, with every test green.
+
+    **The event side keeps its own change-detection cache.** `push_state` compares against `g_pushed` to throttle cross-process `webview_eval`. Recording the same state into the ring is a memory write, and the consumers differ: sharing the cache would let the page push's "unchanged, skip" swallow the host's events too.
+
+- `shell.pollEvents(max?)` on the main entry — the raw pull primitive. Synchronous, consuming, and documented as single-consumer: drained records never come back, so a process should have exactly one reader.
+
+- `EventCursor` and `attachEventPump()` — the cursor turns `seq` into "how many did I miss", and the pump supplies a cadence with multi-subscriber fan-out (`on()` / `onGap()`), stopping itself once `CLOSED` arrives.
+
+- `bun-app-window/app` — an application skeleton, and the answer to a specific number: **180**. That is how much host boilerplate a first app needed before this release, against roughly 30 lines of business code. Picking a browser-safe port, minting a per-run auth token, handling the WebSocket upgrade, serving HTML as a string, wiring `createIpcServer` into Bun's websocket callbacks, composing window flags, handling `openShell` failure, waiting for window close, and calling `stop()` on two things — each piece is easy, but they are only correct in one order. `createApp()` collapses it:
 
     ```ts
     const app = await createApp({ html, service: { greet: (n) => `hi ${n}` } });
@@ -27,10 +51,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- `attachPlacementStore` is now event-driven. It used to call `getBounds()` every 700 ms; it now takes a snapshot the moment a `STATE` event arrives and batches the disk write until 300 ms after the window settles. A window at rest costs zero native calls and zero disk writes, and a drag no longer writes on every frame. The `intervalMs` option is replaced by `debounceMs` (write delay) and `pumpMs` (internal pump cadence) — a 0.x minor is allowed to break that, and the old name would now be a lie.
+
+    Snapshot and write are deliberately separate. Once the window is destroyed, `format_bounds()` returns an empty string because `!g_hwnd`; reading at debounce time would therefore drop the last change — exactly the one made by "drag, then immediately click X", which is how most people close a window.
+
+- `createApp`'s `stop()` and `wait()` wait for `EVENT_CLOSED` instead of polling `isAlive()` every 50 ms. The 5-second ceiling stays: if the event channel ever fails, the host must not hang forever, and the timeout also resolves the close promise so `wait()` cannot hang on a dead channel. `isAlive()` keeps its symbol and its API — it is still a legitimate instant snapshot — but it is no longer the waiting criterion. `app.events` is exposed as the single consumer, so `attachPlacementStore(shell, file, { events: app.events })` reuses it instead of starting a second one.
+
+- Exported symbols 33 → 34 and TypeScript declarations 32 → 33 (`shell_poll_events`). `native-surface.test.ts`'s hand-written `DECLARED` list and its total-count assertion moved with it.
+
 - Twelve assertions in `tests/app.test.ts` plus seven in `scripts/consumer-probe.ts`. The probe now also exercises `bun-app-window/app` from the installed package.
 - Three hardcoded counts in the docs are gone (`40 assertions`, `8 subpaths`, `182 test cases`): all three had already drifted. The consumer probe reports its own count now, and `AGENTS.md` says so.
 
 ### Note
+
+- The pump timer's `unref` is not an implementation detail. An unref'd timer does not hold the event loop open, and a promise that never resolves does not either — so a host that `await`s for close while relying on an unref'd pump will exit with the window still open, which looks like "the app flashes and quits". `./state` unrefs (a persistence timer should not keep a process alive); `./app` pins the timer with `keepAlive: true` because waiting for close is exactly what it needs to survive.
+
+- The acceptance for this release was bidirectional rather than one-sided. Commenting out `emit_event(SHELL_EVENT_STATE, ...)`, rebuilding, and running `scripts/probe-window-events.ts` turned it from 21/21 green to 11/21 red with `exit=1` — while the ten `CLOSED` assertions stayed green, confirming the injection was isolated to the state path. Restoring and rebuilding returned 21/21, and `verify-dll.ts` reported the same sha256 as before the injection, which also proves the build is reproducible. `docs/pitfalls.md` 2.4k records the four failure modes found along the way.
 
 - This is **not** a competitor to `Bun.WebView`, and the READMEs now say so explicitly. `Bun.WebView` is a *headless* browser for automation, testing and scraping: it has no window, and it can only screenshot its own page. This package draws a real desktop window — system title bar, DPI awareness, snap layouts, taskbar identity — and its capture tool can photograph **any** window, which is the whole point for computer-use. Comparing API surface between the two is comparing different problems.
 
@@ -249,7 +285,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.0...v0.2.1

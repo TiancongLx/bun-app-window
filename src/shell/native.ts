@@ -10,8 +10,8 @@ import type { Pointer } from "bun:ffi";
 /**
  * 打开 libshell.dll。
  *
- * 导出面说明：DLL 实际导出 33 个符号，其中 `shell_start` 是 1.x 遗留入口，
- * TS 侧不声明、也不对外承诺（故下方声明 32 个）；`shell_debug_*` / `shell_self_*` 属排障面。
+ * 导出面说明：DLL 实际导出 34 个符号，其中 `shell_start` 是 1.x 遗留入口，
+ * TS 侧不声明、也不对外承诺（故下方声明 33 个）；`shell_debug_*` / `shell_self_*` 属排障面。
  */
 export function openNativeLib(path: string) {
   return dlopen(path, {
@@ -29,6 +29,8 @@ export function openNativeLib(path: string) {
     shell_set_min_size: { args: [FFIType.i32, FFIType.i32], returns: FFIType.void },
     shell_get_state: { args: [], returns: FFIType.i32 },
     shell_is_alive: { args: [], returns: FFIType.i32 },
+    // 窗口生命周期事件：批量拉取（消费式），capacity 是记录条数
+    shell_poll_events: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
     shell_stop: { args: [], returns: FFIType.void },
     shell_error: { args: [], returns: FFIType.ptr },
     // 系统集成面

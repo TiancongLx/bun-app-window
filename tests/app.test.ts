@@ -104,24 +104,51 @@ test("handle 里 /ws 的判定早于 routes 回调", () => {
 /**
  * `stop()` 必须先等窗口销毁再关服务。
  *
- * 原生层是进程级单例，`shell_stop()` 只是投一个 `WM_QUIT`，UI 线程真正退出约 50 ms。
- * 抢在前面关服务，或紧接着再 `start()`，会撞上「shell already started」
- * （`pitfalls` 2.4g / 7.1）。
+ * 原生层是进程级单例，`shell_stop()` 只是投一个 `WM_QUIT`。抢在前面关服务，
+ * 或紧接着再 `start()`，会撞上「shell already started」（`pitfalls` 2.4g / 7.1）。
+ *
+ * 等的判据是 `EVENT_CLOSED`，不是 `isAlive()`：CLOSED 由原生侧在 teardown
+ * 全部做完、`g_webview` 已置空之后写进队列，它出现的时刻才等于「单例已释放」。
  */
-test("stop 里 shell.stop 早于 server.stop，且中间有等销毁的轮询", () => {
+test("stop 里 shell.stop 早于 server.stop，中间等 EVENT_CLOSED", () => {
     const stopAt = APP_CODE.indexOf("async stop()");
     expect(stopAt).toBeGreaterThan(0);
-    const body = APP_CODE.slice(stopAt, stopAt + 700);
+    const body = APP_CODE.slice(stopAt, stopAt + 900);
 
     const shellStopAt = body.indexOf("shell.stop()");
-    const pollAt = body.indexOf("shell.isAlive()");
+    const awaitClosedAt = body.indexOf("closed.promise");
     const serverStopAt = body.indexOf("server.stop(");
 
     expect(shellStopAt).toBeGreaterThan(0);
     expect(serverStopAt).toBeGreaterThan(0);
-    // 缺了这段轮询，关服务的时机就退化成「投完 WM_QUIT 立刻关」——顺序对了也不够
-    expect(pollAt).toBeGreaterThan(shellStopAt);
+    // 缺了这段等待，关服务的时机就退化成「投完 WM_QUIT 立刻关」——顺序对了也不够
+    expect(awaitClosedAt).toBeGreaterThan(shellStopAt);
     expect(serverStopAt).toBeGreaterThan(shellStopAt);
+});
+
+/**
+ * 等 CLOSED 必须有超时上限。
+ *
+ * 事件通道若因故失效（原生库被替换、pump 提前停），`closed.promise` 永不兑现，
+ * 宿主会被永久挂住——那比「关得慢」严重得多。
+ */
+test("等 CLOSED 与超时赛跑，且超时后也 resolve 一次", () => {
+    const stopAt = APP_CODE.indexOf("async stop()");
+    const body = APP_CODE.slice(stopAt, stopAt + 900);
+    expect(body).toContain("Promise.race(");
+    expect(body).toContain("Bun.sleep(CLOSE_TIMEOUT_MS)");
+    // 超时分支若不 resolve，wait() 会永远挂着
+    expect(body.indexOf("closed.resolve()")).toBeGreaterThan(body.indexOf("Promise.race("));
+});
+
+/**
+ * pump 必须 keepAlive。
+ *
+ * unref 的定时器不撑事件循环，而「等一个永不兑现的 promise」也撑不住——
+ * 两者叠加会让宿主在窗口还开着的时候直接退出。
+ */
+test("app 的事件泵不 unref（wait 靠它撑住事件循环）", () => {
+    expect(APP_CODE).toContain("keepAlive: true");
 });
 
 test("openShell 失败时必须关掉本地服务，不留半启动状态", () => {

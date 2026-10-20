@@ -30,6 +30,14 @@ import {
 } from "bun-app-window";
 import { debugOf } from "bun-app-window/debug";
 import { embeddedDll, embeddedDllPath } from "bun-app-window/embedded";
+import {
+    EVENT_CLOSED,
+    EVENT_QUEUE_CAPACITY,
+    EVENT_RECORD_BYTES,
+    EVENT_STATE,
+    EventCursor,
+    decodeEvents,
+} from "bun-app-window/events";
 import { connect, createIpcServer } from "bun-app-window/ipc";
 import type { Channel } from "bun-app-window/ipc";
 import nativeLibPath from "bun-app-window/native" with { type: "file" };
@@ -67,6 +75,7 @@ const exportsMap = (meta["exports"] ?? {}) as Record<string, unknown>;
 const expectedSubpaths = [
     ".",
     "./app",
+    "./events",
     "./embedded",
     "./debug",
     "./state",
@@ -131,6 +140,7 @@ check(
 );
 equal("dlopen 后并未自动开窗（started）", shell.started, false);
 equal("未启动时 isAlive() 为 false", shell.isAlive(), false);
+equal("未启动时 pollEvents() 返回空数组", shell.pollEvents().length, 0);
 equal("未启动时 lastError() 为空串", shell.lastError(), "");
 
 const idle = shell.state();
@@ -241,6 +251,36 @@ equal("app.decideWs 非 /ws 交回默认处理", decideWs("/", null, "k", true),
 equal("app.decideWs 未开 ipc 时 404", decideWs("/ws", "k", "k", false), "ipc-disabled");
 equal("app.decideWs token 不符拒绝", decideWs("/ws", "x", "k", true), "forbidden");
 equal("app.decideWs token 相符升级", decideWs("/ws", "k", "k", true), "upgrade");
+
+// ---- 12. events：窗口生命周期事件（解码与游标） -------------------------------
+
+equal("events.EVENT_RECORD_BYTES 与原生 EventRecord 一致", EVENT_RECORD_BYTES, 32);
+equal("events.EVENT_QUEUE_CAPACITY 与原生环一致", EVENT_QUEUE_CAPACITY, 128);
+equal("events.EVENT_STATE 取值", EVENT_STATE, 1);
+equal("events.EVENT_CLOSED 取值", EVENT_CLOSED, 2);
+
+// 手拼一条记录：这是「TS 侧偏移与原生布局对齐」唯一能离线验的判据
+const rec = new Uint8Array(EVENT_RECORD_BYTES);
+const recView = new DataView(rec.buffer);
+recView.setUint32(0, 7, true); // seq
+recView.setUint32(4, EVENT_STATE, true); // type
+recView.setInt32(8, 800, true); // 宽
+recView.setInt32(12, 600, true); // 高
+recView.setInt32(16, 96, true); // dpi
+recView.setUint32(24, 1 | 8, true); // maximized | dark
+const decoded = decodeEvents(rec, 1)[0];
+equal(
+    "events.decodeEvents 按偏移解出状态位与尺寸",
+    JSON.stringify(decoded),
+    '{"type":1,"seq":7,"width":800,"height":600,"dpi":96,"maximized":true,"minimized":false,"focused":false,"dark":true}',
+);
+
+const cursor = new EventCursor();
+// 新建游标的首条不是 1，说明前面有丢弃（宿主从未读过）
+equal("events.EventCursor 首条非 1 报出缺口", cursor.push([decoded!]).gaps[0], 6);
+equal("events.EventCursor 记下最新序号", cursor.seq, 7);
+equal("events.EventCursor 连续事件不报缺口", cursor.push([{ ...decoded!, seq: 8 }]).gaps.length, 0);
+equal("events.EventCursor 断档时报出丢了多少条", cursor.push([{ ...decoded!, seq: 11 }]).gaps[0], 2);
 
 // ---- 汇总 -------------------------------------------------------------------
 
