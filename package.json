@@ -34,19 +34,16 @@
         "./state": "./src/shell/state.ts",
         "./ipc": "./src/shell/ipc.ts",
         "./titlebar": "./src/ui/titlebar.ts",
-        "./native": "./dist/libshell.dll",
+        "./native": {
+            "types": "./src/shell/native-asset.d.ts",
+            "default": "./dist/libshell.dll"
+        },
         "./package.json": "./package.json"
     },
     "files": [
         "src/shell",
         "src/ui/titlebar.ts",
         "dist/libshell.dll",
-        "native/shell.cc",
-        "native/build.ps1",
-        "native/fetch.ps1",
-        "vendor/webview/core",
-        "vendor/webview/compatibility",
-        "vendor/webview2/build/native/include",
         "README.md",
         "README.zh-CN.md",
         "README.zh-TW.md",

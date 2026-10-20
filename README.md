@@ -29,6 +29,7 @@ Before adopting this package, please review the following architectural constrai
 | --- | --- |
 | Windows x64 only | Enforced via `os` and `cpu` fields in `package.json` (the platform-neutral package name is reserved for future expansion). A prebuilt `libshell.dll` is shipped in the package; no install-time compilation is required |
 | Bun runtime required | Ships raw TypeScript source files and requires Bun >= 1.4.3. While Node.js can install the package, it cannot execute it |
+| Type-checking needs `@types/bun` | Because the package ships `.ts` sources, your own `bun check` compiles them too. Add `bun add -d @types/bun`; without it the checker reports `TS2868: Cannot find name 'Bun'` from inside `node_modules` |
 | Built on `bun:ffi` | `bun:ffi` is marked as experimental in Bun. While Bun recommends Node-API for production stability, this library chooses `bun:ffi` to achieve a zero-dependency footprint |
 
 Runtime prerequisites and non-goals:
@@ -42,6 +43,10 @@ Runtime prerequisites and non-goals:
 ```bash
 bun add bun-app-window
 ```
+
+### What the tarball contains
+
+The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 19 files, ~0.36 MB packed. The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
 
 ## Quick Start
 
@@ -233,6 +238,18 @@ d.dpi();       // Returns DPI awareness level and scaling factor
 d.hittest(x, y);
 ```
 
+### `bun-app-window/native` — The Prebuilt DLL
+
+Resolves to `dist/libshell.dll` itself, so `import.meta.resolve()` hands you a real path you can copy next to your executable:
+
+```ts
+import nativeLibPath from "bun-app-window/native" with { type: "file" };
+
+await Bun.write(join(dirname(process.execPath), "libshell.dll"), Bun.file(nativeLibPath));
+```
+
+The `with { type: "file" }` attribute is required — without it the bundler tries to parse the DLL as a module. This subpath is for hand-rolled packaging; if you use `bun build --compile`, `bun-app-window/embedded` does the same job without touching the filesystem.
+
 ## Common Recipes & Best Practices
 
 ### 1. Disabling Browser-Specific UI
@@ -384,6 +401,8 @@ pwsh -File scripts/gate.ps1 -Clean   # same gates, but inside a fresh clone of H
 
 `-Clean` reproduces the conditions a hosted runner would provide: it clones `HEAD` into `%TEMP%`, installs from the lockfile, and runs the gates there, so local artefacts (`.build/`, `node_modules/`, `vendor/webview2/`) cannot mask a missing file. It takes about two seconds. Uncommitted changes are reported and excluded — run without `-Clean` to verify the working tree as-is.
 
+The gate has three stages: `bun check`, `bun test`, and consumer acceptance (`scripts/verify-pack.ts`). The third packs the tarball, installs it into a scratch project under `%TEMP%`, type-checks that project, and runs `scripts/consumer-probe.ts` against the installed package — 40 assertions covering every subpath, the DLL actually being `dlopen`-ed out of `node_modules`, and `libInfo.source === "package"`. It runs offline in about 0.4 s and denies by default: a file packed without being listed in the allow-list fails the gate. Pass `-SkipPack` only when the gate itself is what you are changing.
+
 The underlying commands remain available directly:
 
 ```bash
@@ -392,9 +411,9 @@ bun test           # Run automated test suite (tests/, 108 test cases)
 bun run demo       # Launch interactive self-test demo (requires desktop session)
 ```
 
-Note that `bun run demo` and the external-consumer acceptance described in `AGENTS.md` both need an interactive desktop, so they were never CI-capable — they are local-only by construction.
+Note that `bun run demo` and the compiled-executable acceptance (shape B in `AGENTS.md`) both need an interactive desktop, so they were never CI-capable — they are local-only by construction.
 
-Whenever `src/shell/` or `package.json` is modified, run the external consumer smoke test documented under the package acceptance section in `AGENTS.md`.
+Whenever `src/shell/` or `package.json` is modified, the consumer acceptance stage already covers the installed-package path (shape A in `AGENTS.md`); it runs as part of the gate, so there is nothing to remember. Only shape B — building the single-file `.exe` — still needs a manual run inside a desktop session.
 
 For window enumeration (`EnumWindows`) or automated screenshot scripts, filter by the corresponding Win32 window class name:
 

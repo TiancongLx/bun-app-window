@@ -29,6 +29,7 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 | --- | --- |
 | 仅支持 Windows x64 | `package.json` 中的 `os` 与 `cpu` 字段已做硬性限制，拒绝在其他平台安装（包名保持平台中立仅为预留命名空间）。预编译动态库 `libshell.dll` 随包分发，无需在安装期编译 |
 | 仅支持 Bun 运行时 | 包内直接发布 TypeScript 源码，要求 Bun ≥ 1.4.3。Node.js 环境虽可完成包安装，但无法直接运行 |
+| 类型检查需自备 `@types/bun` | 包内是 `.ts` 源文件，消费方的 `bun check` 会一并编译它们。需执行 `bun add -d @types/bun`，否则类型检查会在 `node_modules` 内报 `TS2868: Cannot find name 'Bun'` |
 | 基于 `bun:ffi` 构建 | `bun:ffi` 在 Bun 中仍标记为实验性特性（Experimental）。官方建议生产环境优先采用 Node-API，本项目选择 `bun:ffi` 是为了换取零第三方依赖的轻量架构 |
 
 运行环境与能力边界：
@@ -42,6 +43,10 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 ```bash
 bun add bun-app-window
 ```
+
+### 包内包含什么
+
+发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 19 个文件（约 0.36 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
 
 ## 快速开始
 
@@ -233,6 +238,18 @@ d.dpi();       // 获取当前 DPI 感知级别与缩放因子
 d.hittest(x, y);
 ```
 
+### `bun-app-window/native` — 预编译动态库本体
+
+该子路径解析到 `dist/libshell.dll` 本身，`import.meta.resolve()` 拿到的是可直接拷到 exe 旁边的真实路径：
+
+```ts
+import nativeLibPath from "bun-app-window/native" with { type: "file" };
+
+await Bun.write(join(dirname(process.execPath), "libshell.dll"), Bun.file(nativeLibPath));
+```
+
+`with { type: "file" }` 不能省，否则打包器会把 DLL 当模块解析。此入口用于自行封装的场景；走 `bun build --compile` 请直接用 `bun-app-window/embedded`，它不必碰文件系统。
+
 ## 常见场景与最佳实践
 
 ### 1. 禁用浏览器默认行为
@@ -382,6 +399,8 @@ pwsh -File scripts/gate.ps1 -Clean   # 同上，但在 HEAD 的干净副本里�
 
 `-Clean` 复现了托管 runner 的条件：把 `HEAD` clone 到 `%TEMP%`，按 lockfile 安装依赖，再在其中跑门禁。这样本地产物（`.build/`、`node_modules/`、`vendor/webview2/`）就无法掩盖缺失的文件。耗时约两秒。未提交改动会被提示并排除在干净副本之外——如需验证工作区现状，请去掉 `-Clean`。
 
+门禁分三段：`bun check`、`bun test`，以及消费方验收（`scripts/verify-pack.ts`）。第三段会把 tarball 打进 `%TEMP%`，装进一个临时工程，对那个工程做类型检查，再运行 `scripts/consumer-probe.ts`——40 条断言覆盖全部子路径、DLL 是否真从 `node_modules` 里被 `dlopen`、以及 `libInfo.source` 是否为 `package`。离线可跑，约 0.4 秒，且默认拒绝：任何没在允许清单里登记的文件被打进包，门禁就红。只有在改动门禁自身时才用 `-SkipPack`。
+
 底层命令仍可直接调用：
 
 ```bash
@@ -390,9 +409,9 @@ bun test           # 运行自动化测试套件（位于 tests/，共 108 个�
 bun run demo       # 启动交互式自检示例程序（需在桌面会话下运行）
 ```
 
-需要注意：`bun run demo` 与 `AGENTS.md` 中描述的「外部消费方验收」都需要交互式桌面，本就不具备 CI 可行性，属于构造上的本地专属项。
+需要注意：`bun run demo` 与「编译为单文件可执行程序」的验收（`AGENTS.md` 中的形态 B）都需要交互式桌面，本就不具备 CI 可行性，属于构造上的本地专属项。
 
-注意：每当修改 `src/shell/` 或 `package.json` 后，除运行上述测试外，还需执行一次「作为外部工程依赖安装」的集成冒烟测试，具体流程详见 `AGENTS.md` 中的「依赖包验收」章节。
+注意：每当修改 `src/shell/` 或 `package.json` 后，「作为外部工程依赖安装」这条链路（`AGENTS.md` 中的形态 A）已由消费方验收阶段自动覆盖——它随门禁一起跑，不需要额外记得。只剩形态 B（编译单文件 `.exe`）仍需在桌面会话下手动执行一次。
 
 自动化测试或截图脚本若需通过 Win32 `EnumWindows` 过滤窗口句柄，请根据窗口模式匹配对应的窗口类名（Window Class）：
 

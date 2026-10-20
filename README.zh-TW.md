@@ -29,6 +29,7 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 | --- | --- |
 | 僅支援 Windows x64 | `package.json` 中的 `os` 與 `cpu` 欄位已做強制限制，拒絕在其他平台安裝（套件名稱保持平台中立僅為預留命名空間）。預編譯動態連結程式庫 `libshell.dll` 隨套件發佈，無需在安裝期編譯 |
 | 僅支援 Bun 執行環境 | 套件內直接發佈 TypeScript 原始碼，要求 Bun ≥ 1.4.3。Node.js 環境雖可完成套件安裝，但無法直接執行 |
+| 型別檢查需自備 `@types/bun` | 套件內是 `.ts` 原始碼，消費方的 `bun check` 會一併編譯它們。需執行 `bun add -d @types/bun`，否則型別檢查會在 `node_modules` 內回報 `TS2868: Cannot find name 'Bun'` |
 | 基於 `bun:ffi` 建構 | `bun:ffi` 在 Bun 中仍標記為實驗性功能（Experimental）。官方建議正式環境優先採用 Node-API，本專案選擇 `bun:ffi` 是為了換取零第三方相依性的輕量架構 |
 
 執行環境與能力邊界：
@@ -42,6 +43,10 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 ```bash
 bun add bun-app-window
 ```
+
+### 套件內容包含什麼
+
+發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 19 個檔案（約 0.36 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
 
 ## 快速開始
 
@@ -233,6 +238,18 @@ d.dpi();       // 取得目前 DPI 感知層級與縮放係數
 d.hittest(x, y);
 ```
 
+### `bun-app-window/native` — 預編譯動態連結程式庫本體
+
+該子路徑解析到 `dist/libshell.dll` 本身，`import.meta.resolve()` 拿到的是可直接複製到 exe 旁邊的真實路徑：
+
+```ts
+import nativeLibPath from "bun-app-window/native" with { type: "file" };
+
+await Bun.write(join(dirname(process.execPath), "libshell.dll"), Bun.file(nativeLibPath));
+```
+
+`with { type: "file" }` 不能省略，否則封裝器會把 DLL 當模組解析。此入口用於自行封裝的場景；走 `bun build --compile` 請直接用 `bun-app-window/embedded`，它不必碰檔案系統。
+
 ## 常見場景與最佳實踐
 
 ### 1. 停用瀏覽器預設行為
@@ -382,6 +399,8 @@ pwsh -File scripts/gate.ps1 -Clean   # 同上，但在 HEAD 的乾淨副本內�
 
 `-Clean` 重現了託管 runner 的條件：將 `HEAD` clone 到 `%TEMP%`，依 lockfile 安裝相依套件，再於其中執行把關。如此一來，本機產物（`.build/`、`node_modules/`、`vendor/webview2/`）便無法掩蓋缺少的檔案。耗時約兩秒。未提交的變更會被提示並排除於乾淨副本之外——如需驗證工作區現況，請移除 `-Clean`。
 
+品質把關分三段：`bun check`、`bun test`，以及消費方驗收（`scripts/verify-pack.ts`）。第三段會把 tarball 打包到 `%TEMP%`，安裝進一個臨時專案，對該專案執行型別檢查，再執行 `scripts/consumer-probe.ts`——40 條斷言涵蓋全部子路徑、DLL 是否真的從 `node_modules` 被 `dlopen`、以及 `libInfo.source` 是否為 `package`。可離線執行，約 0.4 秒，且預設拒絕：任何未在允許清單登記的檔案被打進套件，把關就會失敗。只有在改動把關腳本本身時才用 `-SkipPack`。
+
 底層指令仍可直接呼叫：
 
 ```bash
@@ -390,9 +409,9 @@ bun test           # 執行自動化測試套件（位於 tests/，共 108 個�
 bun run demo       # 啟動互動式自我檢測範例程式（需於桌面工作階段下執行）
 ```
 
-需注意：`bun run demo` 與 `AGENTS.md` 中描述的「外部消費方驗收」皆需要互動式桌面，本就不具備 CI 可行性，屬於構造上的本機專屬項目。
+需注意：`bun run demo` 與「編譯為單一可執行檔」的驗收（`AGENTS.md` 中的形態 B）皆需要互動式桌面，本就不具備 CI 可行性，屬於構造上的本機專屬項目。
 
-注意：每當修改 `src/shell/` 或 `package.json` 後，除執行上述測試外，還需執行一次「作為外部專案相依套件安裝」的整合冒煙測試（Smoke Test），具體流程詳見 `AGENTS.md` 中的「依賴套件驗收」章節。
+注意：每當修改 `src/shell/` 或 `package.json` 後，「作為外部專案相依套件安裝」這條鏈路（`AGENTS.md` 中的形態 A）已由消費方驗收階段自動涵蓋——它隨品質把關一起執行，不需要額外記得。只剩形態 B（編譯單一 `.exe`）仍需於桌面工作階段手動執行一次。
 
 自動化測試或截圖腳本若需透過 Win32 `EnumWindows` 過濾視窗控制代碼（HWND），請依據視窗模式比對對應的視窗類別名稱（Window Class）：
 

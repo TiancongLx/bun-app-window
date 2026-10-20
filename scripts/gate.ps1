@@ -8,10 +8,16 @@
     且项目本身是 Windows x64 单平台、单人开发、零外部服务依赖，
     远端 CI 的边际价值低于它的维护成本。门禁改在本地执行。
 
-    两条命令与原本的 ci.yml 完全一致：
+    三个阶段，前两个与原本的 ci.yml 完全一致：
 
         bun check    类型检查
         bun test     行为测试
+        消费方验收    scripts/verify-pack.ts —— 打包、装进临时工程、再检查
+
+    第三个阶段补的是 ci.yml 从来就测不到的一段：仓库内的 bun test 走
+    「源码 + 本地 dist」，看不见「作为 tarball 被第三方安装」的真实链路。
+    exports 拼错、files 漏项、类型声明缺位，这三种故障在仓库内全绿，
+    在 npm 上装起来就炸。它离线可跑，约 0.4 秒。
 
     -Clean 模式额外价值：在 %TEMP% 里 clone 一份干净副本再跑，
     消除 .build / node_modules / vendor\webview2 等本地残留掩盖问题的可能。
@@ -27,7 +33,11 @@
     与 -Clean 同用，保留克隆副本供排查（会打印路径）。
 
 .PARAMETER SkipTest
-    只跑类型检查，跳过行为测试。
+    只跑类型检查，跳过行为测试与消费方验收。
+
+.PARAMETER SkipPack
+    跳过消费方验收。仅用于 verify-pack 本身正在改动时自举，
+    或临时绕过环境问题（需要 tar 与可写 %TEMP%）——不要把它当默认值。
 
 .EXAMPLE
     pwsh -File scripts/gate.ps1
@@ -41,7 +51,8 @@
 param(
     [switch]$Clean,
     [switch]$KeepClone,
-    [switch]$SkipTest
+    [switch]$SkipTest,
+    [switch]$SkipPack
 )
 
 Set-StrictMode -Version Latest
@@ -91,6 +102,22 @@ function Invoke-Gate([string]$workDir) {
             return $false
         }
         Write-Host ("tests ok ({0:N1}s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Green
+
+        if ($SkipPack) {
+            Write-Host 'pack verification skipped (-SkipPack)' -ForegroundColor Yellow
+            return $true
+        }
+
+        Write-Step 'pack verification'
+        $sw.Restart()
+        & bun run (Join-Path $workDir 'scripts/verify-pack.ts') 2>&1 | Out-Host
+        $packRc = $LASTEXITCODE
+        $sw.Stop()
+        if ($packRc -ne 0) {
+            Write-Host ("pack verification FAILED (rc=$packRc, {0:N1}s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Red
+            return $false
+        }
+        Write-Host ("pack verification ok ({0:N1}s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Green
         return $true
     } finally {
         Pop-Location
