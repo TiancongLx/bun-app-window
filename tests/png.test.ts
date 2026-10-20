@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { inflateSync } from "node:zlib";
 
 import {
     bgraToPng,
@@ -76,7 +77,10 @@ function decodePng(bytes: Uint8Array): Decoded {
         merged.set(d, off);
         off += d.length;
     }
-    const raw = new Uint8Array(Bun.inflateSync(merged));
+    // 用 node:zlib 的 inflateSync（**严格**要求 zlib 包装）。
+    // 绝不能用 Bun.inflateSync —— 它和 Bun.deflateSync 同源于 raw deflate，
+    // 会把不合规的产物也解开，等于把这条判据废掉。
+    const raw = new Uint8Array(inflateSync(merged));
 
     const stride = width * channels;
     const pixels = new Uint8Array(width * height * channels);
@@ -234,6 +238,48 @@ describe("encodePng", () => {
         const b = encodePng(image(3, 3, 4), "rgba");
         expect(a.length).toBe(b.length);
         expect([...a]).toEqual([...b]);
+    });
+
+    /**
+     * IDAT 必须是 zlib 包装（RFC 1950），不是 raw deflate。
+     *
+     * 这条是被真事逼出来的，而且极难发现：
+     *
+     *   - 编码侧原本用 `Bun.deflateSync`，它产出 **raw deflate**
+     *     （与 `zlib.deflateRawSync` 逐字节相同，首字节 0x73/0x8c 之类）
+     *   - 解码侧用 `Bun.inflateSync`，与它同源，raw 对 raw **正常解开**
+     *   - `System.Drawing` 宽容，**正常打开**
+     *   - 只有严格解码器（`Bun.Image` / libspng / litellm 上游）才拒，
+     *     报 `ERR_IMAGE_DECODE_FAILED`
+     *   - 而 `Bun.Image.metadata()` 仍然成功 —— 它只读 header、不解压 IDAT，
+     *     于是「尺寸对、格式对、就是打不开」
+     *
+     * 所以判据必须是**严格解码器**，绝不能用 Bun 自己那对同源函数。
+     */
+    test("IDAT 是 zlib 格式（首字节 0x78），不是 raw deflate", () => {
+        const bytes = encodePng(image(8, 8, 4), "rgba");
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let at = 8;
+        let first: number | null = null;
+        while (at < bytes.length) {
+            const len = view.getUint32(at, false);
+            const type = new TextDecoder().decode(bytes.subarray(at + 4, at + 8));
+            if (type === "IDAT") {
+                first = bytes[at + 8] ?? null;
+                break;
+            }
+            at += 12 + len;
+        }
+        expect(first).not.toBeNull();
+        // zlib CMF：低 4 位必须是 8（deflate），高 4 位是窗口大小（通常是 7 → 0x78）
+        expect((first! & 0x0f)).toBe(8);
+        expect(first).toBe(0x78);
+    });
+
+    test("decodePng 用严格 inflate 仍能解开（与上一条互为印证）", () => {
+        // decodePng 内部用 node:zlib 的 inflateSync；若 IDAT 是 raw deflate，
+        // 它会在 inflate 处直接抛错。
+        expect(() => decodePng(encodePng(image(4, 4, 3), "rgb"))).not.toThrow();
     });
 });
 

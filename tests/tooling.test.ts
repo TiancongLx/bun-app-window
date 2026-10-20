@@ -6,6 +6,8 @@ import { parseExtractArgs } from "../scripts/extract-icon";
 import { parseTrustArgs, KNOWN_STORES } from "../scripts/trust-cert";
 import { fingerprintDll, parseMemArgs } from "../scripts/probe-memory";
 import { capture, parseCaptureArgs, pickTarget } from "../tools/capture-window";
+import { cropBgra } from "../native/gdi";
+import { estimateImageTokens } from "../native/model-image";
 import { parseArgs as parseChildArgs } from "../tools/probe-child-windows";
 import { formatReport, type ProbeReport } from "../tools/probe-gui-boundary";
 import { WINDOWS_METADATA } from "../native/build-pack";
@@ -273,11 +275,11 @@ describe("capture-window", () => {
     });
 
     describe("capture 的失败路径", () => {
-        test("窗口找不到 → ok:false 且带上可见窗口清单", () => {
+        test("窗口找不到 → ok:false 且带上可见窗口清单", async () => {
             // 注入一个会前进的时钟。给恒定时钟会让 deadline 永不触发，
             // 初版就是这么写出了死循环——`capture` 里因此加了迭代上限。
             let clock = 0;
-            const outcome = capture(
+            const outcome = await capture(
                 { ...parseCaptureArgs([]), pid: 12345 },
                 {
                     windows: [win({ pid: 1, className: "Foo" })],
@@ -294,9 +296,9 @@ describe("capture-window", () => {
             }
         });
 
-        test("时钟不前进时也必须在有限次迭代内返回（迭代上限）", () => {
+        test("时钟不前进时也必须在有限次迭代内返回（迭代上限）", async () => {
             let calls = 0;
-            const outcome = capture(
+            const outcome = await capture(
                 { ...parseCaptureArgs([]), pid: 12345 },
                 {
                     windows: [win({ pid: 1 })],
@@ -310,6 +312,162 @@ describe("capture-window", () => {
             // 上限是 24 + 40 = 64；给足余量但必须是有限的
             expect(calls).toBeLessThan(200);
         });
+    });
+
+    describe("模型友好输出的参数", () => {
+        test("默认不缩、png、level 6 —— 判据是延迟与字节双低", () => {
+            const p = parseCaptureArgs([]);
+            expect(p.maxEdge).toBe(0);
+            expect(p.format).toBe("png");
+            // 拐点值：比 1 只慢约 3 ms 却小 31%，比 9 快 4 倍只大 13%
+            expect(p.level).toBe(6);
+        });
+
+        test("--crop 解析成四元组", () => {
+            expect(parseCaptureArgs(["--crop", "10,20,300,400"]).crop).toEqual({
+                x: 10,
+                y: 20,
+                width: 300,
+                height: 400,
+            });
+        });
+
+        test("默认不裁剪", () => {
+            expect(parseCaptureArgs([]).crop).toBeNull();
+        });
+
+        test("--crop 非四元组 / 零尺寸 / 负坐标都抛错", () => {
+            expect(() => parseCaptureArgs(["--crop", "1,2,3"])).toThrow();
+            expect(() => parseCaptureArgs(["--crop", "0,0,0,100"])).toThrow();
+            expect(() => parseCaptureArgs(["--crop", "-1,0,100,100"])).toThrow();
+            expect(() => parseCaptureArgs(["--crop", "a,b,c,d"])).toThrow();
+        });
+
+        test("--max-edge 0 表示保留原尺寸", () => {
+            expect(parseCaptureArgs(["--max-edge", "0"]).maxEdge).toBe(0);
+            expect(parseCaptureArgs(["--max-edge", "800"]).maxEdge).toBe(800);
+        });
+
+        test("--max-edge 负数抛错", () => {
+            expect(() => parseCaptureArgs(["--max-edge", "-1"])).toThrow();
+        });
+
+        test("--level 必须在 1–9", () => {
+            expect(parseCaptureArgs(["--level", "1"]).level).toBe(1);
+            expect(parseCaptureArgs(["--level", "9"]).level).toBe(9);
+            expect(() => parseCaptureArgs(["--level", "0"])).toThrow();
+            expect(() => parseCaptureArgs(["--level", "10"])).toThrow();
+            // 小数与非数字都不接受：zlib 只认整数级别
+            expect(() => parseCaptureArgs(["--level", "6.5"])).toThrow();
+            expect(() => parseCaptureArgs(["--level", "fast"])).toThrow();
+        });
+
+        test("--crop 不改变编码路线（裁剪是像素操作，与编码器无关）", () => {
+            // 早先的实现把 cropped 也算进「必须走 Bun.Image」的条件，
+            // 等于给裁剪白加一次解码 + 重编码（实测 50 ms 对比 6 ms）。
+            const plain = parseCaptureArgs([]);
+            const cropped = parseCaptureArgs(["--crop", "0,0,800,600"]);
+            expect(cropped.format).toBe(plain.format);
+            expect(cropped.level).toBe(plain.level);
+        });
+
+        test("--format 接受 png / palette / jpeg / webp", () => {
+            for (const f of ["png", "palette", "jpeg", "webp"] as const) {
+                expect(parseCaptureArgs(["--format", f]).format).toBe(f);
+            }
+            expect(() => parseCaptureArgs(["--format", "gif"])).toThrow();
+            expect(() => parseCaptureArgs(["--format", "bmp"])).toThrow();
+        });
+
+        test("--quality 必须在 1–100", () => {
+            expect(parseCaptureArgs(["--quality", "70"]).quality).toBe(70);
+            expect(() => parseCaptureArgs(["--quality", "0"])).toThrow();
+            expect(() => parseCaptureArgs(["--quality", "101"])).toThrow();
+        });
+    });
+});
+
+// ---- cropBgra ---------------------------------------------------------------
+
+describe("cropBgra", () => {
+    /** 造一张 width×height 的 BGRA，每像素的 R 通道编码成唯一值便于验证 */
+    function makeBgra(w: number, h: number): Uint8Array {
+        const buf = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const at = (y * w + x) * 4;
+                buf[at] = x & 0xff; // B
+                buf[at + 1] = y & 0xff; // G
+                buf[at + 2] = (x * 16 + y) & 0xff; // R —— 用来验证「取对了像素」
+                buf[at + 3] = 255;
+            }
+        }
+        return buf;
+    }
+
+    test("裁出正确的尺寸与像素", () => {
+        const src = makeBgra(10, 8);
+        const out = cropBgra(src, 10, 8, { x: 2, y: 3, width: 4, height: 3 });
+        expect(out).not.toBeNull();
+        expect(out?.width).toBe(4);
+        expect(out?.height).toBe(3);
+        // 原图 (2,3) 的 R = 2*16+3 = 35，应出现在裁剪结果 (0,0)
+        expect(out?.bgra[2]).toBe((2 * 16 + 3) & 0xff);
+        // 原图 (5,5) 的 R = 5*16+5 = 85，应出现在裁剪结果 (3,2)
+        const at = (2 * 4 + 3) * 4;
+        expect(out?.bgra[at + 2]).toBe((5 * 16 + 5) & 0xff);
+    });
+
+    test("越界矩形被钳制到图像内", () => {
+        const src = makeBgra(10, 8);
+        const out = cropBgra(src, 10, 8, { x: 8, y: 6, width: 100, height: 100 });
+        expect(out?.width).toBe(2);
+        expect(out?.height).toBe(2);
+    });
+
+    test("完全在图像外返回 null，不给畸形图", () => {
+        const src = makeBgra(10, 8);
+        expect(cropBgra(src, 10, 8, { x: 20, y: 0, width: 5, height: 5 })).toBeNull();
+    });
+
+    test("零尺寸返回 null", () => {
+        const src = makeBgra(10, 8);
+        expect(cropBgra(src, 10, 8, { x: 0, y: 0, width: 0, height: 5 })).toBeNull();
+    });
+
+    test("源缓冲不足时返回 null", () => {
+        expect(cropBgra(new Uint8Array(10), 10, 8, { x: 0, y: 0, width: 2, height: 2 })).toBeNull();
+    });
+
+    test("负坐标被钳到 0", () => {
+        const src = makeBgra(10, 8);
+        const out = cropBgra(src, 10, 8, { x: -3, y: -2, width: 5, height: 4 });
+        expect(out?.width).toBe(2);
+        expect(out?.height).toBe(2);
+    });
+});
+
+// ---- estimateImageTokens ----------------------------------------------------
+
+describe("estimateImageTokens", () => {
+    test("小于基准按比例折算", () => {
+        expect(estimateImageTokens(650, 650)).toBeLessThan(300);
+    });
+
+    test("超过 1300×1300 封顶 1024", () => {
+        expect(estimateImageTokens(4000, 4000)).toBe(1024);
+        expect(estimateImageTokens(2000, 1360)).toBe(1024);
+    });
+
+    test("极小图至少 1 token，不返回 0", () => {
+        expect(estimateImageTokens(1, 1)).toBeGreaterThanOrEqual(1);
+    });
+
+    test("单调不减", () => {
+        const seq = [200, 400, 800, 1200, 2000].map((e) => estimateImageTokens(e, e));
+        for (let i = 1; i < seq.length; i++) {
+            expect(seq[i]!).toBeGreaterThanOrEqual(seq[i - 1]!);
+        }
     });
 });
 

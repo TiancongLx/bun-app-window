@@ -14,10 +14,25 @@
  * 任何解码器都认。文件比最优 encoder 大一些，但这些图是给人看的诊断产物，
  * 不是发布资源。
  *
- * 为什么不用第三方库：本仓的运行时前提只有 Bun。`Bun.deflateSync` 已经提供
- * zlib 压缩，剩下要写的只有 CRC32 和 chunk 框架——一共不到 100 行，
- * 相比引入依赖后还要担心它在 Bun 下能不能正常工作，手写更可控。
+ * ## 为什么用 `node:zlib` 而不是 `Bun.deflateSync`
+ *
+ * 一开始用的是 `Bun.deflateSync`，因为它更「Bun 原生」。**那是个真 bug**：
+ * `Bun.deflateSync` 产出的是 **raw deflate**（与 `zlib.deflateRawSync` 逐字节相同），
+ * 而 PNG 的 IDAT 必须是 **zlib 包装**（RFC 1950：`0x78` 头 + deflate + adler32 尾）。
+ *
+ * 为什么长时间没被发现——三个解码器给了三个不同的答案：
+ *
+ *   - `Bun.inflateSync`：与编码器同源，raw 对 raw，**正常解开**
+ *   - `System.Drawing`：宽容，**正常打开**
+ *   - `Bun.Image`（libspng）/ litellm 上游校验：严格，**`ERR_IMAGE_DECODE_FAILED`**
+ *
+ * 更阴的是 `Bun.Image.metadata()` 仍然成功 —— 文档明说它「只读 header」，
+ * 不解压 IDAT。于是「尺寸对、格式对、就是打不开」。
+ *
+ * `node:zlib` 是 Bun 内建的 node 兼容模块，不是外部 node 运行时，
+ * 符合本仓「不调用 node 可执行文件」的约束。
  */
+import { deflateSync } from "node:zlib";
 
 // ---- CRC32 ------------------------------------------------------------------
 
@@ -159,10 +174,20 @@ export function getPixel(
 /**
  * 把图像编码成 PNG 字节。
  *
+ * `level` 是 zlib 压缩级别 1–9。默认 9（体积最小），但 CU 这类要逐帧截图的
+ * 场景应该用 1 或 6 —— 实测同一张 2000×1360 的窗口截图：
+ *
+ *     level 1   8 ms   191 KB
+ *     level 6   9 ms   115 KB
+ *     level 9  37 ms    85 KB
+ *
+ * level 1 比 level 9 快 4.6 倍、只大 2.2 倍。对 Computer Use，
+ * **延迟比字节重要**：50 步里前者省 1.4 秒，后者多占 5 MB。
+ *
  * 失败时抛错而不是返回空——调用方要写文件，静默产出 0 字节的 PNG
  * 会让「截图成功了吗」变成不可判定的问题。
  */
-export function encodePng(img: PngImage, format: PngFormat): Uint8Array {
+export function encodePng(img: PngImage, format: PngFormat, level = 9): Uint8Array {
     if (img.width <= 0 || img.height <= 0) {
         throw new Error(`invalid PNG dimensions: ${img.width}x${img.height}`);
     }
@@ -198,7 +223,19 @@ export function encodePng(img: PngImage, format: PngFormat): Uint8Array {
         raw.set(img.pixels.subarray(y * stride, (y + 1) * stride), dst + 1);
     }
 
-    const idat = new Uint8Array(Bun.deflateSync(raw, { level: 9 }));
+    // IDAT 必须是 **zlib 格式**（RFC 1950），不是 raw deflate。
+    //
+    // 这里踩过一个很贵的坑：`Bun.deflateSync` 产出的其实是 **raw deflate**——
+    // 与 `require("node:zlib").deflateRawSync` 逐字节相同，没有 0x78 头。
+    // 而 PNG 规范要的是 zlib 包装（0x78 + deflate + adler32）。
+    //
+    // 为什么当时没发现：解码侧用的是 `Bun.inflateSync`，它和 `Bun.deflateSync`
+    // 是同源的一对，raw 对 raw 正好能解开；System.Drawing 也宽容。
+    // 只有严格解码器（libspng / Bun.Image / litellm 的上游校验）才拒。
+    // 表现为 `ERR_IMAGE_DECODE_FAILED`，而 metadata() 仍然成功——因为它只读 header。
+    //
+    // 判据见 tests/png.test.ts：IDAT 首字节必须是 0x78，且用 zlib.inflateSync 验。
+    const idat = new Uint8Array(deflateSync(raw, { level: Math.min(9, Math.max(1, level)) }));
 
     const parts = [
         PNG_SIGNATURE,

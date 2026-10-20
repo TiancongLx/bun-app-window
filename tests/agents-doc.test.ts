@@ -61,7 +61,12 @@ function directoryTreeEntries(): Array<{ name: string; line: number }> {
         }
         if (!inBlock) continue;
 
-        const m = /^ {2,}([\w.-]+\.(?:ts|ps1|cc|ico|dll|html))\s{2,}\S/.exec(line);
+        // 描述分隔符是「一个以上空格」，不是「两个以上」。
+        //
+        // 目录树按最长的名字对齐，`probe-child-windows.ts` 后面只有 1 个空格；
+        // 写成 `\s{2,}` 会让它永远解析不出来，于是正向的「声明的文件必须存在」
+        // 从未检查过它。是反向断言（磁盘 → 目录树）把这个盲点暴露出来的。
+        const m = /^ {2,}([\w.-]+\.(?:ts|ps1|cc|ico|dll|html))\s+\S/.exec(line);
         if (m?.[1]) {
             out.push({ name: m[1], line: i + 1 });
         }
@@ -104,6 +109,25 @@ guard("§3 目录结构：声明的文件必须存在", () => {
     });
 });
 
+guard("§3 目录结构：磁盘上的脚本必须被声明", () => {
+    /**
+     * 反向断言。正向的「声明的文件必须存在」抓不到「新增文件忘了登记」——
+     * `native/model-image.ts` 就漏在目录树外整整一轮，而这段时间门禁一直是绿的。
+     * 目录树是 agent 的第一份地图，漏登的文件等于不存在。
+     */
+    test("native/ 与 tools/ 下的每个 .ts 都在目录树里登记过", () => {
+        const declared = new Set(directoryTreeEntries().map((e) => e.name));
+        const onDisk = ["native", "tools"].flatMap((dir) =>
+            readdirSync(join(ROOT, dir))
+                .filter((n) => n.endsWith(".ts"))
+                .sort(),
+        );
+        // 防止空转：一个都没读到就等于没检查
+        expect(onDisk.length).toBeGreaterThan(5);
+        expect(onDisk.filter((n) => !declared.has(n))).toEqual([]);
+    });
+});
+
 // ---- 2. tests 清单必须与磁盘一致 ----
 
 /** §3 里 tests/ 段落列出的测试文件名 */
@@ -121,7 +145,9 @@ function declaredTestFiles(): string[] {
             if (!/^ {2,}/.test(line)) break;
         }
         if (!inTests) continue;
-        const m = /^ {2,}([\w.-]+\.test\.ts)\s{2,}\S/.exec(line);
+        // 同 `directoryTreeEntries`：分隔符是「一个以上空格」。
+        // 它现在没漏解析纯属运气——最长的测试名后面恰好还剩 2 个空格。
+        const m = /^ {2,}([\w.-]+\.test\.ts)\s+\S/.exec(line);
         if (m?.[1]) out.push(m[1]);
     }
     return out;
@@ -219,6 +245,57 @@ guard("AGENTS.md 提到的 package.json 命令", () => {
         }
         const missing = [...paths].filter((p) => !existsSync(join(ROOT, p)));
         expect(missing).toEqual([]);
+    });
+});
+
+// ---- 4b. 文档里作为路径引用的脚本必须真实存在 ----
+
+guard("文档里的脚本路径引用", () => {
+    /**
+     * 允许提到「已经不存在的文件」——迁移与删除的记录必须留在文档里。
+     * 但每一条都要显式登记，否则新增的幽灵引用会静默通过。
+     * 取向与 `verify-pack.ts` 的 `ALLOW` 一致：**加一条必须是一次显式决定**。
+     */
+    const DELETED = new Map<string, string>([
+        ["scripts/capture-window.ps1", "2026-10-20 删除（两个替代品制造歧义）"],
+        ["scripts/capture.ps1", "同上（CopyFromScreen，受前台遮挡影响）"],
+        ["native/build-pack.ps1", "迁为 native/build-pack.ts（ADR 0014）"],
+        ["native/build.ps1", "迁为 native/build.ts"],
+        ["native/fetch.ps1", "迁为 native/fetch.ts"],
+        ["scripts/gate.ps1", "迁为 scripts/gate.ts（ADR 0012）"],
+        ["scripts/install-hooks.ps1", "迁为 scripts/install-hooks.ts"],
+        ["_Repositories/src/host.ts", "反例：build-pack 曾经多退一层的错误路径"],
+        ["src/cli/console-attach.ts", "外部参考项目的路径（it-is-go-time），不在本仓"],
+        ["src/gui/page-script.test.ts", "src/gui/ 整体移除（UI 层改为 src/ui/index.html 静态文件）"],
+    ]);
+
+    /** 反引号里带目录的脚本路径；裸文件名无法唯一定位，不参与判定 */
+    function referencedScripts(text: string): string[] {
+        const paths = new Set<string>();
+        for (const m of text.matchAll(/`([\w./-]+\/[\w.-]+\.(?:ts|ps1))`/g)) {
+            paths.add(m[1]!);
+        }
+        return [...paths].sort();
+    }
+
+    test("每个被引用的脚本路径要么存在，要么在删除白名单里", async () => {
+        const ghosts: string[] = [];
+        for (const doc of ["AGENTS.md", "docs/pitfalls.md"]) {
+            const file = Bun.file(join(ROOT, doc));
+            if (!(await file.exists())) continue;
+            for (const p of referencedScripts(await file.text())) {
+                if (existsSync(join(ROOT, p))) continue;
+                if (DELETED.has(p)) continue;
+                ghosts.push(`${doc}: ${p}`);
+            }
+        }
+        expect(ghosts).toEqual([]);
+    });
+
+    test("白名单自身不腐化：登记过的文件不许重新出现", () => {
+        // 文件已经回来了却还挂在「已删除」名单上，说明这份名单没人看了
+        const stale = [...DELETED.keys()].filter((p) => existsSync(join(ROOT, p)));
+        expect(stale).toEqual([]);
     });
 });
 
@@ -353,8 +430,14 @@ guard("文档里的统计数字", () => {
  * 甚至只是「这个模块」的口语指代。逐条断言存在性会产生大量假阳性，
  * 而假阳性会让护栏本身被绕过 —— 一条经常性误报的断言，等于没有。
  *
- * 因此本文件只守「形状唯一」的引用：目录树条目、tests 清单、ADR 编号、
- * npm 命令、.ts 入口路径。这几类都能唯一定位到一个文件或一条命令。
+ * 因此本文件只守「形状唯一」的引用：目录树条目（**双向**：声明了的必须存在，
+ * 存在的必须声明）、tests 清单、ADR 编号、npm 命令、`.ts` 入口路径，
+ * 以及反引号里**带目录**的脚本路径（`tools/capture-window.ts` 这种；裸文件名不参与）。
+ * 这几类都能唯一定位到一个文件或一条命令。
+ *
+ * 最后一类带一张「已删除」白名单（见上）。迁移会在文档里留下合法的历史引用：
+ * 一律禁止会让历史记录无处安放，一律放行则幽灵引用会静默堆积。
+ * 白名单把这个判断显式化——**加一条必须是一次决定**。
  */
 describe("判据边界（元测试）", () => {
     test("护栏只断言可唯一定位的引用——这条记录设计意图", () => {

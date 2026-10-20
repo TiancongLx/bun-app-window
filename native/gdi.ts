@@ -186,6 +186,62 @@ function readRectOf(hwnd: bigint, buf: Uint8Array): Rect {
     return readRect(buf);
 }
 
+// ---- 矩形与裁剪 -------------------------------------------------------------
+
+export type CropRect = { x: number; y: number; width: number; height: number };
+
+/**
+ * 从 BGRA 缓冲里裁一块出来。
+ *
+ * ## 为什么裁剪比缩放重要
+ *
+ * 把整张 2000×1360 缩到 800 长边，字节确实小了，但**文字跟着糊了**——
+ * 缩放丢的是分辨率。而「只看我关心的那一块」既小又 1:1 清晰。
+ * 对 Computer Use 这类场景（每次操作后看一眼局部确认状态），
+ * 裁剪才是正确形态；缩放只是退而求其次。
+ *
+ * 纯内存切片，无 FFI 调用，O(像素数) memcpy。
+ * `rect` 会被钳制到图像范围内——越界返回 `null` 而不是给一张畸形图。
+ */
+export function cropBgra(
+    src: Uint8Array,
+    srcWidth: number,
+    srcHeight: number,
+    rect: CropRect,
+): { bgra: Uint8Array; width: number; height: number } | null {
+    const x = Math.max(0, Math.floor(rect.x));
+    const y = Math.max(0, Math.floor(rect.y));
+    const right = Math.min(srcWidth, Math.floor(rect.x + rect.width));
+    const bottom = Math.min(srcHeight, Math.floor(rect.y + rect.height));
+    const width = right - x;
+    const height = bottom - y;
+    if (width <= 0 || height <= 0) return null;
+    if (src.length < srcWidth * srcHeight * 4) return null;
+
+    const out = new Uint8Array(width * height * 4);
+    const rowBytes = width * 4;
+    for (let row = 0; row < height; row++) {
+        const from = ((y + row) * srcWidth + x) * 4;
+        out.set(src.subarray(from, from + rowBytes), row * rowBytes);
+    }
+    return { bgra: out, width, height };
+}
+
+/**
+ * 解析 `--crop x,y,w,h`。负数与零尺寸都抛错——
+ * 静默给出「裁了但没裁到」比直接报错更难排查。
+ */
+export function parseCrop(spec: string): CropRect {
+    const parts = spec.split(",").map((s) => Number(s.trim()));
+    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) {
+        throw new Error(`--crop 需要 x,y,w,h 四个数字，收到 ${JSON.stringify(spec)}`);
+    }
+    const [x, y, width, height] = parts as [number, number, number, number];
+    if (width <= 0 || height <= 0) throw new Error("--crop 的宽高必须为正");
+    if (x < 0 || y < 0) throw new Error("--crop 的坐标不能为负");
+    return { x, y, width, height };
+}
+
 // ---- 非黑像素占比 -----------------------------------------------------------
 
 /**

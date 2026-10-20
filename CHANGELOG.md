@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **The PNG encoder produced IDAT chunks that were not zlib.** `Bun.deflateSync` is byte-identical to `zlib.deflateRawSync`, so the output was **raw deflate**, while the specification requires zlib framing (`0x78` header plus an adler32 trailer). What made this expensive to find is that **three decoders gave two different answers**: `System.Drawing` opened the files, and our own decoder plus `Bun.inflateSync` decompressed them — because they share the same raw-deflate assumption as the encoder. Only the strict decoder rejected them: `Bun.Image` (libspng) returned `ERR_IMAGE_DECODE_FAILED`, and so did the upstream validator behind `read_file`. Worse, `Bun.Image.metadata()` still succeeded, because it reads only the header and never touches the IDAT payload — so the failure looked like "correct size, correct format, just won't open". `native/png.ts` now imports `deflateSync` from `node:zlib` (Bun's built-in node compat module, not an external node runtime), and `tests/png.test.ts` asserts both that the first IDAT byte is `0x78` and that the payload decompresses under **strict** zlib inflate — never `Bun.inflateSync`, which would make the assertion vacuous. Recorded as `docs/pitfalls.md` 3.11.
+- **`Bun.Image.resize(w)` limits the width, not the longest edge.** The documented semantics are `resize(800)` → "width 800, keep aspect ratio". `native/model-image.ts` was calling `resize(maxEdge, undefined, { withoutEnlargement: true })`, which is correct for landscape images and silently wrong for portrait ones: `300×600` with `maxEdge: 100` produced `100×200`, four times the intended pixel count, with the token estimate and byte size inflated to match. The fix passes both dimensions with `fit: "inside"`. Caught by asserting on a **portrait** image; a landscape-only test would have stayed green. Recorded as `docs/pitfalls.md` 3.15.
+- Six references in `AGENTS.md` and `docs/pitfalls.md` pointed at files that no longer exist: `tools/capture-window.ps1` (three occurrences), `probe-memory.ps1`, `src/safe-port.ts` (the module is actually `src/shell/port.ts`), and `src/gui/page-script.test.ts` (the whole `src/gui/` directory was removed when the UI became a static `src/ui/index.html`). A migration leaves legitimate historical references behind, so the fix is not to delete them but to make the decision explicit — see the guard under *Added*.
+
+### Added
+
+- `native/resample.ts` — area-average (box) downscaling over BGRA, and the reason `--max-edge` no longer goes through `Bun.Image` at all. Measured on a real 3098×1850 window scaled to 1300×776, median of five runs:
+
+    | route | ms | bytes |
+    | --- | --- | --- |
+    | **our `downscaleBgra` + our encoder** | **45.9** | **102,036** |
+    | `Bun.Image` resize + png | 95.9 | 222,621 |
+
+    **2.1× faster and 2.2× smaller — both directions, not a trade-off.** It is faster because `Bun.Image` takes a PNG as input, so it must encode and then decode again before it can resample; we hold the raw `CreateDIBSection` pointer and never pay that. It is smaller because its default filter is `lanczos3` — a **sharpening** filter that rings around text edges, and the resulting high-frequency detail is exactly what DEFLATE compresses worst. Area averaging is inherently smooth, so the correct algorithm saves both costs at once. A prefix-sum variant was tried and came out **slower** (51.3 vs 39.1 ms for the resample alone): the extra full-width pass and the larger intermediate buffer cost more in cache locality than the inner-loop subtraction saves. Recorded as `docs/pitfalls.md` 3.16.
+- `native/resample.ts` weights the average by alpha (`Σ(b·a)/Σa`) whenever any pixel is transparent, because a plain average mixes the RGB of fully transparent pixels — usually `0` — into the result and grows a black fringe around rounded corners and shadows. `scripts/make-icon.ts` produces exactly such rounded corners. Fully opaque input takes a fast path where the arithmetic is exact. `tests/resample.test.ts` pins this with a 2×2 → 1×1 construction (one opaque black pixel, three opaque whites): the right answer is white at alpha 191, the wrong one is grey 191.
+- `cropBgra` in `native/gdi.ts` — cropping is a per-row `memcpy` over the raw pointer, so it costs no FFI and no resample. It is deliberately applied **before** encoding: once the pixels are handed to `Bun.Image` they are an opaque object and can no longer be cut. `--crop x,y,w,h` exposes it, and the rectangle is clamped to the image rather than producing a malformed one.
+- `native/model-image.ts` — narrowed to the three things the in-repo code cannot do: **enlarging** (box averaging cannot interpolate), **palette** quantisation, and **jpeg / webp** encoding. Everything else on the PNG path now stays inside `native/`.
+- A **two-way** guard on the `AGENTS.md` directory tree. The existing assertion ("everything declared must exist on disk") cannot catch the opposite failure, and `native/model-image.ts` sat outside the tree for a whole round while the gate was green — an unlisted file is invisible to an agent reading the tree as its map. Writing the reverse assertion also exposed a blind spot in the forward one: the tree is aligned by longest name, so `probe-child-windows.ts` is followed by a **single** space, and the parser's `\s{2,}` separator meant that line had never been parsed — and therefore never checked — since the guard was written.
+- A guard for script paths referenced in the docs, backed by an explicit *deleted* allow-list (same orientation as `verify-pack.ts`'s `ALLOW`: adding an entry must be a deliberate decision). A second assertion fails if a listed-deleted file reappears, so the list cannot rot unnoticed.
+
+### Changed
+
+- `tools/capture-window.ts` defaults are now set by measurement rather than intuition: `--format png`, `--level 6`, `--max-edge 0`, plus a new `--level <1-9>` and `--crop <x,y,w,h>`. Level 6 is the knee — 31% smaller than level 1 for about 3 ms, and 4× faster than level 9 for 13% more bytes. End-to-end on a real window (including Bun startup and `PrintWindow`):
+
+    | command | bytes | end-to-end ms |
+    | --- | --- | --- |
+    | `--level 1` | 704,353 | 148 |
+    | default (level 6) | 439,347 | 170 |
+    | `--level 9` | 411,366 | 330 |
+    | `--crop 700,300,800,600` | **50,836** | 170 |
+
+    Level 9 buys 6% for double the time; cropping buys **88%** and also drops the token estimate from 1024 to 291. Recorded as `docs/pitfalls.md` 3.14.
+- The choice between the in-repo encoder and `Bun.Image` is now two conditions rather than one: **downscale *and* png** together keep the whole path inside `native/`; anything else (enlarging, palette, jpeg, webp) still goes to `Bun.Image`. Previously a crop was enough to trigger the `Bun.Image` detour, which re-encoded through it for no benefit — 50.0 ms / 84 KiB against 6.0 ms / 62 KiB for the same crop. **Cropping is a pixel operation and must not change the encoding route.**
+
+### Note
+
+- The published tarball is unchanged again: `native/` and `tools/` are repository-only. What a repository user will notice is that `bun run demo` screenshots are now roughly half the size at the same readable resolution.
+- A screenshot is now cheap enough to be the primary feedback channel for agent work: a 3098×1850 window at full size is 212 KB, and the same view scaled to the vision model's 1300 normalisation ceiling is 102 KB — with text still legible, as the byte count alone cannot prove. That is the prerequisite for driving a GUI from an agent loop rather than for looking at a window once.
+
 ## [0.2.1] - 2026-10-21
 
 ### Changed

@@ -11,7 +11,7 @@
 
 - **症状**：窗口存在、`IsWindowVisible=true`、DWM 扩展边框正确，但截图里看不到它，z 序显示在其它窗口下方。调用 `SetWindowPos(hwnd, HWND_TOPMOST, ...)` 与 `SetWindowLong(GWL_EXSTYLE, ... | WS_EX_TOPMOST)` 都返回成功（`ok=True, err=0`），但 `exstyle` 与 z 序完全不变。
 - **原因**：本机存在 z 序锁定策略（实测无法从外部改变任何窗口的 topmost 标志）。`SetWindowPos` 返回 TRUE 并不代表 z 序真的改变了。
-- **修法**：**不要试图移动窗口**。改用 `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT=2)` 做离屏捕获，它能拿到被完全遮挡的 WebView2 内容（见 1.3）。只在本人就在机器前需要肉眼确认时，才用 `tools/focus-helper.ps1` 最小化遮挡窗口。
+- **修法**：**不要试图移动窗口**。改用 `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT=2)` 做离屏捕获，它能拿到被完全遮挡的 WebView2 内容（见 1.3）。只在本人就在机器前需要肉眼确认时，才手动最小化遮挡窗口。
 - **证据**：`实测`。控制实验中 `SetWindowPos` / `SetWindowLong` / `BringWindowToTop` 三种方式全部无效，exstyle 恒为 `0x00000100`。
 
 ### 1.3 `PrintWindow` 的 flag 决定能否拿到 WebView2 内容
@@ -26,7 +26,7 @@
 
 - **症状**：窗口正常创建、`shell_start_ex` 返回 0，但页面显示 `ERR_UNSAFE_PORT`，内容区一片空白或错误页。日志里出现 `[serve] http://127.0.0.1:1720/...`。
 - **原因**：Chromium / WebView2 内核内置受限端口表（`kRestrictedPorts`），对 1720、6000、1719 等端口直接拒绝连接，不发任何网络请求。`port: 0` 由系统随意分配，命中概率不高但确实存在。
-- **修法**：用 `src/safe-port.ts` 的 `serveOnSafePort()`，在 40000–60000 区间随机选端口并显式排除受限表，失败重试。
+- **修法**：用 `src/shell/port.ts` 的 `serveOnSafePort()`，在 40000–60000 区间随机选端口并显式排除受限表，失败重试。
 - **证据**：`实测`。第一次遇到 1720（H.323 RAS），换安全端口后页面正常加载。
 
 ### 1.5 窗口无法在 Session 0 创建
@@ -183,8 +183,10 @@
   深色主题不生效、右键菜单与拖放全哑。看起来像多个功能同时坏了，其实只有一个根因。
 - **修法**：模板里表示反斜杠要写 `\\\\`；模板里不要出现裸反引号（注释里的
   Markdown 代码标记 `\`id\`` 会直接终止模板字符串）。
-- **守护**：`src/gui/page-script.test.ts` 用 `Bun.Transpiler` 逐个解析内联脚本块，
-  把「开窗才发现」提前到 `bun test`。
+- **守护**：历史上由 `src/gui/page-script.test.ts` 用 `Bun.Transpiler` 逐个解析内联脚本块，
+  把「开窗才发现」提前到 `bun test`。`src/gui/` 已随 UI 层改为 `src/ui/index.html`
+  静态文件而整体移除，因此这个特定失效模式当前不存在——**但若将来又把 HTML 写回
+  TS 模板字符串，必须同时恢复这条守护**，否则同一类错误会重新变成「开窗才发现」。
 
 ### 2.4j 同版本本地 tgz 会被 Bun 缓存复用
 
@@ -343,6 +345,173 @@
   `native/gdi.ts` 按「实际所在 DLL」分组，不按语义分组。
 - **证据**：`实测`。本项目在两个 DLL 之间搬动过三个符号。
 
+### 3.11 `Bun.deflateSync` 产出 raw deflate，不是 zlib —— PNG 的 IDAT 因此不合规
+
+- **症状**：自家编码器产出的 PNG，**三个解码器给出两个答案**：
+    - `System.Drawing` 打开正常
+    - 自写解码器 + `Bun.inflateSync` 解压正常
+    - `Bun.Image`（libspng）/ litellm 上游校验 → `ERR_IMAGE_DECODE_FAILED`
+- **更阴的一层**：`Bun.Image.metadata()` **仍然成功**。文档明说它「只读 header」，
+  不解压 IDAT。于是表现为「尺寸对、格式对、就是打不开」——无从下手。
+- **原因**：`Bun.deflateSync` 与 `zlib.deflateRawSync` 逐字节相同，输出的是
+  **raw deflate**；而 PNG 规范要求 IDAT 是 **zlib 包装**（RFC 1950：`0x78` 头 + adler32 尾）。
+  解码侧用 `Bun.inflateSync`（与编码器同源）正好 raw 对 raw 能解开，把这个缺陷掩盖了。
+- **判据**：IDAT 首字节必须是 `0x78`；解压必须用 `node:zlib` 的 `inflateSync`
+  （严格要求 zlib 包装），**绝不能用 `Bun.inflateSync`**，否则判据形同虚设。
+  见 `tests/png.test.ts` 的「IDAT 是 zlib 格式」与 `native/png.ts` 的模块注释。
+- **修法**：`import { deflateSync } from "node:zlib"`（Bun 内建的 node 兼容模块，
+  不是外部 node 运行时，符合「不调用 node 可执行文件」的约束）。
+- **证据**：`实测`。
+    - `Bun.deflateSync(64 字节)` → `73 74 ...`（6 字节），与 `zlib.deflateRawSync` 相同
+    - `zlib.deflateSync(同样输入)` → `78 9c ...`（12 字节）
+    - 自家 PNG 的 IDAT 头：`ec dd ff 4f`；PowerShell 产出的：`78 5e`（正确）
+    - 改用 `node:zlib` 后，同一张图的 `Bun.Image.resize()` 从
+      `ERR_IMAGE_DECODE_FAILED` 变成 `OK -> 400x250`
+- **教训**：「多个解码器都说 OK」不等于合规——**要确认其中至少有一个是严格的**。
+  这里两个宽容解码器（一个同源、一个 .NET）挡住了唯一说真话的那个。
+
+### 3.12 图片成本的真判据是**字节数**，不是 token —— 而且要裁不要缩
+
+- **先厘清两层的成本**：
+    - 模型侧：每图最多 **1024 tokens**，超过部分被规范化掉（`1300×1300` 等效封顶）
+    - 宿主侧：Open WebUI 把历史消息留在后端内存里，图片作为 base64 **在之后每一轮被反复携带**
+  **真正的滚雪球是后者**：一张 47 KB 的图，base64 后 62 KB，20 轮就是 1.2 MiB 常驻；
+  十张图、几十轮，后端内存就是这么涨上去的。
+- **实测胖瘦**（2000×1360 的真实窗口截图）：
+
+    | 路线 | 字节 | base64 | 20 轮驻留 |
+    | --- | --- | --- | --- |
+    | truecolor png 全尺寸 | 143,013 | 190,684 | 3.6 MiB |
+    | jpeg q82 全尺寸 | 139,761 | 186,348 | 3.6 MiB |
+    | **palette png 全尺寸** | **46,567** | **62,092** | **1.2 MiB** |
+    | jpeg q82 缩到 1024 | 49,292 | 65,724 | 1.3 MiB |
+    | **裁剪 800×600 + palette** | **24,125** | **32,168** | **0.6 MiB** |
+
+- **两个反直觉结论**：
+    1. **`palette: true` 比 jpeg 还小**（47 KB vs 140 KB）。UI 截图颜色高度重复，
+       256 色索引 PNG 几乎无损，而 jpeg 的 DCT 在这种图上效率更差。
+       `dither: false` 是关键——抖动引入高频噪点，反而更大更脏。
+    2. **裁剪后不要再缩**。实测把 800×600 的裁剪结果再缩到 640×480，
+       字节从 24,125 **涨到** 38,149。原因是重采样插值产生了原图没有的中间色，
+       256 色调色板的量化效率随之下降。**缩放是负优化**。
+
+- **因此的默认策略**（`tools/capture-window.ts`）：
+    - `--crop x,y,w,h` 优先：只输出关心的那一块，**1:1 不缩放**，文字不糊
+    - `--max-edge` 默认 **0**（不缩）
+    - `--format` 默认 **`png`**、`--level` 默认 **6** —— 编码路线与拐点的取舍见 3.14
+    - 输出里直接报 `outBytes` 与 `outBase64Bytes`，让成本一眼可见
+
+- **对 Computer Use 的意义**：每一步「看图 → 决策 → 操作」都要一张截图。
+  若每步 24 KB、走 50 步，就是 1.2 MiB 常驻——**低成本是这条路能不能走通的前提**，
+  不是优化项。裁剪让「看清局部」和「省字节」同时成立，这是它优于缩放的根本原因。
+- **证据**：`实测`。上表全部来自对同一张真实窗口截图的编码测量；
+  `palette` 相对 `png`/`jpeg` 的差值在 640/800/1024/1280/2000 五个尺寸上都一致成立。
+
+### 3.13 `Bun.Image` 没有 `crop`，裁剪要在拿到原始像素的那一层做
+
+- **事实**：`Bun.Image` 的链式方法只有 `resize` / `rotate` / `flip` / `flop` / `modulate`
+  与格式方法 `jpeg` / `png` / `webp` / `heic` / `avif`。**没有 `extract` / `crop`**。
+- **做法**：在我们的 `captureWindow` 里，`CreateDIBSection` 拿到的就是 BGRA 原始指针，
+  裁剪只是一次逐行 `memcpy`（`native/gdi.ts` 的 `cropBgra`），零 FFI 开销。
+  **顺序是「先裁再编码」**：一旦交给 `Bun.Image`，像素已经变成不透明对象，切不动了。
+- **判据**：`cropBgra` 把矩形钳制到图像范围内，越界返回 `null` 而不是给一张畸形图；
+  `--crop` 的负数与零尺寸在参数解析阶段就抛错（`parseCrop`）。
+- **证据**：`实测`。API 形状经 `bun.d.ts` 与 `docs/runtime/image.mdx` 双向核实。
+
+### 3.14 PNG 编码路线：自家编码器胜过 `Bun.Image`，level 6 是拐点
+
+- **背景**：`capture-window` 一度统一走 `Bun.Image` 编码，理由是「它支持 palette」。
+  实测之后这个理由只对 palette 成立——**truecolor PNG 交给它纯属亏本**。
+- **实测**（3098×1850 真实窗口 / 800×600 裁剪，5 次取中位数）：
+
+    | 路线 | 全窗 ms / KiB | 裁剪 ms / KiB |
+    | --- | --- | --- |
+    | 自家 `encodePng` level 1 | 22.0 / 617 | 3.2 / 90 |
+    | 自家 `encodePng` level 3 | 30.7 / 429 | 5.1 / 67 |
+    | **自家 `encodePng` level 6** | **39.0 / 392** | **6.0 / 62** |
+    | 自家 `encodePng` level 9 | 186.2 / 353 | 23.6 / 54 |
+    | `Bun.Image` png（默认级别） | 458.3 / 531 | 40.0 / 84 |
+    | `Bun.Image` png `compressionLevel: 1` | 420.9 / 836 | 36.1 / 119 |
+    | `Bun.Image` jpeg q85 | 23.8 / 406 | 4.0 / 67 |
+    | `Bun.Image` palette 256 | 2590.7 / 180 | 198.2 / 32 |
+
+- **三条结论**：
+    1. **`Bun.Image` 的 PNG 全面劣于自家编码器**：慢 7–12 倍，而且**更大**
+       （531 vs 392 KiB）。它要先解码再重采样再编码，而我们是 BGRA 直编。
+    2. **level 6 是拐点**：比 1 只慢约 3 ms 却小 31%，比 9 快 4 倍只大 13%。
+       level 9 只适合一次性归档——逐帧截图用它是拿 5 倍延迟换 13% 体积。
+    3. **裁剪不该改变编码路线**。早先的条件里带了 `|| cropped`，等于裁剪后再绕
+       `Bun.Image` 一次解码 + 重编码：实测 50 ms / 84 KiB，而自家直接编
+       6 ms / 62 KiB。**裁剪是像素操作，与编码器无关。**
+- **端到端复验**（真实窗口 + CLI 全流程，含 Bun 启动与 `PrintWindow`，3098×1850）：
+
+    | 命令 | 字节 | base64 | 端到端 ms |
+    | --- | --- | --- | --- |
+    | `--level 1` | 704,353 | 939,140 | 148 |
+    | 默认（level 6） | 439,347 | 585,796 | 170 |
+    | `--level 9` | 411,366 | 548,488 | 330 |
+    | `--crop 700,300,800,600` | **50,836** | 67,784 | 170 |
+
+    两条可以直接引用的结论：**level 9 多花一倍时间只省 6%**；
+    **裁剪把 429 KiB 压到 50 KiB（−88%）**，token 估算从 1024 降到 291。
+- **判据**：`--format png` 时一次 `Bun.Image` 都不应被构造；只有 `--max-edge > 0`
+  （要重采样）或 `--format` 为 palette / jpeg / webp 时才走它。
+  回归断言在 `tests/tooling.test.ts` 的「默认不缩、png、level 6」与
+  「`--crop` 不改变编码路线」。
+- **证据**：`实测`。编码耗时表由一次性 bench 脚本产出（用毕即删，同一张真实
+  窗口截图连跑 5 次取中位数）；端到端数字来自 `tools/capture-window.ts` 的真实调用。
+
+### 3.15 `Bun.Image.resize(w)` 只限宽，不限「长边」
+
+- **语义**（`bun-types/docs/runtime/image.mdx`）：
+
+    ```
+    resize(800)                             // width 800, keep aspect ratio
+    resize(800, 600)                        // exactly 800×600（拉伸）
+    resize(800, 600, { fit: "inside" })     // fit within 800×600
+    ```
+
+- **踩法**：把「长边上限」写成 `resize(maxEdge, undefined, { withoutEnlargement: true })`。
+  横图看起来完全正确，**竖长图的长边根本没被限制**——`300×600` 传 `maxEdge=100`
+  得到 `100×200`，像素数是期望值的 4 倍，token 估算与字节数一起虚高。
+- **修法**：`resize(maxEdge, maxEdge, { fit: "inside", withoutEnlargement: true })`。
+  两个方向都要给：`fit: "inside"` 负责等比适配，`withoutEnlargement` 负责小图不放大。
+- **判据**：`tests/model-image.test.ts` 用竖长图（300×600）断言缩完是 `50×100`，
+  且 `estimatedTokens` 与**实际产物尺寸**一致。**只测横图抓不到这个 bug。**
+- **证据**：`实测`。第一版实现在 300×600 上返回 12 tokens 而非 3。
+
+### 3.16 自己实现降采样：面积平均胜过 `Bun.Image` 的 lanczos3（快 2.1 倍且小 2.2 倍）
+
+- **背景**：`--max-edge` 一度只能交给 `Bun.Image`，形不成「原始 BGRA → 缩放 → 编码」
+  全自家链路。实测之后发现交给它不但慢，**而且更大**。
+- **实测**（真实窗口 3098×1850 → 1300×776，5 次取中位数）：
+
+    | 路线 | ms | 字节 |
+    | --- | --- | --- |
+    | **`downscaleBgra` + 自家编码** | **45.9** | **102,036** |
+    | `Bun.Image` resize + png | 95.9 | 222,621 |
+
+- **为什么快**：`Bun.Image` 的输入是 PNG，所以它必须**先编码再解码**才能缩放；
+  我们手里是 `CreateDIBSection` 的 BGRA 原始指针，那一步压根不用付。
+- **为什么小（这条反直觉）**：它默认 `lanczos3`，那是**锐化**滤波器，在文字边缘
+  产生振铃（亮暗过冲）。那些高频细节让 DEFLATE 更难压。面积平均天然平滑，
+  对 UI 截图既无振铃又更好压——**快的那个同时更小，因为对的算法两头都省**。
+- **前缀和版本反而更慢**：同算法试过「每行一次前缀和、输出做减法」，51.3 ms，
+  对比朴素区间累加的 39.1 ms。多一遍完整 O(sw) 扫描 + 更大的中间缓冲，
+  缓存局部性变差。**在这个尺寸下，朴素区间累加才是对的。**
+- **alpha 必须加权**：直接平均会让透明像素的 RGB（通常为 0）混进来，圆角与阴影
+  边缘出现黑边。`make-icon.ts` 产出的图标就有透明圆角。
+  实现：检测全不透明时走快路径（像素精确），否则按 `Σ(b·a)/Σa` 加权。
+- **只降不升**：`dw > sw` 或 `dh > sh` 返回 `null`，让调用方退回避不开插值的
+  `Bun.Image`。放大需要滤波器，平均做不到。
+- **判据**：`tests/resample.test.ts`。其中「含透明像素时不能出现黑边」用
+  2×2 → 1×1 的构造（一黑全透明 + 三白不透明）钉死：正确答案是白色 alpha 191，
+  错误答案（直接平均）是灰色 191。
+- **`Bun.Image` 仍然不可替代**：解码任意格式、放大、`rotate`/`flip`/`modulate`、
+  palette 量化、jpeg / webp 编码。收窄之后的判定条件是「**缩小 + png**」两条同时
+  成立才走自家，其余仍交给它。
+- **证据**：`实测`。
+
 ---
 
 ## 四、打包与分发
@@ -452,7 +621,7 @@
 - **原因**：判据写的是「`vendor/webview` 下有没有 `.git`」，而入库的拷贝是**无 `.git` 的纯文件拷贝**（145 个文件，`mode 100644`）。于是 `Test-Path .git` 恒为假，脚本每次都尝试 clone 到一个非空目录，`git` 返回 `128`，`throw` 在第 1 步就把流程掐断。
     - 同源问题还有一处：`$Force` 只作用于后两步，源码那一步完全不看它——想强制重拉上游只能手删目录。
     - 附带风险：即便 clone 成功，留下的 `.git` 会让父仓库多出一个嵌套仓库，`git status` 的语义随环境而变（与 `.gitignore` 第 4 行「不依赖用户环境的全局配置」同一个取向冲突）。
-- **修法**：判据换成 `native/build.ps1` 自己校验的那三个文件（`webview.h` / `EventToken.h` / `WebView2.h`），缺哪个补哪个；联网动作（clone 上游、下载 nupkg）改为显式开关 `-Webview` / `-Sdk`，默认路径全程离线。clone 后剥掉 `.git`，与入库状态保持同构。
+- **修法**：判据换成构建脚本自己校验的那三个文件（`webview.h` / `EventToken.h` / `WebView2.h`），缺哪个补哪个；联网动作（clone 上游、下载 nupkg）改为显式开关，默认路径全程离线（现在由 `native/fetch.ts` 承担，开关是 `--webview` / `--sdk`）。clone 后剥掉 `.git`，与入库状态保持同构。
 - **验证**（四种目录状态各跑一次，均在 `-Root` 隔离目录内进行）：不完整 → `exit 1` 并指路 `-Webview`；缺 SDK 但 nupkg 在 → `exit 0` 且离线解压出 927,399 B 的头文件；三份齐备 → `exit 0` 且文件数不变；目录整个不存在 → 走 clone 分支。
 - **证据**：`实测`（2026-10-20）。`git clone` 到非空目录返回 `128`、clone 到空目录返回 `0`，两者均为实测。
 - **适用范围**：`native/fetch.ts` 的 `decideWebview` / `decideSdk` 已把四种目录状态的决策抽成纯函数，由 `tests/fetch.test.ts` 覆盖；`INPUTS` 与 `native/build.ts` 共享同一份常量定义，判据不会再分叉。本条作为「为什么这么设计」的由来保留。
@@ -466,7 +635,7 @@
 - **修法**：PS 脚本要改文件时显式指定——`Set-Content -NoNewline` 配 `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))`，或者干脆用 TS 改文件。回滚后用 `git diff --stat` 确认，再用逐字节扫描复核（见验证）。
 - **验证**：写一个 40 行的逐字节扫描器，统计每个文件的 `CR LF` 相邻对；一次性验证脚本跑完后全仓应为 0。
 - **证据**：`实测`（2026-10-20，冒烟验证 `.ps1` 语法门禁时污染了 `scripts/install-hooks.ps1`，内容 diff 为空但 EOL 已变）。
-- **适用范围**：仓库里还剩 14 个 `.ps1`，它们只做诊断、不负责改写仓库文件，因此不受本条影响。凡是**写文件**的脚本都应当是 `.ts`——`writeFileSync(path, text, "utf8")` 写的是调用方给的字节，不做 EOL 转换。
+- **适用范围**：仓库里剩下的 `.ps1` 只做签名与验签，不负责改写仓库文件，因此不受本条影响（数量以门禁摘要的 `PS1 SYNTAX OK (N files)` 为准，不写死）。凡是**写文件**的脚本都应当是 `.ts`——`writeFileSync(path, text, "utf8")` 写的是调用方给的字节，不做 EOL 转换。
 
 ### 5.7 Git 的 `sh` 与 pwsh 是两个环境：`tar` 和 `import.meta.main` 都会变
 
