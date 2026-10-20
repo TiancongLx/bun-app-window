@@ -9,7 +9,7 @@ import { expect, test } from "bun:test";
  *
  * 参与校验的两处：
  *   package.json          →  npm 发布用
- *   native/build-pack.ps1 →  exe 的 PE 版本资源（--windows-version）
+ *   native/build-pack.ts  →  exe 的 PE 版本资源（--windows-version）
  *
  * CHANGELOG.md 与 git tag 不在断言范围：前者是给人读的叙述，
  * 后者在发版瞬间才产生，二者都无法在提交时稳定校验。
@@ -18,7 +18,7 @@ import { expect, test } from "bun:test";
 const PKG_ROOT = `${import.meta.dir}/..`;
 
 const PKG = (await Bun.file(`${PKG_ROOT}/package.json`).json()) as { version: string };
-const BUILD_PACK = await Bun.file(`${PKG_ROOT}/native/build-pack.ps1`).text();
+const BUILD_PACK = await Bun.file(`${PKG_ROOT}/native/build-pack.ts`).text();
 
 /** semver：MAJOR.MINOR.PATCH，可选 prerelease / build metadata */
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -26,9 +26,14 @@ const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 /** PE 版本资源固定四段数字 */
 const PE_VERSION = /^\d+\.\d+\.\d+\.\d+$/;
 
-/** 从 PowerShell 源码里取出 --windows-version 的字面值 */
+/**
+ * 从打包脚本源码里取出 `--windows-version` 的字面值。
+ *
+ * 引号接受 `"` 与 `'`：`.ps1` 时代是单引号，迁到 TS 后是双引号。
+ * 这条断言守的是「两处版本同源」，不该因为换语言就失效。
+ */
 function windowsVersionFrom(source: string): string | null {
-    const m = /--windows-version'\s*,\s*'([^']+)'/.exec(source);
+    const m = /["']--windows-version["']\s*,\s*["']([^"']+)["']/.exec(source);
     return m?.[1] ?? null;
 }
 
@@ -36,7 +41,7 @@ test("package.json 的 version 是合法 semver", () => {
     expect(PKG.version).toMatch(SEMVER);
 });
 
-test("build-pack.ps1 里能定位到 --windows-version", () => {
+test("build-pack.ts 里能定位到 --windows-version", () => {
     // 定位不到说明打包参数被改写或这行被删，后续断言会失去意义
     expect(BUILD_PACK).toContain("--windows-version");
     expect(windowsVersionFrom(BUILD_PACK)).not.toBeNull();
@@ -62,7 +67,7 @@ test("exe 版本与 package.json 同源（前三段必须相等）", () => {
     const expected = `${major}.${minor}.${patch}.0`;
     // 失败时提示怎么修，而不是让人对着两个字符串猜
     const hint =
-        `package.json=${PKG.version} build-pack.ps1=${win}。` +
+        `package.json=${PKG.version} build-pack.ts=${win}。` +
         `发版前请运行 bun run scripts/bump-version.ts <version> 同步两处。`;
     expect(`${win} ${hint}`).toContain(`${expected} `);
 });

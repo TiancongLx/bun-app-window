@@ -80,12 +80,16 @@ export function replacePkgVersion(raw: string, version: string): string | null {
 }
 
 /**
- * 把 `build-pack.ps1` 的 `--windows-version` 改掉。
+ * 把 `native/build-pack.ts` 的 `--windows-version` 改掉。
  *
  * 同样只认那一行的字面量。返回 null 表示定位失败。
+ *
+ * 引号接受 `"` 与 `'` 两种：`.ps1` 时代是单引号，迁到 TS 后是双引号。
+ * 放宽而不是跟着换，是因为这条正则守的是「版本号只有一个事实源」，
+ * 不该因为源码语言换了引号风格就变成一次回归。
  */
 export function replacePeVersion(raw: string, peVersion: string): string | null {
-    const pattern = /^(\s*'--windows-version'\s*,\s*')[^']+(')/m;
+    const pattern = /^(\s*["']--windows-version["']\s*,\s*["'])[^"']+(["'])/m;
     if (!pattern.test(raw)) {
         return null;
     }
@@ -141,7 +145,7 @@ export async function main(argv: readonly string[], root: string = REPO_ROOT): P
     const dryRun = values["dry-run"] === true;
 
     const pkgPath = join(base, "package.json");
-    const packPath = join(base, "native", "build-pack.ps1");
+    const packPath = join(base, "native", "build-pack.ts");
 
     let pkgRaw: string;
     let packRaw: string;
@@ -161,7 +165,7 @@ export async function main(argv: readonly string[], root: string = REPO_ROOT): P
         return 2;
     }
     if (packNew === null) {
-        console.error(`native/build-pack.ps1 里定位不到 --windows-version`);
+        console.error(`native/build-pack.ts 里定位不到 --windows-version`);
         return 2;
     }
 
@@ -169,7 +173,7 @@ export async function main(argv: readonly string[], root: string = REPO_ROOT): P
     console.log(`目标版本：${plan.version}（exe PE 版本：${plan.peVersion}）`);
     console.log("");
     console.log(`  package.json          -> "version": "${plan.version}"`);
-    console.log(`  native/build-pack.ps1 -> '--windows-version', '${plan.peVersion}'`);
+    console.log(`  native/build-pack.ts  -> "--windows-version", "${plan.peVersion}"`);
     console.log("");
 
     if (dryRun) {

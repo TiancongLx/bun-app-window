@@ -17,7 +17,7 @@
  * 而「作为 tarball 被第三方安装」这条链路整段缺席。`exports` 拼错、`files` 漏项、
  * 类型声明缺位，这三种故障在仓库内全绿，装起来就炸。
  *
- * 第 2 段是迁移期的临时护栏：仓库里还剩 14 个依赖 Win32 API 的 `.ps1`，它们没有
+ * 第 2 段是迁移期的临时护栏：仓库里剩下的 `.ps1` 依赖 Win32 API，它们没有
  * 类型检查也没有测试（ADR 0012）。语法级校验挡不住语义错误，但比零覆盖强。
  * 等这些脚本全部迁走或明确留用，这一段就可以删掉。
  *
@@ -38,6 +38,14 @@
  *     bun run scripts/gate.ts --clean         在 HEAD 的干净副本里跑
  *     bun run scripts/gate.ts --skip-pack     跳过消费方验收（只在改门禁自身时用）
  *     bun run scripts/gate.ts --keep-clone    与 --clean 同用，保留副本供排查
+ *     bun run scripts/gate.ts --verbose       回放每个阶段的完整输出
+ *
+ * 输出策略：默认只报每个阶段的结论行。`bun test` 通过时会打印 256 行 `(pass)`，
+ * 加上各阶段的正常输出约 24 KB —— 对人和对代理都是纯噪音；真正有用的信息是
+ * 「哪一段、多少项、耗时多久」。失败时相反：完整回放该阶段的原始输出，并在回放
+ * 之前先把 `(fail)` 行摘出来，免得失败点埋在几百行 pass 里。`--verbose` 恢复
+ * 「照单全收」的旧行为，用于排查「输出里有警告但阶段仍然通过」这类情形。
+ * 被折叠的行数会报出来，不会静默吞掉。
  *
  * 退出码：0 = 全部通过，1 = 门禁失败，2 = 环境问题。
  *
@@ -74,13 +82,21 @@ export type StageResult = {
     rc: number;
     ms: number;
     detail: string;
+    /** 子进程原始 stdout / stderr。回放还是折叠由 runGate 决定，执行器不碰 IO */
+    out: string;
+    err: string;
 };
+
+/** 任何「有原始输出」的东西：RunResult 与 StageResult 都能传 */
+export type RawOutput = { out: string; err: string };
 
 export type GateOptions = {
     clean: boolean;
     keepClone: boolean;
     skipTest: boolean;
     skipPack: boolean;
+    /** 回放每个阶段的完整输出；默认只在失败时回放 */
+    verbose: boolean;
 };
 
 export type GateIO = {
@@ -125,6 +141,7 @@ export function parseGateArgs(argv: readonly string[]): GateOptions & { help: bo
             "keep-clone": { type: "boolean", default: false },
             "skip-test": { type: "boolean", default: false },
             "skip-pack": { type: "boolean", default: false },
+            verbose: { type: "boolean", default: false },
             help: { type: "boolean", default: false },
         },
         allowPositionals: false,
@@ -135,6 +152,7 @@ export function parseGateArgs(argv: readonly string[]): GateOptions & { help: bo
         keepClone: parsed.values["keep-clone"] === true,
         skipTest: parsed.values["skip-test"] === true,
         skipPack: parsed.values["skip-pack"] === true,
+        verbose: parsed.values.verbose === true,
         help: parsed.values.help === true,
     };
 }
@@ -182,6 +200,78 @@ export function parsePs1Summary(res: RunResult): string {
             .filter((l) => l.startsWith("PS1 SYNTAX"))
             .pop() ?? ""
     );
+}
+
+/**
+ * 从 `bun test` 的输出里取测试文件数；取不到返回 0。
+ *
+ * 单独抓这个数是因为它是「覆盖面」的唯一可观测指标：删掉一个测试文件时
+ * pass 数只掉几条，摘要里看着仍然很像正常。`Ran 256 tests across 19 files.`
+ */
+export function parseTestFileCount(res: RunResult): number {
+    const m = /Ran \d+ tests? across (\d+) files?/i.exec(`${res.out}\n${res.err}`);
+    return m?.[1] ? Number(m[1]) : 0;
+}
+
+/** Bun 的测试结果行带 SGR 色码，摘取前必须剥掉，否则 startsWith 匹配不到 */
+const ANSI_SGR = /\u001b\[[0-9;]*m/g;
+
+/**
+ * 摘出 `(fail)` 行。
+ *
+ * 失败时这个函数的输出比原始日志有用得多：256 行 pass 里混着 1 行 fail，
+ * 而回放会把它埋到屏幕上方。Bun 把结果行写到 stderr，所以两路都要看。
+ */
+export function failedCases(raw: RawOutput): string[] {
+    const hits = splitLines(raw.out)
+        .concat(splitLines(raw.err))
+        .map((line) => line.replace(ANSI_SGR, "").trim())
+        .filter((line) => line.startsWith("(fail)"))
+        .map((line) => line.slice("(fail)".length).trim());
+
+    // Bun 会把失败用例报两遍：逐条执行时一次，末尾 `N tests failed:` 段再一次。
+    // 重复的聚焦行没有信息量。代价是两个完全同名的失败用例会被合并成一条——
+    // 聚焦段只是路标，完整回放就在下面，这个取舍可以接受。
+    return [...new Set(hits)];
+}
+
+/** 按行切分并丢掉末尾空行；内部空行保留（原始输出里的空行有分隔意义） */
+export function splitLines(text: string): string[] {
+    if (!text) {
+        return [];
+    }
+    const lines = text.split(/\r?\n|\r/);
+    while (lines.length > 0 && (lines[lines.length - 1] ?? "").trim() === "") {
+        lines.pop();
+    }
+    return lines;
+}
+
+/**
+ * 折叠掉的非空行数。
+ *
+ * 只统计通过的阶段——失败阶段的输出是要回放的，不算「被折叠」。
+ * 这个数字必须报出来：静默丢弃输出会让「门禁绿了但 C++ 编译告警呢」无从查证。
+ */
+export function foldedLineCount(results: readonly StageResult[]): number {
+    let total = 0;
+    for (const r of results) {
+        if (!r.ok) {
+            continue;
+        }
+        total += splitLines(r.out).length + splitLines(r.err).length;
+    }
+    return total;
+}
+
+/** 把子进程原始输出写回终端：stdout 走 stdout，stderr 走 stderr */
+export function replayOutput(raw: RawOutput, io: GateIO): void {
+    for (const line of splitLines(raw.out)) {
+        io.log(line);
+    }
+    for (const line of splitLines(raw.err)) {
+        io.warn(line);
+    }
 }
 
 /**
@@ -249,11 +339,18 @@ export async function runGate(
         const result = await deps.runner[stage](workDir);
         results.push(result);
         deps.io.log(formatStage(result));
+
         if (!result.ok) {
+            reportFailure(result, deps.io);
             for (const line of summarize(results)) {
                 deps.io.log(line);
             }
             return false;
+        }
+
+        // 通过时只留结论行；--verbose 才照单全收
+        if (opts.verbose) {
+            replayOutput(result, deps.io);
         }
     }
 
@@ -264,22 +361,38 @@ export async function runGate(
         deps.io.log("pack verification skipped (--skip-pack)");
     }
 
+    // 折叠是默认行为，但折叠本身必须可见：静默吞输出会把「有告警」变成「看不见」
+    const folded = foldedLineCount(results);
+    if (!opts.verbose && folded > 1) {
+        deps.io.log("");
+        deps.io.log(`[output folded: ${folded} lines — rerun with --verbose to replay]`);
+    }
+
     for (const line of summarize(results)) {
         deps.io.log(line);
     }
     return true;
 }
 
-// ---- 真实执行器 -------------------------------------------------------------
-
-function replay(res: RunResult): void {
-    if (res.out) {
-        process.stdout.write(res.out.endsWith("\n") ? res.out : `${res.out}\n`);
+/**
+ * 失败时的输出顺序：结论行已在调用处打过 → 先 `(fail)` 聚焦 → 再完整回放。
+ * 反过来做的话，失败点会被几百行 pass 顶到屏幕上方，等于没报。
+ */
+function reportFailure(result: StageResult, io: GateIO): void {
+    const cases = failedCases(result);
+    if (cases.length > 0) {
+        io.log("");
+        io.log(`--- failed cases (${cases.length}) ---`);
+        for (const c of cases) {
+            io.log(`  ${c}`);
+        }
     }
-    if (res.err) {
-        process.stderr.write(res.err.endsWith("\n") ? res.err : `${res.err}\n`);
-    }
+    io.log("");
+    io.log(`--- ${LABELS[result.stage]} output ---`);
+    replayOutput(result, io);
 }
+
+// ---- 真实执行器 -------------------------------------------------------------
 
 async function spawn(argv: readonly string[], cwd: string): Promise<RunResult> {
     const proc = Bun.spawn([...argv], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -297,30 +410,28 @@ async function runCheck(cwd: string): Promise<StageResult> {
     const started = performance.now();
     const res = await spawn([BUN, "check"], cwd);
     const ms = performance.now() - started;
-    replay(res);
+    const base = { stage: "check" as const, rc: res.code, ms, out: res.out, err: res.err };
 
     // `bun check` 在没有可检查文件时也会 exit 1（文档明文），所以退出码是主判据
     if (res.code !== 0) {
-        return { stage: "check", ok: false, rc: res.code, ms, detail: "type errors" };
+        return { ...base, ok: false, detail: "type errors" };
     }
 
     const files = checkedFileCount(res);
     if (files < 1) {
         return {
-            stage: "check",
+            ...base,
             ok: false,
-            rc: res.code,
-            ms,
             detail: "退出码为 0 但没能确认检查了多少文件——tsconfig 的 include 可能写歪了",
         };
     }
-    return { stage: "check", ok: true, rc: res.code, ms, detail: `${files} files` };
+    return { ...base, ok: true, detail: `${files} files` };
 }
 
 /**
  * 剩余 `.ps1` 的语法校验。
  *
- * 依赖 pwsh 存在：本仓还剩 14 个依赖 Win32 API 的 `.ps1`（`capture-window`、
+ * 依赖 pwsh 存在：本仓剩余依赖 Win32 API 的 `.ps1`（`test-sign`、
  * `make-icon`、签名脚本等），它们不打算迁——用 `bun:ffi` 重写要另起一套 FFI 声明。
  * 但门禁不该因为缺一个可选的检查工具而整体失败——缺 pwsh 时判为跳过并说明。
  * 一旦这些脚本全部迁走，这一段就该删掉，而不是留着当永久负担。
@@ -330,7 +441,15 @@ async function runPs1Syntax(cwd: string): Promise<StageResult> {
     const pwsh = Bun.which("pwsh");
     if (!pwsh) {
         const ms = performance.now() - started;
-        return { stage: "ps1", ok: true, rc: 0, ms, detail: "pwsh not found — skipped" };
+        return {
+            stage: "ps1",
+            ok: true,
+            rc: 0,
+            ms,
+            detail: "pwsh not found — skipped",
+            out: "",
+            err: "",
+        };
     }
 
     // 路径里的单引号在 PowerShell 单引号字符串里要成对转义
@@ -358,21 +477,43 @@ Write-Output ('PS1 SYNTAX OK ({0} files)' -f $files.Count)
 
     const res = await spawn([pwsh, "-NoProfile", "-NonInteractive", "-Command", script], cwd);
     const ms = performance.now() - started;
-    replay(res);
 
-    const detail = parsePs1Summary(res);
-    return { stage: "ps1", ok: res.code === 0, rc: res.code, ms, detail };
+    return {
+        stage: "ps1",
+        ok: res.code === 0,
+        rc: res.code,
+        ms,
+        detail: parsePs1Summary(res),
+        out: res.out,
+        err: res.err,
+    };
 }
 
 async function runTest(cwd: string): Promise<StageResult> {
     const started = performance.now();
     const res = await spawn([BUN, "test"], cwd);
     const ms = performance.now() - started;
-    replay(res);
 
+    // 文件数是「覆盖面」的可观测指标：某次改动让一个测试文件整体跑不起来时，
+    // pass 数只掉几条，摘要里看着仍然正常；文件数掉了才是真的掉了。
     const counts = parseTestCounts(res);
-    const detail = counts ? `${counts.pass} pass / ${counts.fail} fail` : "";
-    return { stage: "test", ok: res.code === 0, rc: res.code, ms, detail };
+    const files = parseTestFileCount(res);
+    const detail = [
+        counts ? `${counts.pass} pass / ${counts.fail} fail` : "",
+        files > 0 ? `${files} files` : "",
+    ]
+        .filter((p) => p.length > 0)
+        .join(" / ");
+
+    return {
+        stage: "test",
+        ok: res.code === 0,
+        rc: res.code,
+        ms,
+        detail,
+        out: res.out,
+        err: res.err,
+    };
 }
 
 async function runPack(cwd: string): Promise<StageResult> {
@@ -382,9 +523,16 @@ async function runPack(cwd: string): Promise<StageResult> {
     // 虽然入口已加防护，但少绕一层更稳。
     const res = await spawn([BUN, join(cwd, "scripts", "verify-pack.ts")], cwd);
     const ms = performance.now() - started;
-    replay(res);
 
-    return { stage: "pack", ok: res.code === 0, rc: res.code, ms, detail: parsePackSummary(res) };
+    return {
+        stage: "pack",
+        ok: res.code === 0,
+        rc: res.code,
+        ms,
+        detail: parsePackSummary(res),
+        out: res.out,
+        err: res.err,
+    };
 }
 
 const REAL_RUNNER: StageRunner = {
@@ -464,17 +612,20 @@ export async function gateClean(root: string, opts: GateOptions, deps: GateDeps)
     const clone = await spawn(["git", "clone", "--quiet", "--depth", "1", srcUrl, probe], root);
     if (clone.code !== 0) {
         io.warn(`git clone failed (rc=${clone.code})`);
-        replay(clone);
+        replayOutput(clone, io);
         return false;
     }
 
     try {
         io.step("bun install --frozen-lockfile");
         const install = await spawn([BUN, "install", "--frozen-lockfile"], probe);
-        replay(install);
         if (install.code !== 0) {
             io.warn(`bun install failed (rc=${install.code})`);
+            replayOutput(install, io);
             return false;
+        }
+        if (opts.verbose) {
+            replayOutput(install, io);
         }
 
         const ok = await runGate(probe, opts, deps);
@@ -505,6 +656,7 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
   --keep-clone   与 --clean 同用，保留副本供排查
   --skip-test    只跑类型检查与 .ps1 语法，跳过行为测试与消费方验收
   --skip-pack    跳过消费方验收（只在改门禁自身时用）
+  --verbose      回放每个阶段的完整输出（默认只报结论，失败时才回放）
   -h, --help     显示本帮助`);
         return 0;
     }
@@ -514,6 +666,7 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
         keepClone: parsed.keepClone,
         skipTest: parsed.skipTest,
         skipPack: parsed.skipPack,
+        verbose: parsed.verbose,
     };
     const deps = realDeps();
 

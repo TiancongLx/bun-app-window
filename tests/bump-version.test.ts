@@ -106,25 +106,41 @@ describe("replacePkgVersion", () => {
 });
 
 describe("replacePeVersion", () => {
-    const pack = `$args = @(
+    // .ps1 时代（单引号）
+    const packPs1 = `$args = @(
     '--windows-version', '0.2.0.0',
     '--other', 'keep-me'
 )
 `;
 
-    test("只改 --windows-version 的值", () => {
-        const out = replacePeVersion(pack, "0.3.0.0");
+    // .ts 时代（双引号，与 native/build-pack.ts 的真实形状一致）
+    const packTs = `const argv = [
+    "--windows-version", "0.2.0.0",
+    "--other", "keep-me",
+];
+`;
+
+    test("只改 --windows-version 的值（单引号，兼容旧格式）", () => {
+        const out = replacePeVersion(packPs1, "0.3.0.0");
         expect(out).not.toBeNull();
         expect(out).toContain(`'--windows-version', '0.3.0.0'`);
         expect(out).toContain(`'--other', 'keep-me'`);
     });
 
+    test("只改 --windows-version 的值（双引号，当前格式）", () => {
+        const out = replacePeVersion(packTs, "0.3.0.0");
+        expect(out).not.toBeNull();
+        expect(out).toContain(`"--windows-version", "0.3.0.0"`);
+        expect(out).toContain(`"--other", "keep-me"`);
+    });
+
     test("定位不到返回 null", () => {
         expect(replacePeVersion("$args = @()", "1.0.0.0")).toBeNull();
+        expect(replacePeVersion("const argv = [];", "1.0.0.0")).toBeNull();
     });
 
     test("保留原 EOL", () => {
-        const crlf = pack.replace(/\n/g, "\r\n");
+        const crlf = packTs.replace(/\n/g, "\r\n");
         const out = replacePeVersion(crlf, "0.3.0.0");
         expect(out).not.toBeNull();
         expect(detectEol(out!)).toBe("\r\n");
@@ -152,9 +168,10 @@ describe("main 的端到端行为", () => {
         );
         const nativeDir = join(dir, "native");
         mkdirSync(nativeDir, { recursive: true });
+        // 夹具用与真实源码相同的形状（TS + 双引号 + 同行）
         writeFileSync(
-            join(nativeDir, "build-pack.ps1"),
-            `$args = @(\n    '--windows-version', '${peVersion}'\n)\n`,
+            join(nativeDir, "build-pack.ts"),
+            `const argv = [\n    "--windows-version", "${peVersion}",\n];\n`,
             "utf8",
         );
         return dir;
@@ -165,9 +182,9 @@ describe("main 的端到端行为", () => {
         expect(await main(["0.3.0"], root)).toBe(0);
 
         const pkg = readFileSync(join(root, "package.json"), "utf8");
-        const pack = readFileSync(join(root, "native", "build-pack.ps1"), "utf8");
+        const pack = readFileSync(join(root, "native", "build-pack.ts"), "utf8");
         expect(pkg).toContain(`"version": "0.3.0"`);
-        expect(pack).toContain(`'--windows-version', '0.3.0.0'`);
+        expect(pack).toContain(`"--windows-version", "0.3.0.0"`);
         expect(detectEol(pkg)).toBe("\n");
         expect(detectEol(pack)).toBe("\n");
     });

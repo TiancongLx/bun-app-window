@@ -256,6 +256,93 @@
 - **修法**：绑定回调只做「原样 ack」，真实结果通过 `webview_eval` 推回页面；或彻底改为页面 → 宿主走本地 WebSocket。
 - **证据**：`源码核实` + 上游 issue #31 / #40 / #35。
 
+### 3.5 `FFIType.buffer` 枚举抛 `invalid ABI type`，必须用字符串标签
+
+- **症状**：`dlopen` 时抛 `bun:ffi: invalid ABI type`，堆栈指向描述符里的 `args` 数组；同一份声明改成字符串就正常。
+- **原因**：`FFIType` 枚举常量与字符串标签走两条不同的映射路径。Bun 1.4.3 上字符串那条（`"buffer"`）被实现，枚举那条（`FFIType.buffer`）没有。
+- **修法**：凡是 `buffer` / `buffer_length`，**一律写字符串**。
+
+    ```ts
+    // 会炸
+    { args: [FFIType.buffer, FFIType.u32], returns: FFIType.i32 }
+    // 正常
+    { args: ["buffer", "u32"], returns: "i32" }
+    ```
+
+- **陷阱在哪**：`ffi.d.ts` 的 `FFITypeToArgsType` 明确声明了 `[FFIType.buffer]: NodeJS.TypedArray | DataView`，所以 **`bun check` 会放行**，运行时才炸。类型声明超前于实现，编译器替不了运行期验证。
+- **证据**：`实测`。23 项类型矩阵扫描（1.4.3 / Windows 10.26300）：`i8`…`u64_fast`、`ptr`、`pointer`、`cstring`、`bool`、`char` 全部 OK；`FFIType.buffer` 与 `FFIType.buffer_length` 作为 args/returns 一律 FAIL，而字符串 `"buffer"` / `"buffer_length"` 作为 args 均 OK（作为 returns 被合理拒绝）。
+- **迁移影响**：`src/shell/native.ts` 全程只用 `ptr` / `i32` / `u64` 等不涉及 buffer 的类型，因此未受此缺陷影响。新写 FFI 声明时要避开。
+
+### 3.6 `bun:ffi` 不做参数校验：传错就段错误，不是异常
+
+- **症状**：进程直接消失，输出 `panic(main thread): Segmentation fault at address 0x0` + `oh no: Bun has crashed`，没有 JS 异常可捕获。
+- **原因**：`dlopen` 只按声明搬运字节，不校验语义。给需要结构体指针的参数传 `null`，就是让 native 代码解引用空指针。
+- **修法**：
+    - 每个新写的 FFI 调用，**先用最小输入验证**（能 dlopen + 能取符号），再逐步加字段
+    - 结构体不要「照着文档一次性写完」，一段字段一次验证
+    - 涉及结构体的调用放进独立子进程跑，崩了不影响主流程
+- **证据**：`实测`。`WinVerifyTrust(INVALID_HANDLE, null, null)` 在 Bun 1.4.3 / Windows 10.26300 上直接段错误。
+- **推论**：这条规则对「诊断脚本」尤其重要。诊断脚本本该在出问题时帮忙，结果自己崩了，会把排障引向错误方向。
+
+### 3.7 Windows HANDLE 不能用 `ptr`，且 `u64` 与 `u64_fast` 有不同的坑
+
+- **症状**：
+    - 句柄值看着「能用」，但跨函数传递时行为诡异
+    - 或拿到 `bigint` 却当成 `number` 用，得到 `TypeError`
+    - 或**手写 `typeof x === "number"` 判空，把有效句柄误判成 0**
+- **原因**（三层）：
+    1. 文档明文——HANDLE 不是虚拟地址，`ptr` 不代表它
+    2. `"u64_fast"` **不是**合法的字符串 FFIType（`FFITypeStringToType` 里没有它），只能用枚举 `FFIType.u64_fast`
+    3. `u64_fast` 作为 `returns` 推导为 `number | bigint`，而**运行时返回哪个不确定**——同一个 API 连续两次调用可能给出不同类型
+- **修法**：
+    - HANDLE（`HCERTSTORE`、`HWND`、`HICON`、`HMODULE`、`HDC`…）一律用 `FFIType.u64_fast`
+    - **所有句柄返回值必须过一个归一化函数**（`native/win32.ts` 的 `toHandle`），绝不手写 `typeof` 判断
+    - 需要完整 64 位精度时用 `FFIType.u64`，但每次传参要 `Number()` 或保持 `bigint`
+- **证据**：`实测`。
+    - `CertOpenSystemStoreW` 用 `u64_fast` → `typeof=number handle=2394227355136`
+    - `GetDesktopWindow` 用 `u64` → `typeof=bigint hwnd=65548`
+    - `CreateCompatibleDC` 两次调用分别返回 `number 1694568820` 与 `bigint 18446744073676065759n` —— **同一个 API、同一个声明，返回类型不同**
+    - 因为手写了 `typeof hdcRaw === "number" ? BigInt(hdcRaw) : 0n`，后者被当成 `0n`，导致 `extract-icon` 整整排查了一轮
+- **附带**：符号在哪个 DLL 必须查，不能凭印象。`DestroyIcon` 与 `DrawIconEx` 都在 `user32.dll`，写进 `gdi32.dll` 会报 `Symbol "..." not found`。`实测`。
+
+### 3.8 `EnumWindows` 的回调可以用迭代替代
+
+- **事实**：`EnumWindows` / `EnumChildWindows` 需要 C→JS 回调（`JSCallback`），而
+  `GetTopWindow(0)` + `GetWindow(h, GW_HWNDNEXT)` 是**纯迭代**的等价写法，
+  枚举结果集合相同、顺序相同，且不引入回调对象的生命周期管理。
+  子窗口用 `GetWindow(h, GW_CHILD)` + 同样的 `GW_HWNDNEXT` 逐层展开。
+- **为什么值得这么做**：`AGENTS.md` §5 第 5 条禁的是「前端页面的 C→JS 回调」，
+  理由是 `webview_run` 阻塞 UI 线程而 `JSCallback` 依赖空闲 JS 线程。
+  诊断脚本没有这个前提，但避开回调仍然是划算的——少一个失败面，
+  且不需要处理「回调里抛错怎么办」。
+- **必须加止损**：窗口链异常成环时迭代会挂死。`listTopLevelWindows` 用 `max` 参数
+  （默认 4000）兜底，`childWindowsOf` 用 2000。`实测`。
+
+### 3.9 FFI 参数少一个：调用照样返回成功，只是什么都没做
+
+- **症状**：`DrawIconEx` 返回 `true`，不报错、不抛异常，但目标位图一个像素都没变。
+- **原因**：函数有 9 个参数，初版只声明了 8 个，漏掉第 8 个 `hbrFlickerFreeDraw`。
+  于是 `diFlags` 收到的是 `istepIfAniCur` 的值（0），画图请求被静默忽略。
+  `bun:ffi` **按声明搬运参数，不校验元数**——多一个少一个都不会报错。
+- **修法**：
+    - 每个 Win32 声明都要**逐个参数对照官方签名写注释**（本仓 `native/win32.ts` 的做法）
+    - 涉及「有输出但输出为空」的 API，先用最小输入验证（画一个已知颜色的点，读回来）
+    - `pitfalls` 3.6 说的是「参数错会段错误」，这一条是它的反面：**参数错也可能完全静默**
+- **证据**：`实测`。修正后 `extract-icon` 从「返回 94 字节纯黑 PNG」变成
+  「2160 字节、中心 `A254 R22 G26 B34`、四角 `A0`」——与 `make-icon` 画进去的
+  品牌底色完全对应。
+
+### 3.10 符号在哪个 DLL：`user32` 与 `gdi32` 的边界比想象中模糊
+
+- **症状**：`Symbol "DrawIconEx" not found in "gdi32.dll"` / `Symbol "DestroyIcon" not found in "shell32.dll"`
+- **原因**：图标相关 API 的名字里带 "Icon"，直觉上归 `shell32` 或 `gdi32`，
+  实际都在 `user32.dll`。截图/绘图相关的 `PrintWindow` 也在 `user32`，
+  而 `CreateDIBSection` / `SelectObject` / `DeleteObject` 才在 `gdi32`。
+- **修法**：写声明前用 `llvm-objdump -p <dll> | grep <name>` 或
+  `GetProcAddress` 核实，不要按命名猜。本仓的 `native/win32.ts` 与
+  `native/gdi.ts` 按「实际所在 DLL」分组，不按语义分组。
+- **证据**：`实测`。本项目在两个 DLL 之间搬动过三个符号。
+
 ---
 
 ## 四、打包与分发

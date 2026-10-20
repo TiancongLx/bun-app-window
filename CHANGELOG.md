@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-21
+
+### Changed
+
+- **The PowerShell tool layer is gone: 14 scripts down to 2.** Everything that could move did. The remaining `scripts/test-sign.ps1` and `scripts/verify-sign-crypto.ps1` need CNG key generation and `SignedCms`, where a hand-written `bun:ffi` structure that is off by one field is a process-level segfault rather than an exception — a cost that buys nothing for two scripts run once per release. The decision and its evidence are in ADR 0014.
+- `native/build-pack.ps1` → `native/build-pack.ts`, run as `bun run build:exe`. Three external tools disappeared with it: `llvm-objdump -p` (Subsystem), `rg -a -o` (embedded asset names) and `Get-AuthenticodeSignature` (signature presence) are now pure byte reads in `native/pe.ts`. Removing them is not about dependency count — the parsing is a pure function, so all three became `bun test` assertions (`tests/pe.test.ts`) instead of output a human has to eyeball.
+- `scripts/make-icon.ps1` → `scripts/make-icon.ts`, and it no longer needs `System.Drawing`. The rounded rectangle is an SDF, the gradient is a projection, and anti-aliasing is 4×4 supersampling — `renderIcon(size)` is a pure function returning pixels, so `tests/make-icon.test.ts` asserts the corner alpha is 0, the centre alpha is 255, and that 16px omits the stroke and the three dots (below that size they smear into grey). The output ICO is 15,605 bytes against the previous 17,429; `System.Drawing.Icon` reads it back at 32×32 and the sampled centre pixel is the brand colour.
+- The other five moved too: `scripts/trust-cert.ts`, `scripts/extract-icon.ts`, `scripts/probe-memory.ts`, `scripts/test-av.ts`, `tools/capture-window.ts`, `tools/probe-child-windows.ts`, `tools/probe-gui-boundary.ts`. `scripts/test-av-runtime.ps1` was **deleted rather than migrated** — its premise was a Session 0 agent observing a Session 1 GUI process through `schtasks /IT`, which stopped being true when OTT moved to Session 1 (`ADR 0005`). Its two remaining abilities moved into `probe-memory.ts` (module enumeration, WebView2 child processes) and `test-av.ts` (Defender scan plus event log).
+
+### Added
+
+- `native/png.ts` — a PNG writer, and the single reason three of those scripts could move. `System.Drawing.Bitmap.Save(ImageFormat.Png)` was the only genuine blocker; what it actually did was four chunks and a zlib call, and `Bun.deflateSync` already supplies the zlib. `tests/png.test.ts` round-trips every image it encodes back through a minimal decoder and compares pixels byte for byte, because asserting the signature `89 50 4E 47` would stay green even if the channel order were wrong.
+- `native/win32.ts` and `native/gdi.ts` — the Win32 surface the diagnostic scripts need, grouped by the DLL each symbol actually lives in rather than by meaning. `EnumWindows` and `EnumChildWindows` are replaced by `GetTopWindow` + `GetWindow` iteration, so no C→JS callback is involved at all.
+- `native/pe.ts` — read-only PE parsing: Subsystem, certificate table, and embedded asset names.
+- 324 new test cases across `tests/png.test.ts`, `tests/make-icon.test.ts`, `tests/win32.test.ts`, `tests/pe.test.ts`, `tests/build-pack.test.ts`, `tests/tooling.test.ts`. Total is now 456 across 25 files.
+
+### Fixed
+
+- **`u64_fast` returns `number` or `bigint` — and which one is not stable.** The same declaration returned `number 1694568820` from one `CreateCompatibleDC` call and `bigint 18446744073676065759n` from the next. Code that checked `typeof h === "number"` to detect a null handle therefore treated a valid DC as `0`, and `extract-icon` silently produced a fully transparent PNG. Every handle return now goes through `toHandle()`; the pitfall is recorded as `docs/pitfalls.md` 3.7.
+- **`DrawIconEx` has nine parameters, and the first version declared eight.** The missing `hbrFlickerFreeDraw` shifted `diFlags` to zero, so the call returned `true` and drew nothing. `bun:ffi` moves arguments as declared and does not check arity — a wrong parameter count is as silent as a wrong type, not only as fatal as a wrong pointer. Recorded as `docs/pitfalls.md` 3.9.
+- **Two symbols were declared in the wrong DLL.** `DestroyIcon` and `DrawIconEx` both live in `user32.dll`, not `shell32.dll` or `gdi32.dll`, and `dlopen` refuses the whole descriptor when any symbol is missing — so one wrong DLL disables every symbol in that block. Recorded as `docs/pitfalls.md` 3.10.
+- `native/build-pack.ts` computed the repository root with `resolve(dirname(import.meta.dir), "..")`, one level too far, so `bun run build:exe` resolved the entry as `_Repositories/src/host.ts`. The gate was fully green at the time: every `main()` test passed `root` as an argument, and no test asked what the entry point computes for itself. The fix exports `REPO_ROOT` and pins it with three assertions, including the reverse one — the parent directory must **not** contain a `package.json`.
+- The pitfalls guard compared section numbers as floats: `Number("3.10")` is `3.1`, which sorts before `3.9`. Nothing noticed until this release introduced the first two-digit minor number. Now encoded as `major * 1000 + minor`.
+- `scripts/test-av.ts` treated a missing `wevtutil` as a thrown `ENOENT` from `Bun.spawn` rather than as a reportable state; the spawn wrapper now returns a negative exit code instead of propagating.
+
+### Note
+
+- Nothing in the published tarball changes: `files` still ships `src/shell`, `src/ui/titlebar.ts`, `dist/libshell.dll` and the docs. This release is entirely about the tooling that builds and verifies it. `bun run build:exe` is the one behaviour a repository user will notice — it no longer needs pwsh.
+
 ## [0.2.0] - 2026-10-20
 
 ### Changed
@@ -123,6 +152,7 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/TiancongLx/bun-app-window/releases/tag/v0.1.0

@@ -226,7 +226,19 @@ guard("AGENTS.md 提到的 package.json 命令", () => {
 
 guard("§5 硬性约束", () => {
     test("编号从 1 开始连续无跳号", () => {
-        const numbered = [...AGENTS.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+        // 只取 §5 章节内的编号。
+        //
+        // 初版是全局 `^(\d+)\. ` 匹配，当时恰好只有 §5 用行首有序列表，所以能过。
+        // 2026-10-20 加入 §0 的三条教训后立刻变红——这不是文档的错，是护栏的范围
+        // 写宽了：它想守的是「§5 的编号连续」，不是「全文只有一个有序列表」。
+        // 一条经常误报的断言会被绕过，因此这里显式限定范围。
+        const from = AGENTS.indexOf("## 5. 核心硬性约束");
+        const to = AGENTS.indexOf("## 6. 命名与路径约定");
+        expect(from).toBeGreaterThan(-1);
+        expect(to).toBeGreaterThan(from);
+
+        const section = AGENTS.slice(from, to);
+        const numbered = [...section.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
         expect(numbered.length).toBeGreaterThan(10);
         expect(numbered).toEqual(numbered.map((_, i) => i + 1));
     });
@@ -278,10 +290,18 @@ describe("pitfalls 编号与章节归属", () => {
     });
 
     test("同一章节内的小节编号单调递增", () => {
-        const seq: Array<{ n: number; line: number }> = [];
+        const seq: Array<{ n: number; label: string; line: number }> = [];
         lines.forEach((line, i) => {
             const m = /^### (\d+)\.(\d+)/.exec(line);
-            if (m) seq.push({ n: Number(`${m[1]}.${m[2]}`), line: i + 1 });
+            if (!m?.[1] || !m[2]) return;
+            // `Number("3.10")` 是 3.1，会小于 3.9 —— 初版就是这么写的，
+            // 直到第一次出现两位数小版本号（3.10）才被这条护栏自己抓到。
+            // 改成整数编码：major * 1000 + minor。
+            seq.push({
+                n: Number(m[1]) * 1000 + Number(m[2]),
+                label: `${m[1]}.${m[2]}`,
+                line: i + 1,
+            });
         });
         expect(seq.length).toBeGreaterThan(10);
 
@@ -290,10 +310,38 @@ describe("pitfalls 编号与章节归属", () => {
             const prev = seq[k - 1];
             const cur = seq[k];
             if (prev && cur && cur.n < prev.n) {
-                outOfOrder.push(`L${cur.line} 编号 ${cur.n} 出现在 L${prev.line} 的 ${prev.n} 之后`);
+                outOfOrder.push(
+                    `L${cur.line} 编号 ${cur.label} 出现在 L${prev.line} 的 ${prev.label} 之后`,
+                );
             }
         }
         expect(outOfOrder).toEqual([]);
+    });
+});
+
+// ---- 7. 不写无法静态验证的统计数字 ----
+
+/**
+ * 这条记录的是一次真实漂移：§4 曾写「执行 tests/ 下共 15 个文件、182 个测试用例」，
+ * 实际早已是 19 个文件、276 个用例 —— 而护栏当时只守「tests 清单里的文件名」，
+ * 没守「用例数」。
+ *
+ * 用例数只有跑完测试才知道，静态断言做不到；所以正确的做法不是「断言它准确」，
+ * 而是「根本不该写进来」。权威来源是 gate 摘要里的 `276 pass / 0 fail / 19 files`。
+ */
+guard("文档里的统计数字", () => {
+    test("不得硬编码测试用例数（无法静态验证，必然漂移）", () => {
+        const offenders = [...AGENTS.matchAll(/\d+\s*个测试用例/g)].map((m) => m[0]);
+        expect(offenders).toEqual([]);
+    });
+
+    test("不得硬编码测试文件数（文件数由 §3 的 tests 清单体现）", () => {
+        const offenders = [...AGENTS.matchAll(/\d+\s*个测试文件/g)].map((m) => m[0]);
+        expect(offenders).toEqual([]);
+    });
+
+    test("gate 的 --verbose 必须在文档里有说明（新开关不能只活在代码里）", () => {
+        expect(AGENTS).toContain("--verbose");
     });
 });
 

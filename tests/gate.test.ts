@@ -9,6 +9,8 @@ import {
     type Stage,
     type StageResult,
     checkedFileCount,
+    failedCases,
+    foldedLineCount,
     formatStage,
     main,
     normalizeArg,
@@ -16,8 +18,10 @@ import {
     parsePackSummary,
     parsePs1Summary,
     parseTestCounts,
+    parseTestFileCount,
     planStages,
     runGate,
+    splitLines,
     summarize,
 } from "../scripts/gate";
 
@@ -67,6 +71,7 @@ describe("parseGateArgs", () => {
             keepClone: false,
             skipTest: false,
             skipPack: false,
+            verbose: false,
             help: false,
         });
     });
@@ -131,6 +136,83 @@ describe("parseTestCounts", () => {
     });
 });
 
+describe("parseTestFileCount", () => {
+    test("取 Ran … across N files", () => {
+        const res: RunResult = {
+            code: 0,
+            out: "",
+            err: "Ran 256 tests across 19 files. [473.00ms]",
+        };
+        expect(parseTestFileCount(res)).toBe(19);
+    });
+
+    test("单数 file 也能解析", () => {
+        expect(parseTestFileCount({ code: 0, out: "", err: "Ran 1 test across 1 file." })).toBe(1);
+    });
+
+    test("取不到返回 0（摘要里就不显示这一段，不编造）", () => {
+        expect(parseTestFileCount({ code: 0, out: "", err: "" })).toBe(0);
+        expect(parseTestFileCount({ code: 1, out: "boom", err: "" })).toBe(0);
+    });
+});
+
+// ---- 折叠与聚焦 -------------------------------------------------------------
+
+describe("splitLines", () => {
+    test("空串得到空数组", () => {
+        expect(splitLines("")).toEqual([]);
+    });
+
+    test("丢掉末尾空行，保留内部空行", () => {
+        expect(splitLines("a\nb\n\n")).toEqual(["a", "b"]);
+        expect(splitLines("a\n\nb")).toEqual(["a", "", "b"]);
+    });
+
+    test("CRLF 与孤立 CR 都按换行处理", () => {
+        expect(splitLines("a\r\nb\rc")).toEqual(["a", "b", "c"]);
+    });
+});
+
+describe("failedCases", () => {
+    test("从 stderr 摘出 (fail) 行", () => {
+        const raw = { out: "", err: "(pass) a\n(fail) 目标用例 [0.1ms]\n" };
+        expect(failedCases(raw)).toEqual(["目标用例 [0.1ms]"]);
+    });
+
+    test("剥掉 ANSI 色码 —— 否则 startsWith 永远不命中", () => {
+        const raw = { out: "", err: "\u001b[31;1m(fail) 断言失败 [0.03ms]\u001b[0m\n" };
+        expect(failedCases(raw)).toEqual(["断言失败 [0.03ms]"]);
+    });
+
+    test("stdout 与 stderr 两路都看", () => {
+        const raw = { out: "(fail) stdout 里的\n", err: "(fail) stderr 里的\n" };
+        expect(failedCases(raw)).toEqual(["stdout 里的", "stderr 里的"]);
+    });
+
+    test("同一行重复出现只报一次（Bun 末尾会再列一遍失败清单）", () => {
+        const err = "(fail) x [0.1ms]\n…\n2 tests failed:\n(fail) x [0.1ms]\n";
+        expect(failedCases({ out: "", err })).toEqual(["x [0.1ms]"]);
+    });
+
+    test("没有 (fail) 时返回空数组，不返回 [undefined]", () => {
+        expect(failedCases({ out: "(pass) a\n", err: "" })).toEqual([]);
+    });
+});
+
+describe("foldedLineCount", () => {
+    function stage(ok: boolean, out: string, err: string): StageResult {
+        return { stage: "test", ok, rc: ok ? 0 : 1, ms: 1, detail: "", out, err };
+    }
+
+    test("只统计通过的阶段", () => {
+        expect(foldedLineCount([stage(true, "a\nb\n", "c\n"), stage(false, "x\ny\n", "")])).toBe(3);
+    });
+
+    test("空输出记 0", () => {
+        expect(foldedLineCount([stage(true, "", "")])).toBe(0);
+    });
+});
+
 describe("parsePackSummary", () => {
     test("取最后一行 VERIFY-PACK 结论", () => {
         const out = [
@@ -163,7 +245,13 @@ describe("parsePs1Summary", () => {
 // ---- 阶段编排 ---------------------------------------------------------------
 
 describe("planStages", () => {
-    const base: GateOptions = { clean: false, keepClone: false, skipTest: false, skipPack: false };
+    const base: GateOptions = {
+        clean: false,
+        keepClone: false,
+        skipTest: false,
+        skipPack: false,
+        verbose: false,
+    };
 
     test("默认四个阶段，顺序固定", () => {
         expect(planStages(base)).toEqual(["check", "ps1", "test", "pack"]);
@@ -185,8 +273,24 @@ describe("planStages", () => {
 // ---- 输出格式 ---------------------------------------------------------------
 
 describe("formatStage / summarize", () => {
-    const okStage: StageResult = { stage: "check", ok: true, rc: 0, ms: 90, detail: "27 files" };
-    const badStage: StageResult = { stage: "test", ok: false, rc: 1, ms: 430, detail: "1 fail" };
+    const okStage: StageResult = {
+        stage: "check",
+        ok: true,
+        rc: 0,
+        ms: 90,
+        detail: "27 files",
+        out: "",
+        err: "",
+    };
+    const badStage: StageResult = {
+        stage: "test",
+        ok: false,
+        rc: 1,
+        ms: 430,
+        detail: "1 fail",
+        out: "",
+        err: "",
+    };
 
     test("通过行带耗时与细节", () => {
         expect(formatStage(okStage)).toBe("bun check ok (0.1s) — 27 files");
@@ -198,9 +302,9 @@ describe("formatStage / summarize", () => {
 
     test("每个阶段都有标签，不会打出 undefined", () => {
         for (const stage of Object.keys(LABELS) as Stage[]) {
-            expect(formatStage({ stage, ok: true, rc: 0, ms: 0, detail: "" })).toContain(
-                LABELS[stage],
-            );
+            expect(
+                formatStage({ stage, ok: true, rc: 0, ms: 0, detail: "", out: "", err: "" }),
+            ).toContain(LABELS[stage]);
         }
     });
 
@@ -230,19 +334,19 @@ function fakeIO(): { io: GateIO; lines: string[] } {
     };
 }
 
-function stageOk(stage: Stage): StageResult {
-    return { stage, ok: true, rc: 0, ms: 1, detail: "" };
+function stageOk(stage: Stage, out = "", err = ""): StageResult {
+    return { stage, ok: true, rc: 0, ms: 1, detail: "", out, err };
 }
 
-function stageFail(stage: Stage): StageResult {
-    return { stage, ok: false, rc: 1, ms: 1, detail: "boom" };
+function stageFail(stage: Stage, out = "", err = ""): StageResult {
+    return { stage, ok: false, rc: 1, ms: 1, detail: "boom", out, err };
 }
 
 function fakeDeps(
     overrides: Partial<Record<Stage, StageResult>>,
     packageJsonExists = true,
-): { deps: GateDeps; io: GateIO; calls: Stage[] } {
-    const { io } = fakeIO();
+): { deps: GateDeps; io: GateIO; calls: Stage[]; lines: string[] } {
+    const { io, lines } = fakeIO();
     const calls: Stage[] = [];
     const make = (stage: Stage) => async () => {
         calls.push(stage);
@@ -250,6 +354,7 @@ function fakeDeps(
     };
     return {
         io,
+        lines,
         calls,
         deps: {
             io,
@@ -264,7 +369,13 @@ function fakeDeps(
     };
 }
 
-const ALL_ON: GateOptions = { clean: false, keepClone: false, skipTest: false, skipPack: false };
+const ALL_ON: GateOptions = {
+    clean: false,
+    keepClone: false,
+    skipTest: false,
+    skipPack: false,
+    verbose: false,
+};
 
 describe("runGate 的短路", () => {
     test("全绿时四个阶段都跑到，返回 true", async () => {
@@ -316,16 +427,77 @@ describe("runGate 的短路", () => {
     });
 
     test("被跳过的阶段必须在日志里留痕", async () => {
-        const { deps, io } = fakeDeps({});
-        const { lines } = fakeIO();
-        void lines;
-        const captured: string[] = [];
-        const depsWithCapture: GateDeps = {
-            ...deps,
-            io: { ...io, log: (l) => captured.push(l) },
-        };
-        await runGate("/x", { ...ALL_ON, skipPack: true }, depsWithCapture);
-        expect(captured.some((l) => l.includes("--skip-pack"))).toBe(true);
+        const { deps, lines } = fakeDeps({});
+        await runGate("/x", { ...ALL_ON, skipPack: true }, deps);
+        expect(lines.some((l) => l.includes("--skip-pack"))).toBe(true);
+    });
+});
+
+// ---- 输出折叠与失败聚焦 -----------------------------------------------------
+
+describe("runGate 的输出策略", () => {
+    test("通过时不上报阶段的原始输出，只留结论行", async () => {
+        const { deps, lines } = fakeDeps({
+            test: stageOk("test", "", "(pass) 一\n(pass) 二\n"),
+        });
+        expect(await runGate("/x", ALL_ON, deps)).toBe(true);
+        expect(lines.some((l) => l.includes("(pass)"))).toBe(false);
+    });
+
+    test("折叠的行数必须报出来 —— 静默吞输出等于隐瞒", async () => {
+        const { deps, lines } = fakeDeps({
+            test: stageOk("test", "", "(pass) 一\n(pass) 二\n"),
+        });
+        await runGate("/x", ALL_ON, deps);
+        expect(lines).toContain("[output folded: 2 lines — rerun with --verbose to replay]");
+    });
+
+    test("--verbose 时通过阶段也完整回放", async () => {
+        const { deps, lines } = fakeDeps({
+            test: stageOk("test", "stdout 行\n", "(pass) x\n"),
+        });
+        await runGate("/x", { ...ALL_ON, verbose: true }, deps);
+        expect(lines).toContain("stdout 行");
+        expect(lines).toContain("WARN (pass) x");
+    });
+
+    test("失败时完整回放该阶段的原始输出", async () => {
+        const { deps, lines } = fakeDeps({
+            test: stageFail("test", "", "(pass) 一\n(fail) 目标\n"),
+        });
+        await runGate("/x", ALL_ON, deps);
+        expect(lines).toContain("WARN (pass) 一");
+        expect(lines).toContain("WARN (fail) 目标");
+    });
+
+    test("失败时先给 (fail) 聚焦段，再给完整回放", async () => {
+        const { deps, lines } = fakeDeps({
+            test: stageFail("test", "", "(pass) 一\n(fail) 目标用例 [0.1ms]\n"),
+        });
+        await runGate("/x", ALL_ON, deps);
+        const focus = lines.findIndex((l) => l.includes("--- failed cases (1) ---"));
+        const dump = lines.findIndex((l) => l.includes("--- bun test output ---"));
+        expect(focus).toBeGreaterThan(-1);
+        expect(dump).toBeGreaterThan(focus);
+        expect(lines).toContain("  目标用例 [0.1ms]");
+    });
+
+    test("失败阶段的输出不计入「被折叠」", async () => {
+        const { deps, lines } = fakeDeps({
+            check: stageOk("check", "", "✓ No type errors in 38 files\n"),
+            test: stageFail("test", "", "(fail) x\n"),
+        });
+        await runGate("/x", ALL_ON, deps);
+        // 只有 check 那 1 行被折叠；阈值 > 1 所以不提示
+        expect(lines.some((l) => l.includes("output folded"))).toBe(false);
+    });
+
+    test("失败时仍给出 summary，且已跑完的阶段保留结论行", async () => {
+        const { deps, lines } = fakeDeps({ test: stageFail("test") });
+        await runGate("/x", ALL_ON, deps);
+        expect(lines).toContain("--- summary ---");
+        expect(lines.some((l) => l.startsWith("  ok   bun check"))).toBe(true);
+        expect(lines.some((l) => l.startsWith("  FAIL bun test"))).toBe(true);
     });
 });
 
