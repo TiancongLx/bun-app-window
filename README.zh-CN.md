@@ -371,13 +371,26 @@ bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 
 ## 开发与验证
 
-本项目工具链基于 Bun 1.4.3 与 TypeScript 7.0.2 构建，`tsconfig.json` 开启全量严格模式检查。质量门禁直接采用原生 CLI 命令：
+本项目工具链基于 Bun 1.4.3 与 TypeScript 7.0.2 构建，`tsconfig.json` 开启全量严格模式检查。
+
+**本项目不使用远端 CI。** 该账户的 GitHub Actions 因 billing lock 无法分配 runner；而项目本身是单平台、单人开发、零外部服务依赖的依赖包，远端 CI 的边际价值低于其维护成本，因此质量门禁改为本地执行。推荐入口：
+
+```powershell
+pwsh -File scripts/gate.ps1          # 对当前工作区跑 bun check + bun test
+pwsh -File scripts/gate.ps1 -Clean   # 同上，但在 HEAD 的干净副本里跑
+```
+
+`-Clean` 复现了托管 runner 的条件：把 `HEAD` clone 到 `%TEMP%`，按 lockfile 安装依赖，再在其中跑门禁。这样本地产物（`.build/`、`node_modules/`、`vendor/webview2/`）就无法掩盖缺失的文件。耗时约两秒。未提交改动会被提示并排除在干净副本之外——如需验证工作区现状，请去掉 `-Clean`。
+
+底层命令仍可直接调用：
 
 ```bash
 bun check          # 执行 TypeScript 类型检查
 bun test           # 运行自动化测试套件（位于 tests/，共 108 个用例）
 bun run demo       # 启动交互式自检示例程序（需在桌面会话下运行）
 ```
+
+需要注意：`bun run demo` 与 `AGENTS.md` 中描述的「外部消费方验收」都需要交互式桌面，本就不具备 CI 可行性，属于构造上的本地专属项。
 
 注意：每当修改 `src/shell/` 或 `package.json` 后，除运行上述测试外，还需执行一次「作为外部工程依赖安装」的集成冒烟测试，具体流程详见 `AGENTS.md` 中的「依赖包验收」章节。
 

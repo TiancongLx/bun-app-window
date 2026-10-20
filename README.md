@@ -373,13 +373,26 @@ At runtime, `libshell.dll` is located in the following order:
 
 ## Development & Verification
 
-Built with Bun 1.4.3 and TypeScript 7.0.2 with full strict type-checking enabled. Quality gates use standard CLI commands:
+Built with Bun 1.4.3 and TypeScript 7.0.2 with full strict type-checking enabled.
+
+**This project has no remote CI.** GitHub Actions cannot allocate runners for this account (billing lock), and the project is a single-platform, single-developer package with no external service dependencies — so the gates run locally instead. The recommended entry point is:
+
+```powershell
+pwsh -File scripts/gate.ps1          # bun check + bun test against the working tree
+pwsh -File scripts/gate.ps1 -Clean   # same gates, but inside a fresh clone of HEAD
+```
+
+`-Clean` reproduces the conditions a hosted runner would provide: it clones `HEAD` into `%TEMP%`, installs from the lockfile, and runs the gates there, so local artefacts (`.build/`, `node_modules/`, `vendor/webview2/`) cannot mask a missing file. It takes about two seconds. Uncommitted changes are reported and excluded — run without `-Clean` to verify the working tree as-is.
+
+The underlying commands remain available directly:
 
 ```bash
 bun check          # Run TypeScript type checker
 bun test           # Run automated test suite (tests/, 108 test cases)
 bun run demo       # Launch interactive self-test demo (requires desktop session)
 ```
+
+Note that `bun run demo` and the external-consumer acceptance described in `AGENTS.md` both need an interactive desktop, so they were never CI-capable — they are local-only by construction.
 
 Whenever `src/shell/` or `package.json` is modified, run the external consumer smoke test documented under the package acceptance section in `AGENTS.md`.
 

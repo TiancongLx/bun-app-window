@@ -371,13 +371,26 @@ bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 
 ## 開發與驗證
 
-本專案工具鏈基於 Bun 1.4.3 與 TypeScript 7.0.2 建構，`tsconfig.json` 開啟全量嚴格模式檢查。品質把關直接採用原生 CLI 指令：
+本專案工具鏈基於 Bun 1.4.3 與 TypeScript 7.0.2 建構，`tsconfig.json` 開啟全量嚴格模式檢查。
+
+**本專案不使用遠端 CI。** 該帳戶的 GitHub Actions 因 billing lock 無法分配 runner；而專案本身是單平台、單人開發、零外部服務相依的相依套件，遠端 CI 的邊際價值低於其維護成本，因此品質把關改為本機執行。建議入口：
+
+```powershell
+pwsh -File scripts/gate.ps1          # 對目前工作區執行 bun check + bun test
+pwsh -File scripts/gate.ps1 -Clean   # 同上，但在 HEAD 的乾淨副本內執行
+```
+
+`-Clean` 重現了託管 runner 的條件：將 `HEAD` clone 到 `%TEMP%`，依 lockfile 安裝相依套件，再於其中執行把關。如此一來，本機產物（`.build/`、`node_modules/`、`vendor/webview2/`）便無法掩蓋缺少的檔案。耗時約兩秒。未提交的變更會被提示並排除於乾淨副本之外——如需驗證工作區現況，請移除 `-Clean`。
+
+底層指令仍可直接呼叫：
 
 ```bash
 bun check          # 執行 TypeScript 型別檢查
 bun test           # 執行自動化測試套件（位於 tests/，共 108 個測試案例）
 bun run demo       # 啟動互動式自我檢測範例程式（需於桌面工作階段下執行）
 ```
+
+需注意：`bun run demo` 與 `AGENTS.md` 中描述的「外部消費方驗收」皆需要互動式桌面，本就不具備 CI 可行性，屬於構造上的本機專屬項目。
 
 注意：每當修改 `src/shell/` 或 `package.json` 後，除執行上述測試外，還需執行一次「作為外部專案相依套件安裝」的整合冒煙測試（Smoke Test），具體流程詳見 `AGENTS.md` 中的「依賴套件驗收」章節。
 
