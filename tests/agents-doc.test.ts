@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dir, "..");
-const AGENTS = readFileSync(join(ROOT, "AGENTS.md"), "utf8");
+const AGENTS_PATH = join(ROOT, "AGENTS.md");
 
 /**
  * `AGENTS.md` 的一致性护栏。
@@ -13,8 +13,27 @@ const AGENTS = readFileSync(join(ROOT, "AGENTS.md"), "utf8");
  * 目录树里写着已删除的 `build.ps1`、tests 清单只列了 11 个（实际 18 个）、
  * `scripts/lib/entrypoint.ts` 完全未提及。
  *
- * 判据刻意保守：只断言**能唯一确定**的事实。理由见下方「为什么不断言裸文件名」。
+ * 判据刻意保守：只断言**能唯一确定**的事实。理由见文件末尾的说明。
+ *
+ * **`AGENTS.md` 不进版本控制**（`.gitignore` 第 23 行 `/AGENTS.md`），
+ * 因此 `--clean` 的干净副本里没有这个文件。本文件在那种情况下整体跳过——
+ * 它守的是本地知识载体，载体不存在时没有可守的对象。这条由 `--clean` 实测发现：
+ * 初版直接 `readFileSync`，干净副本里 ENOENT 让整个门禁红。
  */
+
+const HAS_AGENTS = existsSync(AGENTS_PATH);
+const AGENTS = HAS_AGENTS ? readFileSync(AGENTS_PATH, "utf8") : "";
+
+/** 载体存在时才跑断言；不存在时用一条 skip 记录原因，而不是静默通过 */
+const guard = HAS_AGENTS ? describe : describe.skip;
+
+if (!HAS_AGENTS) {
+    describe("AGENTS.md 一致性护栏", () => {
+        test("载体不存在，跳过（本地知识载体不进版本控制）", () => {
+            expect(HAS_AGENTS).toBe(false);
+        });
+    });
+}
 
 // ---- 1. §3 目录树里的文件名必须真实存在 ----
 
@@ -70,7 +89,7 @@ function findFileAnywhere(name: string): string[] {
     return hits;
 }
 
-describe("§3 目录结构：声明的文件必须存在", () => {
+guard("§3 目录结构：声明的文件必须存在", () => {
     const entries = directoryTreeEntries();
 
     test("目录树能被解析出条目（防止格式改动导致护栏静默失效）", () => {
@@ -108,7 +127,7 @@ function declaredTestFiles(): string[] {
     return out;
 }
 
-describe("§3 tests 清单：与磁盘一致", () => {
+guard("§3 tests 清单：与磁盘一致", () => {
     const declared = declaredTestFiles();
     const actual = readdirSync(join(ROOT, "tests"))
         .filter((n) => n.endsWith(".test.ts"))
@@ -131,7 +150,7 @@ describe("§3 tests 清单：与磁盘一致", () => {
 
 // ---- 3. ADR 索引必须与 .internal/adr/ 一致 ----
 
-describe("ADR 索引一致性", () => {
+guard("ADR 索引一致性", () => {
     const indexPath = join(ROOT, ".internal", "adr");
 
     /** 索引表里的编号 */
@@ -170,7 +189,7 @@ describe("ADR 索引一致性", () => {
 
 // ---- 4. 文档里提到的 npm 命令必须真实存在 ----
 
-describe("AGENTS.md 提到的 package.json 命令", () => {
+guard("AGENTS.md 提到的 package.json 命令", () => {
     /**
      * 抽取 `bun run <name>` 形式的调用，只保留**不带路径**的那些。
      * 带路径的是 `bun run scripts/gate.ts`，跑的是文件而不是 script，另行处理。
@@ -205,7 +224,7 @@ describe("AGENTS.md 提到的 package.json 命令", () => {
 
 // ---- 5. §5 硬性约束的编号连续 ----
 
-describe("§5 硬性约束", () => {
+guard("§5 硬性约束", () => {
     test("编号从 1 开始连续无跳号", () => {
         const numbered = [...AGENTS.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
         expect(numbered.length).toBeGreaterThan(10);
