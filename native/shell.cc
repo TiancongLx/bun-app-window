@@ -409,6 +409,14 @@ int frame_border_y() {
 }
 
 // 返回 HT* 代码；HTCLIENT 表示不落在缩放边框上。坐标为顶层窗口客户区坐标（设备像素）。
+//
+// 三个前置条件里 **`IsZoomed` 是刻意的**，不是漏判：Windows 里最大化的窗口本来
+// 就不能拖边缘缩放（资源管理器自己也一样），必须先还原。所以最大化时一律
+// 返回 HTCLIENT，让点击直接落到页面。
+//
+// 这一条原本没有注释，2026-10-21 排查时被误判成「缩放边框在最大化下失效」——
+// 一处有意的判断如果没写理由，在别人（和下一个 agent）眼里就长得像 bug。
+// 判断本身是对的，缺的是理由。
 LRESULT hit_test_client(HWND hwnd, POINT pt) {
   if (!g_frameless || !g_resizable || IsZoomed(hwnd)) {
     return HTCLIENT;
@@ -488,7 +496,26 @@ const ULONGLONG kPushMinIntervalMs = 16;  // 约一帧
 //   1) 变化检测：状态一模一样就不发。停下来之后不会再有 WM_SIZE，这里直接吸收掉。
 //   2) 16ms 节流 + 尾随补齐：拖动过程中尺寸每帧都在变，靠第 1 道拦不住；
 //      被节流掉时挂一个 16ms 定时器，到点补发最后一次状态，保证不会丢。
-void push_state(bool force = false) {
+/**
+ * 推送的强制级别。
+ *
+ * 分成三级而不是一个 bool，因为「跳过变化检测」与「跳过节流」是两个不同的意图，
+ * 混成一个 `force` 会产生重复消息——尾随补齐（`flush_push_state`）本意只是
+ * 「补上被节流掉的那次变化」，却因为复用了 force 而在状态其实没变时补发一条
+ * 一模一样的消息。实测启动时页面连续收到两条 `maximized:false`，
+ * 原因就是 `show_now()` 的强制推送与随后一次尾随补齐撞在一起。
+ *
+ * - `None`             常规调用（`WM_SIZE` / `WM_ACTIVATE` / …）：两道闸都过
+ * - `BypassThrottle`   尾随补齐、首次显示：**只**跳过节流，仍做变化检测
+ * - `BypassAll`        全屏切换 / 恢复矩形：强制发，不管变没变
+ *
+ * `BypassAll` 只留给「尺寸可能恰好相同、但状态确有外部变化」的场景。
+ * 首次显示不属于这类：`ShowWindow` 会同步触发 `WM_SIZE`，那一次已经推过真实状态；
+ * 在这里再用 BypassAll 只会推一条一模一样的消息（实测两条相隔 1 ms）。
+ */
+enum class PushMode { None, BypassThrottle, BypassAll };
+
+void push_state(PushMode mode = PushMode::None) {
   if (!g_hwnd || !g_webview) {
     return;
   }
@@ -503,16 +530,18 @@ void push_state(bool force = false) {
   const UINT dpi = GetDpiForWindow(g_hwnd);
   const bool dark = system_uses_dark();
 
+  // 只有 BypassAll 跳过变化检测。BypassThrottle 仍然要过这一关：
+  // 「补发」的前提是确实有变化被节流掉了。
   const bool same = px_w == g_pushed.px_w && px_h == g_pushed.px_h &&
                     dpi == g_pushed.dpi && maxed == g_pushed.maxed &&
                     minned == g_pushed.minned && focused == g_pushed.focused &&
                     dark == g_pushed.dark;
-  if (same && !force) {
+  if (same && mode != PushMode::BypassAll) {
     return;
   }
 
   const ULONGLONG now = GetTickCount64();
-  if (!force && now - g_pushed.at < kPushMinIntervalMs) {
+  if (mode == PushMode::None && now - g_pushed.at < kPushMinIntervalMs) {
     if (!g_push_pending) {
       g_push_pending = true;
       SetTimer(g_hwnd, kPushTimerId, static_cast<UINT>(kPushMinIntervalMs), nullptr);
@@ -541,7 +570,12 @@ void push_state(bool force = false) {
   post_json(buf);
 }
 
-// 节流定时器到点：补发一次（force，因为此时往往与上次推送的状态已经不同了）。
+// 节流定时器到点：补上被节流掉的那一次变化。
+//
+// 只跳过节流，**不**跳过变化检测——后者由 `PushMode::BypassThrottle` 表达。
+// 早先这里写的是 `push_state(true)`（当时 force 是个 bool，同时跳过两道闸），
+// 于是状态其实没变时也会补发一条一模一样的消息：实测启动时页面连续收到
+// 两条 `maximized:false`。
 void flush_push_state() {
   if (!g_push_pending) {
     return;
@@ -550,7 +584,7 @@ void flush_push_state() {
   if (g_hwnd) {
     KillTimer(g_hwnd, kPushTimerId);
   }
-  push_state(true);
+  push_state(PushMode::BypassThrottle);
 }
 
 void apply_round_corners(HWND hwnd, bool round) {
@@ -573,6 +607,22 @@ void apply_round_corners(HWND hwnd, bool round) {
 // 激活动作是必须的：带边框模式下原本由 webview 的 window_show() 负责 SetFocus，
 // 现在我们接管了显示，不补这一步窗口出现时不会成为前台窗口（标题栏呈未激活灰态，
 // 用起来像「卡住了」）。SetForegroundWindow 可能因本机策略失败，属尽力而为。
+//
+// ---- 为什么需要 force_visible() ----
+//
+// ShowWindow 的**第一次**调用会被启动方的 STARTUPINFO 覆盖：当父进程以
+// `STARTF_USESHOWWINDOW` + `SW_HIDE` 创建我们时，Windows 用 STARTUPINFO 里的
+// wShowWindow 代替我们传的 nCmdShow。于是这一次 `ShowWindow(SW_SHOW)` 变成
+// 「隐藏」，窗口永远不可见。
+//
+// 这个缺陷极隐蔽：窗口确实被创建了，几何、命中测试、最大化、PrintWindow 截图
+// 全部正常，只有 IsWindowVisible 为假。自检读的是 metrics，看不出差别；
+// 门禁也照样全绿。2026-10-21 实测：`Start-Process -WindowStyle Hidden` 起的
+// 进程永远 WS_VISIBLE=False，去掉该参数后 1 秒内变 True。
+//
+// 修法不能只写 `ShowWindow` 就完事——第二次调用才不再被覆盖。
+void force_visible();
+
 void show_now() {
   if (!g_hwnd) return;
   // 先置 g_shown：之后的 WM_DPICHANGED 才允许跟随建议矩形，
@@ -581,11 +631,35 @@ void show_now() {
   // 最大化也走这一次 ShowWindow：窗口从隐藏直接变成最大化，
   // 没有「先小窗再撑满」的中间帧。
   ShowWindow(g_hwnd, g_start_maximized ? SW_SHOWMAXIMIZED : SW_SHOW);
+  force_visible();
   SetForegroundWindow(g_hwnd);
   SetFocus(g_hwnd);
   UpdateWindow(g_hwnd);
   fit_widget();
-  push_state(true);
+  // 用 BypassThrottle 而不是 BypassAll：`ShowWindow` 内部会**同步**触发
+  // `WM_SIZE`，那一次已经走 `push_state(None)` 推过显示后的真实状态了。
+  // 若这里再用 BypassAll（跳过变化检测），就会把同样的内容再推一遍——
+  // 实测两条 `maximized:false` 的时间戳只差 1 ms，且字段完全相同。
+  //
+  // BypassThrottle 的语义正好：万一上面那次被 16 ms 节流吃掉了，
+  // 这一发会补上；若已经推过，变化检测会拦住。
+  push_state(PushMode::BypassThrottle);
+}
+
+// 兜住「第一次 ShowWindow 被 STARTUPINFO 覆盖」这一情形。
+//
+// 已经可见时是 no-op，所以可以在任何显示路径上无脑调用。
+// 第二层兜底用 SWP_SHOWWINDOW：它不读 nCmdShow，因此不受 STARTUPINFO 影响。
+// 两层都留是有意的——第二次 ShowWindow 在 Windows 文档里「不再被覆盖」，
+// 但那依赖系统实现细节；SWP_SHOWWINDOW 是更直接的原语。
+void force_visible() {
+  if (!g_hwnd) return;
+  if (IsWindowVisible(g_hwnd)) return;
+  ShowWindow(g_hwnd, g_start_maximized ? SW_SHOWMAXIMIZED : SW_SHOW);
+  if (IsWindowVisible(g_hwnd)) return;
+  SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                   SWP_SHOWWINDOW);
 }
 
 // ---- 原生上下文菜单 ----
@@ -812,7 +886,7 @@ void toggle_fullscreen() {
     g_fullscreen = false;
   }
   fit_widget();
-  push_state(true);
+  push_state(PushMode::BypassAll);
 }
 
 // 把宽字符串转成 UTF-8 并写进 JSON 字符串字面量（转义 \ 与 "）。
@@ -1165,7 +1239,7 @@ void restore_bounds(int x, int y, int w, int h, int saved_dpi, bool maximized) {
     ShowWindow(g_hwnd, SW_MAXIMIZE);
   }
   fit_widget();
-  push_state(true);
+  push_state(PushMode::BypassAll);
 }
 
 // ---- 自有窗口的消息处理（仅 frameless 路径使用） ----
@@ -1653,7 +1727,13 @@ DWORD WINAPI ui_thread(LPVOID param) {
     if (!g_defer_show) show_now();
   } else {
     // subclass_toplevel() 已在上面（set_size 之前）安装
-    if (!g_defer_show) g_shown = true;
+    if (!g_defer_show) {
+      g_shown = true;
+      // 带边框模式的显示由 webview 自己的 window_show() 完成，而那同样是
+      // 本进程对 ShowWindow 的第一次调用——会被启动方的 STARTUPINFO 覆盖成
+      // SW_HIDE，导致窗口永远不可见（与 frameless 分支同一个根因）。
+      force_visible();
+    }
   }
 
   SetEvent(g_ready);

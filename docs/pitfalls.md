@@ -226,6 +226,56 @@
 - **修法**：`WM_SIZE` 里按 `IsZoomed` 切换 `DWMWA_WINDOW_CORNER_PREFERENCE`（`DWMWCP_ROUND` / `DWMWCP_DONOTROUND`），并加状态缓存避免每次 `WM_SIZE` 都调 DWM。
 - **证据**：`实测`。状态序列 `round=1 → 0 → 1`。
 
+### 2.9 窗口创建成功但永远不可见：第一次 `ShowWindow` 被 STARTUPINFO 覆盖
+
+- **症状**：窗口确实建好了，`FindWindow` 能找到，几何、命中测试、最大化、`PrintWindow`
+  截图**全部正常**——调用 `IsWindowVisible` 却恒为假，`WS_VISIBLE` 位从未置上。
+  `pickTarget` 会跳过它，于是 `capture-window` 报「target window not found」。
+- **原因**：`ShowWindow` 的**第一次**调用不读我们传的 `nCmdShow`。父进程若以
+  `STARTF_USESHOWWINDOW` + `wShowWindow = SW_HIDE` 创建本进程，Windows 用
+  STARTUPINFO 里的值代替参数。于是 `ShowWindow(hwnd, SW_SHOW)` 实际执行的是「隐藏」。
+  第二次调用起才恢复正常。
+- **为什么难发现**：它不触发任何现有断言。窗口存在 → `metrics` 正常；`PrintWindow`
+  对隐藏窗口同样能抓到内容；`toggleMaximize` 也照常工作。自检读的是这些，全绿。
+  只有「肉眼 / `IsWindowVisible`」能看出差别。2026-10-21 之前一直被误判成
+  「`HOLD` 模式不 show」，实际与 `HOLD` 无关——是**启动器**的差别。
+- **对照实验（决定性）**：同一份 `src/host.ts`，
+    - `Start-Process -WindowStyle Hidden` → 12 次采样全 `WS_VISIBLE=False`（6 秒）
+    - `Start-Process`（默认） → 1000 ms 时 `WS_VISIBLE=True`
+  代码、参数、环境完全相同，只有启动器的 STARTUPINFO 不同。
+- **修法**：`show_now()` 里 `ShowWindow` 之后调 `force_visible()`——先查
+  `IsWindowVisible`，不可见就再 `ShowWindow` 一次，仍不可见则用
+  `SetWindowPos(..., SWP_SHOWWINDOW)` 兜底（`SWP_SHOWWINDOW` 不读 `nCmdShow`，
+  不受 STARTUPINFO 影响）。带边框模式同样要调：那条路的显示由 webview 自己的
+  `window_show()` 完成，而它也是本进程的第一次 `ShowWindow`。
+- **判据**：`tests/first-paint.test.ts` 的两条静态断言。注意它们跑在**剔掉整行注释**
+  的源码上——第一版没剔，双向验证时把调用注释掉仍然绿，护栏形同虚设。
+- **证据**：`实测`。库里加 `force_visible()` 后，`-WindowStyle Hidden` 启动
+  500 ms 内 `WS_VISIBLE=True`；OTT 起的 demo 也能被 `capture-window` 在 162 ms
+  内直接找到（此前要等 6 秒超时后失败）。
+
+### 2.10 状态推送重复一次：首次显示不该跳过变化检测
+
+- **症状**：页面启动日志里出现**两条字段完全相同**的 `win-report`，
+  `maximized:false`、尺寸、dpi 全都一样。`host.log` 显示两条相隔 **1 ms**。
+- **为什么不是节流**：16 ms 节流窗口内被拦下的推送会挂定时器补齐，那不可能
+  在 1 ms 内完成。1 ms 的间距说明是两条**独立**的路径。
+- **根因**：`show_now()` 末尾调了 `push_state(force=true)`，而当时的 `force`
+  是个 `bool`，它同时跳过「变化检测」与「16 ms 节流」两道闸。可 `ShowWindow()`
+  内部会**同步**触发 `WM_SIZE`，那一次已经走 `push_state()`（非 force）把显示后的
+  真实状态推了出去。于是末尾这次强制推送又把同样的内容发了一遍。
+- **为什么改一处不够**：第一次修复只把 `force` 拆成三级 `PushMode`，但把
+  `show_now()` 归到了最宽松的 `BypassAll`——于是重复依旧。三级拆分本身是对的
+  （`flush_push_state` 确实只该跳过节流），错的是 `show_now()` 的归类。
+- **修法**：`show_now()` 改用 `BypassThrottle`。语义正好：万一 `WM_SIZE` 那次
+  被节流吃掉，这一发补上；已经推过则变化检测拦住。`BypassAll` 只留给
+  「尺寸可能恰好相同、但状态确有外部变化」的场景（全屏切换 / 恢复矩形）。
+- **判据**：`tests/first-paint.test.ts` 的「首次显示用 BypassThrottle」。
+  **不要只看页面截图判断**——`host.log` 里 `win-report` 的毫秒数才是判据，
+  截图只能看出「有两条」，看不出它们是不是同一毫秒。
+- **证据**：`实测`。修前 2 条 `maximized:false`（相隔 1 ms）；修后 1 条
+  `maximized:false` + 1 条 `maximized:true`（后者是真实状态变化）。
+
 ---
 
 ## 三、原生边界

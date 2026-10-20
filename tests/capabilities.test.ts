@@ -51,6 +51,42 @@ test("状态推送带变化检测与节流尾随补齐", () => {
     expect(SHELL_CC).toContain("case WM_TIMER:");
 });
 
+/**
+ * 「跳过节流」与「跳过变化检测」是两个不同的意图。
+ *
+ * 它们曾经是同一个 `bool force`：`flush_push_state()` 复用它，结果在状态其实
+ * 没变时也补发一条一模一样的消息。实测启动时页面连续收到两条
+ * `maximized:false`（2026-10-21 截图确认）。
+ *
+ * 现在分成三级 `PushMode`，这条断言守的是「谁可以用最宽松的那一级」。
+ */
+test("尾随补齐只跳过节流，仍要过变化检测", () => {
+    // 三级都在
+    expect(SHELL_CC).toContain("enum class PushMode { None, BypassThrottle, BypassAll }");
+    // 变化检测只放过 BypassAll
+    expect(SHELL_CC).toMatch(/if \(same && mode != PushMode::BypassAll\)/);
+    // 节流只拦 None
+    expect(SHELL_CC).toMatch(/mode == PushMode::None && now - g_pushed\.at/);
+
+    // flush 必须用中间那一级——用 BypassAll 就会重复推送
+    const flushAt = SHELL_CC.indexOf("void flush_push_state()");
+    const flushBody = SHELL_CC.slice(flushAt, flushAt + 400);
+    expect(flushBody).toContain("push_state(PushMode::BypassThrottle)");
+    expect(flushBody).not.toContain("PushMode::BypassAll");
+});
+
+test("最大化状态下不做边框命中（Windows 语义：最大化窗口不能拖边缩放）", () => {
+    // 这条守的是「判断必须写在代码里且带理由」——
+    // 缺理由的有意判断，下一个人会当成 bug 重新排查一遍。
+    // 理由写在函数**上方**的注释里，所以切片要从定义处往前多取一段
+    const hitAt = SHELL_CC.indexOf("LRESULT hit_test_client(HWND hwnd, POINT pt)");
+    expect(hitAt).toBeGreaterThan(0);
+    const hitBody = SHELL_CC.slice(hitAt - 900, hitAt + 1200);
+    expect(hitBody).toMatch(/!g_frameless \|\| !g_resizable \|\| IsZoomed\(hwnd\)/);
+    // 理由必须在注释里写清楚，否则这条断言就只是形式
+    expect(hitBody).toContain("最大化的窗口本来");
+});
+
 test("错误槽是互斥写 + 拷贝读出", () => {
     expect(SHELL_CC).toContain("g_err_mu");
     expect(SHELL_CC).toContain("shell_error_text");

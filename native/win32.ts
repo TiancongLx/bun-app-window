@@ -111,6 +111,13 @@ const user32 = dlopen("user32.dll", {
         returns: "bool",
     },
     PrintWindow: { args: [FFIType.u64_fast, FFIType.u64_fast, "u32"], returns: "bool" },
+    // ShowWindow 的返回值是「**之前**是否可见」，不是「这次成功与否」。
+    // 因此它不能当判据：调用后必须用 IsWindowVisible 复核。
+    // 而且第一次调用会被启动方的 STARTUPINFO 覆盖（`STARTF_USESHOWWINDOW` +
+    // `SW_HIDE` 时我们传的 nCmdShow 被丢弃），见 pitfalls 2.9 与 native/shell.cc
+    // 的 force_visible()。
+    ShowWindow: { args: [FFIType.u64_fast, "i32"], returns: "bool" },
+    IsZoomed: { args: [FFIType.u64_fast], returns: "bool" },
 });
 
 const kernel32 = dlopen("kernel32.dll", {
@@ -295,6 +302,32 @@ export function closeHandle(h: bigint): boolean {
 
 export function isIconic(hwnd: bigint): boolean {
     return user32.symbols.IsIconic(hwnd) === true;
+}
+
+/** `ShowWindow` 的 nCmdShow 取值（只列用到的） */
+export const SW_MAXIMIZE = 3;
+export const SW_SHOW = 5;
+
+export function isZoomed(hwnd: bigint): boolean {
+    return user32.symbols.IsZoomed(hwnd) === true;
+}
+
+/**
+ * 显示 / 最大化窗口，并**用 `IsWindowVisible` 复核**。
+ *
+ * 不用 `ShowWindow` 的返回值当判据：它返回的是「之前是否可见」，
+ * 与这次调用是否生效无关。更麻烦的是第一次调用会被启动方的 STARTUPINFO
+ * 覆盖（见 `docs/pitfalls.md` 2.9），所以这里也做一次重试。
+ *
+ * 返回复核后的真实可见性，让调用方决定要不要把它当成失败。
+ */
+export function showWindow(hwnd: bigint, cmd: number): boolean {
+    if (hwnd === 0n) return false;
+    user32.symbols.ShowWindow(hwnd, cmd);
+    if (user32.symbols.IsWindowVisible(hwnd) === true) return true;
+    // 第一次可能被 STARTUPINFO 吃掉，再来一次
+    user32.symbols.ShowWindow(hwnd, cmd);
+    return user32.symbols.IsWindowVisible(hwnd) === true;
 }
 
 /** `PrintWindow` 的标志位：`PW_RENDERFULLCONTENT` 能捕获被遮挡的 WebView2 内容 */
