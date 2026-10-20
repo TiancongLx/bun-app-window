@@ -50,6 +50,7 @@
         "README.md",
         "README.zh-CN.md",
         "README.zh-TW.md",
+        "CHANGELOG.md",
         "LICENSE"
     ],
     "scripts": {
