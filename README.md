@@ -1,14 +1,16 @@
 # bun-app-window
 
-Windows 上用系统 WebView2 承载界面的原生窗口壳，供 Bun 应用使用。
+[![npm version](https://img.shields.io/npm/v/bun-app-window?color=cb3837&logo=npm)](https://www.npmjs.com/package/bun-app-window)
+[![Bun](https://img.shields.io/badge/Bun-%3E%3D1.4.3-f472b6?logo=bun&logoColor=white)](https://bun.sh)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6?logo=windows&logoColor=white)](#requirements--design-boundaries)
+[![WebView2](https://img.shields.io/badge/WebView2-System%20Runtime-008080)](#requirements--design-boundaries)
+[![License](https://img.shields.io/badge/License-MIT-2ea44f)](./LICENSE)
 
-只负责窗口：开窗、几何、DPI、边框、消息通道。业务逻辑与 UI 都在壳之外。
+English | [简体中文](./README.zh-CN.md) | [正體中文](./README.zh-TW.md)
 
----
+A native window shell for Bun applications on Windows, hosting web UIs via the system WebView2 runtime without bundling a browser.
 
-**English** — A native window shell for Bun on Windows. Your web UI runs in the
-system WebView2 runtime (no bundled browser); window control, DPI-aware geometry,
-typed IPC and a Windows 11 title bar are exposed to TypeScript over `bun:ffi`.
+This library maintains a strict, minimal scope: it handles window lifecycle, DPI-aware geometry, frameless chrome customization, and the native message channel. Business logic and UI rendering live entirely outside the shell.
 
 ```ts
 import { openShell, serveOnSafePort, FLAG_FRAMELESS } from "bun-app-window";
@@ -19,23 +21,29 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 
 ---
 
-## 采用前请先读这三条
+## Requirements & Design Boundaries
 
-| 事实 | 后果 |
+Before adopting this package, please review the following architectural constraints and trade-offs:
+
+| Constraint | Implication |
 | --- | --- |
-| 仅 Windows x64 | `os` / `cpu` 字段会直接拒绝为其他平台安装。包名的平台中立是预留，不是能力 |
-| 发布的是 TypeScript 源码 | 必须使用 Bun ≥ 1.4.3。Node.js 装得上，跑不了 |
-| `bun:ffi` 在 Bun 中标注为 experimental | Bun 官方建议生产环境改用 Node-API，本项目的取舍是换取零第三方依赖 |
+| Windows x64 only | Enforced via `os` and `cpu` fields in `package.json` (the platform-neutral package name is reserved for future expansion). A prebuilt `libshell.dll` is shipped in the package; no install-time compilation is required |
+| Bun runtime required | Ships raw TypeScript source files and requires Bun >= 1.4.3. While Node.js can install the package, it cannot execute it |
+| Built on `bun:ffi` | `bun:ffi` is marked as experimental in Bun. While Bun recommends Node-API for production stability, this library chooses `bun:ffi` to achieve a zero-dependency footprint |
 
-另有两条运行前提：需要交互式桌面会话（Session 0 的服务里 WebView2 起不来），系统需已安装 WebView2 Runtime（Win11 自带）。
+Runtime prerequisites and non-goals:
 
-## 安装
+- System WebView2 Runtime: Requires the evergreen WebView2 Runtime installed on the host machine (pre-installed on Windows 11).
+- Interactive desktop session: Due to Windows Session 0 isolation, WebView2 cannot run inside non-interactive background services. However, running inside elevated (High Integrity Level) administrator processes is fully supported.
+- Explicit non-goals: System tray icons, native application menu bars, auto-updaters, multi-window orchestration, and cross-platform abstractions.
+
+## Installation
 
 ```bash
 bun add bun-app-window
 ```
 
-## 最小用法
+## Quick Start
 
 ```ts
 import { openShell, serveOnSafePort, FLAG_FRAMELESS, FLAG_CENTER } from "bun-app-window";
@@ -56,63 +64,67 @@ const shell = await openShell({
   minHeight: 320,
 });
 
-shell.post(JSON.stringify({ t: "ready" }));   // 宿 → 页面
+shell.post(JSON.stringify({ t: "ready" }));   // Host -> Page one-way message
 shell.setTitle("Doing work…");
 ```
 
-`createShell(opts)` 只解析原生库、不开窗；`openShell(opts)` 是创建并启动，失败抛错。
+Note: `createShell(opts)` only resolves and loads the native DLL without opening a window. `openShell(opts)` creates the instance, starts the window immediately, and throws an error on failure.
 
-## API
+## Core API
 
-| 成员 | 说明 |
+### Instance Methods & Properties
+
+| Member | Description |
 | --- | --- |
-| `start()` | 开窗，返回 `{ rc, error }`。立即返回，UI 在原生线程 |
-| `stop()` | 销毁窗口，可重复调用 |
-| `post(json)` | 宿 → 页面，单向投递，不等结果 |
-| `setTitle` / `minimize` / `toggleMaximize` / `close` | 窗口操作，返回 rc |
-| `drag()` | 页面 `pointerdown` → 原生拖拽（保留贴边分屏） |
-| `beginResize(edge)` | 页面 `pointermove` → 边框缩放，edge 取 `RESIZE_EDGE.*` |
-| `setMinSize(w, h)` | 最小尺寸，逻辑像素 |
-| `show()` | 配合 `FLAG_DEFER_SHOW`：页面就绪后再显示 |
-| `state()` | `{ maximized, minimized, focused, dark, raw }` |
-| `isAlive()` | 窗口是否仍存在。`state()` 无法区分「未启动」与「已销毁」 |
-| `lastError()` | 最近失败原因，无错为空串 |
-| `pickFolder(title?)` | 原生文件夹选择框。同步阻塞调用线程 |
-| `setZoom(f)` / `getZoom()` | 页面缩放 0.25–3.0，越界自动钳制 |
-| `reload()` / `openDevTools()` / `toggleFullscreen()` | 等同 Ctrl+R / F12 / F11 |
-| `setBrowserUi(mask)` | 关闭浏览器行为，取 `BROWSER_UI_*` 按位或 |
-| `showContextMenu(x, y, items)` | 弹原生上下文菜单，见下 |
-| `libInfo` | 原生库解析结果（路径、来源、sha256） |
-| `symbols` | 逃生舱：直接访问 dlopen 出来的符号 |
+| `start()` | Opens the window and returns `{ rc, error }`. Returns immediately while the UI message loop runs on a dedicated native thread |
+| `stop()` | Destroys the window and releases native resources. Safe to call multiple times (idempotent) |
+| `show()` | Reveals the window. Typically paired with `FLAG_DEFER_SHOW` to display the window only after the web UI is ready |
+| `isAlive()` | Checks whether the native window still exists (unlike `state()`, which cannot distinguish between unstarted and destroyed states) |
+| `state()` | Returns current window state: `{ maximized, minimized, focused, dark, raw }` |
+| `lastError()` | Returns the most recent failure message, or an empty string if no error occurred |
+| `setTitle` / `minimize` / `toggleMaximize` / `close` | Standard window control operations; each returns a status code `rc` |
+| `setMinSize(w, h)` | Sets the minimum window dimensions in logical pixels |
+| `drag()` | Initiates native window dragging from a page `pointerdown` event (preserves Windows Snap Layouts) |
+| `beginResize(edge)` | Initiates native border resizing from a page `pointermove` event (`edge` uses `RESIZE_EDGE.*` constants) |
+| `post(json)` | Sends a fire-and-forget JSON message from the host to the web page |
+| `setZoom(f)` / `getZoom()` | Gets or sets the page zoom factor (clamped automatically to `0.25`–`3.0`) |
+| `reload()` / `openDevTools()` / `toggleFullscreen()` | Equivalent to `Ctrl+R`, `F12`, and `F11` respectively |
+| `setBrowserUi(mask)` | Disables specific default browser behaviors using a bitwise OR of `BROWSER_UI_*` flags |
+| `showContextMenu(x, y, items)` | Displays a native Win32 context menu at the specified screen coordinates (see below) |
+| `pickFolder(title?)` | Opens a native folder selection dialog (synchronously blocks the calling thread) |
+| `libInfo` | Metadata of the resolved native library (file path, resolution source, SHA-256 hash) |
+| `symbols` | Escape hatch providing direct access to the raw `dlopen` FFI symbols |
 
-标志位（按位或）：
+### Window Flags
 
-| 标志 | 作用 |
+Combine via bitwise OR (`|`) and pass to `opts.flags`:
+
+| Flag | Description |
 | --- | --- |
-| `FLAG_FRAMELESS` | 自建无边框窗口，标题栏由页面绘制 |
-| `FLAG_RESIZABLE` | 可缩放 |
-| `FLAG_CENTER` | 启动时居中到工作区，两种窗口模式都生效 |
-| `FLAG_TOPMOST` | 置顶 |
-| `FLAG_DEFER_SHOW` | 创建后不显示，等 `show()` |
-| `FLAG_ACCEPT_DROP` | 接受文件/文件夹拖放 |
-| `FLAG_START_MAXIMIZED` | 首次出现即最大化，无中间帧 |
+| `FLAG_FRAMELESS` | Creates a frameless window without the default system title bar, delegating title bar rendering to the web UI |
+| `FLAG_RESIZABLE` | Allows user resizing |
+| `FLAG_CENTER` | Centers the window within the active monitor work area on startup (works in both standard and frameless modes) |
+| `FLAG_TOPMOST` | Keeps the window always on top |
+| `FLAG_DEFER_SHOW` | Creates the window hidden initially until `show()` is explicitly called |
+| `FLAG_ACCEPT_DROP` | Enables native file and folder drag-and-drop from Windows Explorer |
+| `FLAG_START_MAXIMIZED` | Opens the window directly in a maximized state without an intermediate normal-sized frame flash |
 
-## 子路径入口
+## Subpath Exports
 
-主入口之外的能力放在独立子路径，按需引入。
+Additional capabilities outside core window management are modularized into dedicated subpath exports.
 
-### `bun-app-window/ipc` — 类型化调用与事件
+### `bun-app-window/ipc` — Typed RPC & Event Bus
 
-宿主与页面共享一份类型声明，客户端用泛型在编译期校验：
+Share a single TypeScript contract between the host and the web page for compile-time verification of method signatures and event payloads:
 
 ```ts
-// api.ts —— 宿主与页面 import 同一个文件
+// api.ts — Imported by both host and page
 export type Api = { greet(name: string): string };
 export type Events = { windowState: { maximized: boolean } };
 ```
 
 ```ts
-// 宿主
+// Host
 import { createIpcServer } from "bun-app-window/ipc";
 
 const ipc = createIpcServer({
@@ -120,7 +132,7 @@ const ipc = createIpcServer({
 });
 
 serveOnSafePort({
-  fetch(req) { /* 页面与鉴权 */ },
+  fetch(req) { /* Serve assets & authenticate */ },
   websocket: {
     open: (ws) => ipc.attach(ws),
     message: (ws, raw) => ipc.handle(ws, raw),
@@ -128,28 +140,31 @@ serveOnSafePort({
   },
 });
 
-ipc.emit("windowState", { maximized: false });   // 主动推送
+ipc.emit("windowState", { maximized: false });   // Push event to connected pages
 ```
 
 ```ts
-// 页面
+// Page
 import { connect } from "bun-app-window/ipc";
 import type { Api, Events } from "./api";
 
 const api = await connect<Api, Events>();
-await api.greet("Ada");                        // string
+await api.greet("Ada");                        // Inferred return type: string
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
-`connect` 从页面 URL 的 `?t=` 取 token 连 `/ws`。要接到别处就传 `url` 或现成的 `channel`。
+By default, `connect()` extracts the auth token from the page URL's `?t=` query parameter and connects to `/ws`. Pass a custom `url` or `channel` option to override this behavior.
 
-### `bun-app-window/titlebar` — Win 11 标题栏
+### `bun-app-window/titlebar` — Windows 11 Title Bar
+
+Mounts a customizable Windows 11 title bar inside frameless windows:
 
 ```ts
+// Page
 import { mountTitleBar, bridgeFromWindowService } from "bun-app-window/titlebar";
 
 const bar = mountTitleBar({
-  title: "我的应用",
+  title: "My App",
   icon: "/icon.svg",
   bridge: bridgeFromWindowService(api.window),
 });
@@ -157,9 +172,10 @@ const bar = mountTitleBar({
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
-对应的宿主服务需要四个方法：
+Expose the four corresponding window control methods on the host IPC service:
 
 ```ts
+// Host
 createIpcServer({
   service: {
     window: {
@@ -172,11 +188,14 @@ createIpcServer({
 });
 ```
 
-拖拽走 `shell.drag()`，由原生发 `WM_NCLBUTTONDOWN HTCAPTION`，贴边分屏与双击最大化均保留。
+Implementation notes:
 
-配色与尺寸全走 CSS 变量（`--ws-tb-*`），覆盖即可换肤。按钮字形默认用几何符号；`icons: "fluent"` 走 Segoe Fluent Icons，该字体缺失时会显示成豆腐块。
+- Native dragging: Calling `shell.drag()` dispatches a native `WM_NCLBUTTONDOWN` (`HTCAPTION`) message, preserving Windows 11 Snap Layouts and double-click maximize behavior.
+- Theming & icons: Colors and dimensions are controlled via CSS custom properties (`--ws-tb-*`). Window control buttons default to geometric glyphs for universal compatibility; setting `icons: "fluent"` switches to `Segoe Fluent Icons` (note: missing fonts on older systems will render as missing-glyph boxes).
 
-### `bun-app-window/state` — 窗口位置持久化
+### `bun-app-window/state` — Window Placement Persistence
+
+Automatically persists and restores window coordinates, dimensions, and maximized state across sessions:
 
 ```ts
 import { attachPlacementStore, loadPlacement, restorePlacement } from "bun-app-window/state";
@@ -189,30 +208,36 @@ if (saved) restorePlacement(shell, saved);
 
 shell.show();
 
-const store = attachPlacementStore(shell, FILE);   // 轮询，静止时不写盘
+const store = attachPlacementStore(shell, FILE);   // Polls state; skips disk writes when idle
 process.on("beforeExit", () => store.flush());
 ```
 
-原生侧已处理最大化存还原矩形、DPI 换算、屏外坐标校验三种情况。一次性读写用 `capturePlacement` / `savePlacement`，不需要开定时器。
+The native placement layer handles edge cases automatically:
 
-### `bun-app-window/debug` — 排障面
+- Captures the normal restore rectangle (`rcNormalPosition`) when maximized rather than full-screen bounds.
+- Translates coordinates across monitors with different DPI scaling factors.
+- Validates and clamps off-screen coordinates when monitor topology changes.
 
-诊断接口不属稳定契约，随时可能变化：
+For one-off reads and writes without polling timers, use `capturePlacement` and `savePlacement` directly.
+
+### `bun-app-window/debug` — Diagnostics
+
+Exposes internal metrics and hit-testing utilities. Note: This module is excluded from semver stability guarantees and may change at any time.
 
 ```ts
 import { debugOf } from "bun-app-window/debug";
 
 const d = debugOf(shell);
-d.metrics();   // pos / win / client / work / border / round
-d.dpi();       // 感知级别与缩放
+d.metrics();   // Returns pos / win / client / work / border / round geometry
+d.dpi();       // Returns DPI awareness level and scaling factor
 d.hittest(x, y);
 ```
 
-## 常见任务
+## Common Recipes & Best Practices
 
-### 关掉浏览器行为
+### 1. Disabling Browser-Specific UI
 
-WebView2 默认是浏览器语义。桌面应用通常全关：
+WebView2 enables standard browser interactions by default. Desktop applications typically disable all of them:
 
 ```ts
 import { BROWSER_UI_ALL } from "bun-app-window";
@@ -220,52 +245,76 @@ import { BROWSER_UI_ALL } from "bun-app-window";
 const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 ```
 
-| 位 | 关掉的东西 |
+Individual flags can also be combined via bitwise OR:
+
+| Flag | Disabled Behavior |
 | --- | --- |
-| `BROWSER_UI_MENU` | 默认右键菜单（Edge 菜单） |
-| `BROWSER_UI_KEYS` | `Ctrl+P` / `Ctrl+F` / `Ctrl+S` |
-| `BROWSER_UI_STATUSBAR` | 左下角悬停状态栏 |
-| `BROWSER_UI_SWIPE` | 触控板横滑前进/后退 |
-| `BROWSER_UI_AUTOFILL` | 表单自动填充 |
+| `BROWSER_UI_MENU` | Default Edge right-click context menu |
+| `BROWSER_UI_KEYS` | Built-in browser shortcuts (`Ctrl+P`, `Ctrl+F`, `Ctrl+S`) |
+| `BROWSER_UI_STATUSBAR` | Bottom-left URL hover status bar |
+| `BROWSER_UI_SWIPE` | Trackpad horizontal swipe back/forward navigation |
+| `BROWSER_UI_AUTOFILL` | Form autofill popups |
 
-`F11` / `F12` / `Ctrl±` 由壳自己处理，不受影响。
+Note: `F11`, `F12`, and `Ctrl±` zoom shortcuts are handled directly by the native shell and remain active regardless of these flags.
 
-### 右键菜单
+### 2. Native Context Menu
 
-关掉默认菜单后，右键需应用提供：
+After disabling the default browser menu, render native Win32 popup menus (`TrackPopupMenu`) via `showContextMenu`. The page cannot call it directly — expose it through the IPC service first:
 
 ```ts
-// 页面
-document.addEventListener("contextmenu", (e) => {
-  e.preventDefault();
-  shell.showContextMenu(Math.round(e.screenX), Math.round(e.screenY),
-    "open|打开\nrefresh|刷新\n-\nquit|退出");
-});
-
-window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "menu") console.log("选中", e.detail.id);
+// Host: expose the menu capability on the window service
+createIpcServer({
+  service: {
+    window: {
+      showContextMenu: (x: number, y: number, items: string) =>
+        shell.showContextMenu(x, y, items),
+    },
+  },
 });
 ```
 
-`items` 用行描述，`id|label` 每行一项，单独 `-` 是分隔线。菜单由 Win32 `TrackPopupMenu` 绘制。
+```ts
+// Page: trigger the native menu
+document.addEventListener("contextmenu", async (e) => {
+  e.preventDefault();
+  await api.window.showContextMenu(
+    Math.round(e.screenX),
+    Math.round(e.screenY),
+    "open|Open\nrefresh|Refresh\n-\nquit|Quit"
+  );
+});
 
-### 拖放
+// Page: handle menu item selection
+window.addEventListener("shell-msg", (e) => {
+  if (e.detail.t === "menu") console.log("Selected ID:", e.detail.id);
+});
+```
+
+Menu items are specified as a newline-delimited string: `id|Label` per line, or `-` for a separator line.
+
+### 3. File Drag and Drop
+
+Pass `FLAG_ACCEPT_DROP` to receive file and folder drops from Windows Explorer:
 
 ```ts
+// Host
+import { openShell, FLAG_ACCEPT_DROP } from "bun-app-window";
+
 const shell = await openShell({ url, flags: FLAG_ACCEPT_DROP });
 ```
 
 ```js
+// Page
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "drop") console.log(e.detail.paths);
+  if (e.detail.t === "drop") console.log("Dropped paths:", e.detail.paths);
 });
 ```
 
-提权进程下资源管理器属 Medium，壳已用 `ChangeWindowMessageFilterEx` 放行。
+When running in an elevated administrator process (High Integrity Level) while Explorer runs at Medium Integrity Level, the shell automatically whitelists drop messages across UIPI via `ChangeWindowMessageFilterEx`.
 
-### 页面侧建议
+### 4. Recommended Desktop CSS Reset
 
-壳不注入 DOM，这三条要应用自己做：
+The shell does not inject any implicit DOM nodes or stylesheets into your page. To make your web UI feel like a native desktop app, include the following baseline rules:
 
 ```css
 html, body { cursor: default; }
@@ -278,13 +327,15 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 <input type="text" spellcheck="false" autocomplete="off" autocapitalize="off">
 ```
 
-拼写检查会给路径与数值标红波浪线，是最容易暴露「这是个网页」的一条。
+Setting `spellcheck="false"` is particularly important—red squiggly underlines beneath file paths and numeric inputs immediately give away a web view.
 
-### 打成单文件 exe
+### 5. Compiling to a Standalone Executable (.exe)
+
+When bundling with `bun build --compile`, import `bun-app-window/embedded` to embed `libshell.dll` directly inside the single-file executable:
 
 ```ts
 import { createShell } from "bun-app-window";
-import { embeddedDll } from "bun-app-window/embedded";   // 把 DLL 带进包
+import { embeddedDll } from "bun-app-window/embedded";   // Embeds the DLL into the binary
 
 const shell = await createShell({ url, embedded: embeddedDll });
 ```
@@ -293,62 +344,58 @@ const shell = await createShell({ url, embedded: embeddedDll });
 bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 ```
 
-只写 `import "bun-app-window/embedded";` 也可以。不加 `--windows-hide-console` 会出现黑色控制台窗口。
+Tips:
 
-## 原生库怎么被找到
+- A side-effect import `import "bun-app-window/embedded";` also works automatically.
+- Always pass `--windows-hide-console` for GUI builds; omitting it will spawn a black command prompt window alongside your application.
 
-按顺序尝试：
+## Internals & Reference
 
-1. `opts.nativeLibPath` —— 显式指定，跳过一切推断
-2. 编译产物内嵌字节 —— 释放到 `%LOCALAPPDATA%\<appName>\runtime`，内容哈希命名，旧版本自动清理
-3. 编译产物同级 —— exe 旁放 `libshell.dll`
-4. 开发态 —— 包根 `.build/libshell.dll` → `dist/libshell.dll`
+### Native Library Resolution Order
 
-## 内置的键盘与鼠标行为
+At runtime, `libshell.dll` is located in the following order:
 
-| 操作 | 行为 |
+1. Explicit path: `opts.nativeLibPath`, bypassing all fallback heuristics.
+2. Embedded payload: Extracted to `%LOCALAPPDATA%\<appName>\runtime` named by content hash (stale versions are automatically pruned).
+3. Executable directory: `libshell.dll` located next to the running `.exe`.
+4. Development paths: `.build/libshell.dll` followed by `dist/libshell.dll` relative to the package root.
+
+### Built-in Keyboard & Mouse Shortcuts
+
+| Input | Behavior |
 | --- | --- |
-| `Ctrl+` / `Ctrl-` / `Ctrl+0` | 页面缩放：上/下一档 / 复位 |
-| `Ctrl+滚轮` | 同上 |
-| `F11` | 全屏（连边框与任务栏一起让出） |
-| `F5` / `Ctrl+R` | 重新加载 |
-| `F12` | 开发者工具 |
-| `Alt+Space` / 右键标题栏 | 系统菜单 |
+| `Ctrl +` / `Ctrl -` / `Ctrl 0` | Zoom in / Zoom out / Reset zoom to 100% |
+| `Ctrl + Mouse Wheel` | Zoom in / Zoom out |
+| `F11` | Toggle fullscreen mode (hides window borders and covers the taskbar) |
+| `F5` / `Ctrl + R` | Reload page |
+| `F12` | Open WebView2 Developer Tools |
+| `Alt + Space` / Right-click title bar | Open native Windows system menu |
 
-## 平台与边界
+## Development & Verification
 
-- 仅 Windows x64。`libshell.dll` 预编译随包分发，不在安装期编译。
-- 需要交互式会话：Session 0 里 WebView2 起不来，属 Windows 会话隔离。
-- 提权不影响 WebView2：实测 High 完整性级别下正常。
-- 不支持：托盘、系统菜单、自动更新、多窗口、跨平台。
-
-## 开发与验证
-
-工具链：Bun 1.4.3 + TypeScript 7.0.2，`tsconfig.json` 开启全套严格项。门禁为原生命令，不设同名脚本：
+Built with Bun 1.4.3 and TypeScript 7.0.2 with full strict type-checking enabled. Quality gates use standard CLI commands:
 
 ```bash
-bun check          # 类型
-bun test           # 行为（tests/，103 例）
-bun run demo       # 自检程序，需要交互式会话
+bun check          # Run TypeScript type checker
+bun test           # Run automated test suite (tests/, 103 test cases)
+bun run demo       # Launch interactive self-test demo (requires desktop session)
 ```
 
-改 `src/shell/` 或 `package.json` 后还要跑一次「装进外部工程」的冒烟，见 `AGENTS.md` 的「依赖包验收」。
+Whenever `src/shell/` or `package.json` is modified, run the external consumer smoke test documented under the package acceptance section in `AGENTS.md`.
 
-窗口类名按模式不同，`EnumWindows` 过滤或截图脚本要用对应值：
+For window enumeration (`EnumWindows`) or automated screenshot scripts, filter by the corresponding Win32 window class name:
 
-| 模式 | 类名 |
+| Window Mode | Window Class Name |
 | --- | --- |
-| 带边框（不传 `FLAG_FRAMELESS`） | `webview` |
-| 无边框（传 `FLAG_FRAMELESS`） | `webview_shell` |
+| Standard framed (without `FLAG_FRAMELESS`) | `webview` |
+| Frameless (with `FLAG_FRAMELESS`) | `webview_shell` |
 
-## 致谢
+## Acknowledgments
 
-平台层为 [webview/webview](https://github.com/webview/webview) `0.12.0`（MIT，Serge Zaitsev · Steffen André Langnes）。`vendor/webview/` 是其原样拷贝，未做源码改动。
+- Platform windowing layer based on [webview/webview](https://github.com/webview/webview) `0.12.0` (MIT License, Serge Zaitsev & Steffen André Langnes). `vendor/webview/` contains an unmodified upstream copy.
+- WebView2 SDK provided by [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) `1.0.1150.38` (NuGet package vendored for offline builds). The WebView2 Runtime is provided by the OS.
+- Co-authored-by DeepSeek
 
-WebView2 SDK 来自 [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) `1.0.1150.38`（NuGet 包随仓库分发供离线构建）。Runtime 由系统提供。
+## License
 
-Co-authored-by DeepSeek
-
-## 许可
-
-MIT，见 [LICENSE](./LICENSE)。`vendor/webview/` 亦为 MIT，其著作权声明保留在原文件中。
+Released under the [MIT License](./LICENSE). `vendor/webview/` is also MIT-licensed with original copyright notices retained in source files.

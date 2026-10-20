@@ -48,6 +48,8 @@
         "vendor/webview/compatibility",
         "vendor/webview2/build/native/include",
         "README.md",
+        "README.zh-CN.md",
+        "README.zh-TW.md",
         "LICENSE"
     ],
     "scripts": {
