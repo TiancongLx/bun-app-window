@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
 
 import {
+    FLAG_ACCEPT_DROP,
+    FLAG_ALLOW_EXTERNAL_NAV,
     FLAG_CENTER,
     FLAG_DEFER_SHOW,
     FLAG_FRAMELESS,
     FLAG_RESIZABLE,
+    FLAG_START_MAXIMIZED,
     FLAG_TOPMOST,
     RESIZE_EDGE,
     STATE_FOCUSED,
@@ -13,7 +16,16 @@ import {
 } from "@/shell/types";
 
 test("标志位互不重叠，可按位或组合", () => {
-    const flags = [FLAG_FRAMELESS, FLAG_TOPMOST, FLAG_CENTER, FLAG_RESIZABLE, FLAG_DEFER_SHOW];
+    const flags = [
+        FLAG_FRAMELESS,
+        FLAG_TOPMOST,
+        FLAG_CENTER,
+        FLAG_RESIZABLE,
+        FLAG_DEFER_SHOW,
+        FLAG_ACCEPT_DROP,
+        FLAG_START_MAXIMIZED,
+        FLAG_ALLOW_EXTERNAL_NAV,
+    ];
     expect(new Set(flags).size).toBe(flags.length);
 
     for (const f of flags) {

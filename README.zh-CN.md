@@ -113,6 +113,24 @@ shell.setTitle("Doing work…");
 | `FLAG_DEFER_SHOW` | 创建窗口后保持隐藏状态，等待显式调用 `show()` |
 | `FLAG_ACCEPT_DROP` | 允许窗口接收外部文件或文件夹拖放事件 |
 | `FLAG_START_MAXIMIZED` | 窗口首次显示即处于最大化状态，避免从普通尺寸跳变到最大化的中间闪烁帧 |
+| `FLAG_ALLOW_EXTERNAL_NAV` | 放弃外部导航拦截——用于本身就是浏览器的应用 |
+
+### 外部导航默认被拦截
+
+不给 `FLAG_ALLOW_EXTERNAL_NAV` 时，一个跨源链接再也无法把应用导航走。壳会取消这次导航，
+把地址交给系统默认浏览器：
+
+- **同源**（启动地址是 `file://` 等无 origin 的形态时，改为判断「同文档」，即剥掉
+  `#fragment` 后与启动地址逐字相同）留在窗口内导航，应用自己的路由不受影响。
+- **跨源**会取消导航并交给系统浏览器——但只有 `http:` / `https:`。`file:`、
+  `javascript:`、`ms-*:` 以及自定义 scheme 一律静默取消，绝不触达协议处理器；
+  `mailto:` / `tel:` 也**不在**放行之列。
+- **`window.open` / `target=_blank`** 始终被拦下并外开，即使给了
+  `FLAG_ALLOW_EXTERNAL_NAV` 也一样。那是能力边界而非策略：壳只持有一个顶层窗口
+  （原生层是进程级单例），多开出来的窗口没有任何宿主 API 能管它。
+
+桌面壳没有地址栏、没有后退按钮，也没有任何宿主 API 能把页面导航回来——所以一次误点
+外链就等于应用被换成了那个网站。这就是默认值选安全一侧的原因。
 
 ## 子路径模块
 
@@ -405,7 +423,7 @@ bun run scripts/gate.ts --clean      # 同上，但在 HEAD 的干净副本里�
 
 ```bash
 bun check          # 执行 TypeScript 类型检查
-bun test           # 运行自动化测试套件（位于 tests/，共 182 个用例）
+bun test           # 运行自动化测试套件（位于 tests/）
 bun run demo       # 启动交互式自检示例程序（需在桌面会话下运行）
 ```
 

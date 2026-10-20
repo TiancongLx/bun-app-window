@@ -113,6 +113,24 @@ shell.setTitle("Doing work…");
 | `FLAG_DEFER_SHOW` | 建立視窗後保持隱藏狀態，等待明確呼叫 `show()` |
 | `FLAG_ACCEPT_DROP` | 允許視窗接收外部檔案或資料夾拖放事件 |
 | `FLAG_START_MAXIMIZED` | 視窗首次顯示即處於最大化狀態，避免從一般尺寸跳變至最大化的中間閃爍畫格 |
+| `FLAG_ALLOW_EXTERNAL_NAV` | 放棄外部導覽攔截——用於本身就是瀏覽器的應用程式 |
+
+### 外部導覽預設被攔截
+
+未提供 `FLAG_ALLOW_EXTERNAL_NAV` 時，一個跨來源連結再也無法把應用程式導覽走。殼層會取消該次導覽，
+把位址交給系統預設瀏覽器：
+
+- **同來源**（啟動位址是 `file://` 等無 origin 的形態時，改為判斷「同文件」，即剝除
+  `#fragment` 後與啟動位址逐字相同）留在視窗內導覽，應用程式自身的路由不受影響。
+- **跨來源**會取消導覽並交給系統瀏覽器——但僅限 `http:` / `https:`。`file:`、
+  `javascript:`、`ms-*:` 以及自訂 scheme 一律靜默取消，絕不觸及協定處理常式；
+  `mailto:` / `tel:` 也**不在**放行清單內。
+- **`window.open` / `target=_blank`** 一律被攔下並外開，即使提供了
+  `FLAG_ALLOW_EXTERNAL_NAV` 亦然。那是能力邊界而非策略：殼層僅持有一個頂層視窗
+  （原生層是處理序級單例），多開出來的視窗沒有任何宿主 API 能管理它。
+
+桌面殼層沒有網址列、沒有上一頁按鈕，也沒有任何宿主 API 能把頁面導覽回來——所以一次誤點
+外部連結就等於應用程式被換成了那個網站。這就是預設值選擇安全一側的原因。
 
 ## 子路徑模組
 
@@ -405,7 +423,7 @@ bun run scripts/gate.ts --clean      # 同上，但在 HEAD 的乾淨副本內�
 
 ```bash
 bun check          # 執行 TypeScript 型別檢查
-bun test           # 執行自動化測試套件（位於 tests/，共 182 個測試案例）
+bun test           # 執行自動化測試套件（位於 tests/）
 bun run demo       # 啟動互動式自我檢測範例程式（需於桌面工作階段下執行）
 ```
 

@@ -113,6 +113,26 @@ Combine via bitwise OR (`|`) and pass to `opts.flags`:
 | `FLAG_DEFER_SHOW` | Creates the window hidden initially until `show()` is explicitly called |
 | `FLAG_ACCEPT_DROP` | Enables native file and folder drag-and-drop from Windows Explorer |
 | `FLAG_START_MAXIMIZED` | Opens the window directly in a maximized state without an intermediate normal-sized frame flash |
+| `FLAG_ALLOW_EXTERNAL_NAV` | Opts out of external-navigation interception — for apps that genuinely are browsers |
+
+### External navigation is blocked by default
+
+Without `FLAG_ALLOW_EXTERNAL_NAV`, a cross-origin link can no longer navigate the app away.
+The shell cancels the navigation and hands the URL to the system browser instead:
+
+- **Same origin** (or, for `file://` / other origin-less startup URLs, the same document
+  ignoring the `#fragment`) stays inside the window. In-app routing keeps working.
+- **Cross origin** is cancelled and opened externally — but only for `http:` / `https:`.
+  `file:`, `javascript:`, `ms-*:` and custom schemes are cancelled silently and never
+  reach a protocol handler. `mailto:` / `tel:` are deliberately not allowed.
+- **`window.open` / `target=_blank`** is always cancelled and opened externally, even with
+  `FLAG_ALLOW_EXTERNAL_NAV`. That is a capability boundary, not a policy: the shell owns a
+  single top-level window (native side is a process-level singleton), so a second window
+  would have no host API to manage it.
+
+A desktop shell has no address bar and no back button, and no host API can navigate the page
+back — so a single mis-click would otherwise replace the app with that website. That is why
+the default picks the safe side.
 
 ## Subpath Exports
 
@@ -407,7 +427,7 @@ The underlying commands remain available directly:
 
 ```bash
 bun check          # Run TypeScript type checker
-bun test           # Run automated test suite (tests/, 182 test cases)
+bun test           # Run automated test suite (tests/)
 bun run demo       # Launch interactive self-test demo (requires desktop session)
 ```
 

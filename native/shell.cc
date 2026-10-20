@@ -27,6 +27,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cwctype>
 #include <atomic>
 #include <deque>
 #include <mutex>
@@ -60,6 +61,17 @@ enum ShellFlag : int {
   // 窗口从隐藏直接变成最大化，中间没有任何可见帧。
   // 与 FLAG_CENTER 同时给时以本项为准——最大化会覆盖位置。
   SHELL_FLAG_START_MAXIMIZED = 64,
+  // 允许页面把顶层框架导航到别的 origin（默认禁止）。
+  //
+  // 默认行为：任何离开本站 origin 的顶层导航都被取消，改用系统默认浏览器打开；
+  // `target=_blank` / `window.open` 触发的新窗口同样被拦下并转交系统浏览器。
+  //
+  // 为什么默认禁止：页面里一个普通外链就能把整个应用导航走，而且**没有返回路径**
+  // ——导航到外部站点后，页面里既没有后退按钮也没有宿主 API 能回来，用户只能
+  // 关掉整个窗口。这是默认值应该选安全一侧的典型场景。
+  //
+  // 需要「应用本身就是浏览器」时再给这个标志。
+  SHELL_FLAG_ALLOW_EXTERNAL_NAV = 128,
 };
 
 enum ShellState : int {
@@ -117,6 +129,20 @@ std::deque<cmd> g_queue;
 
 std::string g_url;
 std::string g_title;
+
+// 本站 origin（`scheme://host[:port]`，小写）。外部导航拦截的判据。
+// 由 shell_start_ex 从 g_url 算出。空串表示「算不出来」（`file://`、`about:blank`、
+// 自定义 scheme 等无 origin 的启动地址），此时判据退化——见 classify_nav。
+std::wstring g_origin;
+// 启动 URL 去掉 `#fragment` 后的形态。origin 为空时唯一的放行依据：
+// 只有同文档导航（即 `g_app_doc` 或它的 `#xxx`）才留在应用内。
+std::wstring g_app_doc;
+bool g_allow_external_nav = false;
+// 导航守卫的 COM 对象与注册令牌。我们各持有一份引用，teardown 时 remove + Release。
+ICoreWebView2NavigationStartingEventHandler *g_nav_guard = nullptr;
+EventRegistrationToken g_nav_token{};
+ICoreWebView2NewWindowRequestedEventHandler *g_new_window_guard = nullptr;
+EventRegistrationToken g_new_window_token{};
 
 // 错误槽。跨线程写：启动期由 UI 线程写（CoInitializeEx / webview_create 失败等），
 // 运行期任何线程都可能写。放在 mutex 后面，避免两条错误互相覆盖成半截字符串。
@@ -850,6 +876,275 @@ void open_dev_tools() {
   }
   core->OpenDevToolsWindow();
   core->Release();
+}
+
+// ---- 外部导航拦截 ----
+//
+// ## 为什么必须有这一层
+//
+// 默认设置下，页面里一个普通外链（`<a href="https://example.com">`）就能把**顶层
+// 框架**导航走。而这是个桌面应用：没有地址栏、没有后退按钮、也没有宿主 API 能把
+// 页面拉回来。用户点一下外链，应用就变成了那个网站，只能关窗重开。
+//
+// 这是默认值应该选安全一侧的典型场景，所以默认拦截；需要「应用本身就是浏览器」
+// 时由调用方显式给 `SHELL_FLAG_ALLOW_EXTERNAL_NAV`。
+//
+// ## 两个入口，缺一不可
+//
+// `NavigationStarting` 管「当前框架被导航走」，`NewWindowRequested` 管
+// `target=_blank` / `window.open` 弹新窗。后者如果不拦，WebView2 会真的开一个
+// 没有我们任何配置的新窗口。
+//
+// ## 为什么只对 http/https 调 ShellExecute
+//
+// `ShellExecuteW(L"open", url)` 按协议名去找注册的处理程序。对任意 scheme 调用，
+// 等于给了页面一个「触发任意协议处理器」的入口（`ms-*:`、自定义 scheme、甚至
+// `file:`）。所以只放行 http/https，其它 scheme 一律**静默取消、不外开**。
+
+// 取 `scheme://host[:port]` 并统一小写。非 http/https 或解析不出来时返回空串。
+//
+// 不用 UrlGetPart / CoInternetParseUrl 之类的现成解析器：它们要额外链接
+// urlmon，而这里只需要「够用来比较同源」的判断。
+static std::wstring url_origin(const std::wstring &url) {
+  const size_t scheme_end = url.find(L"://");
+  if (scheme_end == std::wstring::npos || scheme_end == 0) {
+    return std::wstring();
+  }
+  std::wstring scheme = url.substr(0, scheme_end);
+  for (auto &ch : scheme) {
+    ch = static_cast<wchar_t>(towlower(ch));
+  }
+  if (scheme != L"http" && scheme != L"https") {
+    return std::wstring();
+  }
+  const size_t host_start = scheme_end + 3;
+  size_t host_end = url.find_first_of(L"/?#", host_start);
+  if (host_end == std::wstring::npos) {
+    host_end = url.size();
+  }
+  if (host_end == host_start) {
+    return std::wstring();
+  }
+  std::wstring origin = scheme + L"://" + url.substr(host_start, host_end - host_start);
+  for (auto &ch : origin) {
+    ch = static_cast<wchar_t>(towlower(ch));
+  }
+  return origin;
+}
+
+// 取 URL 里 `#` 之前的部分。只有 fragment 变化的导航不算跨文档。
+//
+// 这个函数专门服务「启动地址没有 origin」的退化判据：`file:///C:/app/index.html#a`
+// 与 `file:///C:/app/index.html#b` 是同一份文档，剥掉 `#` 后是同一个串。
+static std::wstring strip_fragment(const std::wstring &url) {
+  const size_t hash = url.find(L'#');
+  return hash == std::wstring::npos ? url : url.substr(0, hash);
+}
+
+// 一条导航该不该留在应用内。
+enum class NavVerdict {
+  Allow,     // 留在当前 webview 里导航
+  External,  // 取消本次导航，改交系统浏览器（非 http/https 时连外开也不做）
+};
+
+// 导航裁决——整个外部导航拦截的唯一判据。
+//
+// 两种形态，取决于启动地址有没有 origin：
+//
+//   g_origin 非空（http/https 应用）→ 判「同源」。页面内路由、同源跳转都留在应用内，
+//     跨源一律外开。这是绝大多数场景。
+//
+//   g_origin 为空（`file://`、`about:blank`、自定义 scheme）→ 判「同文档」：比较
+//     去掉 `#fragment` 之后是否与启动地址逐字相同。UI 常在 `file://` 上跑，
+//     此时若不拦，一个 https 外链就能把应用带走；而若拦得太狠，页面自己的
+//     `#/route` 跳转又会被踢出去。剥 fragment 正好卡在两者之间。
+//
+// 历史：这里原本只判同源，且「g_origin 为空 → 一律放行」。那等于给 `file://`
+// 应用开了个后门——恰恰是桌面应用最常见的形态。改成两条形态各判各的之后，
+// 「解析失败」不再等于「不设防」。
+static NavVerdict classify_nav(const std::wstring &url) {
+  if (!g_origin.empty()) {
+    return url_origin(url) == g_origin ? NavVerdict::Allow : NavVerdict::External;
+  }
+  if (!g_app_doc.empty() && strip_fragment(url) == g_app_doc) {
+    return NavVerdict::Allow;
+  }
+  return NavVerdict::External;
+}
+
+// 交给系统默认浏览器。只放行 http/https，理由见本节开头。
+static void open_external(const std::wstring &url) {
+  if (url_origin(url).empty()) {
+    return;
+  }
+  ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// COM 事件处理器的公共部分。WebView2 在 UI 线程同步调用 Invoke，所以这里
+// 不需要额外同步；引用计数只用 atomic 保证 Release 不撕裂。
+class NavEventBase {
+ public:
+  virtual ~NavEventBase() = default;
+  ULONG add_ref() { return ++m_refs; }
+  ULONG release() {
+    const ULONG left = --m_refs;
+    if (left == 0) {
+      delete this;
+    }
+    return left;
+  }
+
+ protected:
+  HRESULT query_unknown(REFIID riid, void **out, REFIID self_iid, void *self) {
+    if (!out) {
+      return E_POINTER;
+    }
+    if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, self_iid)) {
+      *out = self;
+      add_ref();
+      return S_OK;
+    }
+    *out = nullptr;
+    return E_NOINTERFACE;
+  }
+
+ private:
+  std::atomic<ULONG> m_refs{1};
+};
+
+// 当前框架被导航走时触发：判定为外部就取消导航，改交系统浏览器。
+//
+// 继承顺序把 `NavEventBase` 放在前面（引用计数与 QueryInterface 的公共实现），
+// COM 接口放在后面。注意 `QueryInterface` 回填的必须是**接口子对象的地址**：
+// 多重继承下 `this` 指向 NavEventBase 子对象，与 vtable 起点不同，必须先
+// `static_cast` 到接口类型再交出去，否则调用方拿到的是错位的指针。
+class NavigationGuard : public NavEventBase,
+                        public ICoreWebView2NavigationStartingEventHandler {
+ public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
+    return query_unknown(riid, out, IID_ICoreWebView2NavigationStartingEventHandler,
+                         static_cast<ICoreWebView2NavigationStartingEventHandler *>(this));
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return add_ref(); }
+  ULONG STDMETHODCALLTYPE Release() override { return release(); }
+
+  HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 * /*sender*/,
+                                   ICoreWebView2NavigationStartingEventArgs *args) override {
+    if (!args) {
+      return S_OK;
+    }
+    LPWSTR raw = nullptr;
+    if (FAILED(args->get_Uri(&raw)) || !raw) {
+      // 拿不到 URI 就不拦：拦错的代价（应用白屏）比放过的代价更高
+      return S_OK;
+    }
+    const std::wstring uri(raw);
+    CoTaskMemFree(raw);
+
+    if (classify_nav(uri) == NavVerdict::Allow) {
+      return S_OK;
+    }
+    args->put_Cancel(TRUE);
+    open_external(uri);
+    return S_OK;
+  }
+};
+
+// target=_blank / window.open 时触发：取消新窗口，改交系统浏览器。
+class NewWindowGuard : public NavEventBase,
+                       public ICoreWebView2NewWindowRequestedEventHandler {
+ public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
+    return query_unknown(riid, out, IID_ICoreWebView2NewWindowRequestedEventHandler,
+                         static_cast<ICoreWebView2NewWindowRequestedEventHandler *>(this));
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return add_ref(); }
+  ULONG STDMETHODCALLTYPE Release() override { return release(); }
+
+  HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 * /*sender*/,
+                                   ICoreWebView2NewWindowRequestedEventArgs *args) override {
+    if (!args) {
+      return S_OK;
+    }
+    LPWSTR raw = nullptr;
+    if (FAILED(args->get_Uri(&raw)) || !raw) {
+      // 拿不到 URI 时仍然标记 Handled：否则 WebView2 会开一个我们完全没配置的新窗口
+      args->put_Handled(TRUE);
+      return S_OK;
+    }
+    const std::wstring uri(raw);
+    CoTaskMemFree(raw);
+
+    args->put_Handled(TRUE);
+    // 同源的新窗口请求（比如页面里 `window.open('/detail')`）也不在应用内开：
+    // 这个壳只支持一个顶层窗口（原生层是进程级单例），开出来也没人能管它。
+    open_external(uri);
+    return S_OK;
+  }
+};
+
+// 注册两个守卫。必须在 navigate 之前调用——否则首次导航不会被拦。
+//
+// 两个守卫的门槛不同，这里刻意不合并成一个条件：
+//
+//   NavigationGuard — 受 `g_allow_external_nav` 控制。这个 flag 的语义是
+//     「本应用就是个浏览器，别管我导航到哪」，跳过它是本意。
+//
+//   NewWindowGuard — **无条件安装**，哪怕给了 `g_allow_external_nav`。
+//     拦住 `window.open` 不是安全策略，是能力边界：这个壳只支持一个顶层窗口
+//     （原生层是进程级单例，g_webview 只有一份），开出来的新窗口没有任何宿主
+//     API 能管它——关不掉、读不到、也收不到 shell-msg。放它出去等于制造
+//     一个没人负责的窗口。
+//
+// 另外注意这里**不再**因为 `g_origin` 为空就整体跳过：`file://` 应用恰恰是
+// 外部导航劫持最常见的形态，判据退化在 classify_nav 里处理，而不是靠「不装守卫」。
+void install_nav_guard() {
+  ICoreWebView2 *core = core_webview();
+  if (!core) {
+    return;
+  }
+
+  if (!g_allow_external_nav && !g_nav_guard) {
+    auto *guard = new NavigationGuard();
+    if (SUCCEEDED(core->add_NavigationStarting(guard, &g_nav_token))) {
+      g_nav_guard = guard;  // 我们持有一份引用，teardown 时 remove + Release
+    } else {
+      guard->Release();
+    }
+  }
+  if (!g_new_window_guard) {
+    auto *guard = new NewWindowGuard();
+    if (SUCCEEDED(core->add_NewWindowRequested(guard, &g_new_window_token))) {
+      g_new_window_guard = guard;
+    } else {
+      guard->Release();
+    }
+  }
+
+  core->Release();
+}
+
+// 反注册并释放。必须在 webview_destroy **之前**调用：destroy 之后
+// core_webview() 已经拿不到 core，remove_ 就无从谈起了。
+void uninstall_nav_guard() {
+  ICoreWebView2 *core = core_webview();
+  if (core) {
+    if (g_nav_guard) {
+      core->remove_NavigationStarting(g_nav_token);
+    }
+    if (g_new_window_guard) {
+      core->remove_NewWindowRequested(g_new_window_token);
+    }
+    core->Release();
+  }
+  if (g_nav_guard) {
+    g_nav_guard->Release();
+    g_nav_guard = nullptr;
+  }
+  if (g_new_window_guard) {
+    g_new_window_guard->Release();
+    g_new_window_guard = nullptr;
+  }
 }
 
 // F11 全屏：去掉窗口样式钉到当前显示器整屏，再按一次还原。
@@ -1717,6 +2012,9 @@ DWORD WINAPI ui_thread(LPVOID param) {
   if (webview_init(g_webview, kInit) != WEBVIEW_ERROR_OK) {
     set_err("webview_init failed");
   }
+  // 必须在 navigate **之前**安装：`NavigationStarting` 只对注册之后发起的导航生效，
+  // 晚一步的话首次加载（也就是最可能被一个 `file://` 入口带偏的那一次）完全不受保护。
+  install_nav_guard();
   if (webview_navigate(g_webview, g_url.c_str()) != WEBVIEW_ERROR_OK) {
     set_err("webview_navigate failed");
   }
@@ -1744,6 +2042,9 @@ DWORD WINAPI ui_thread(LPVOID param) {
   // 中间若插进一次销毁，就会把 webview_dispatch 打到已释放的对象上。
   {
     std::lock_guard<std::mutex> life(g_life_mu);
+    // 反注册必须在 destroy **之前**：destroy 之后 core_webview() 返回 nullptr，
+    // remove_ 就无从谈起，守卫对象会一直挂在已死的 core 上（释放时崩）。
+    uninstall_nav_guard();
     webview_destroy(g_webview);
     g_webview = nullptr;
     {
@@ -1805,6 +2106,18 @@ __declspec(dllexport) int shell_start_ex(const char *url, const char *title,
   g_resizable = (flags & SHELL_FLAG_RESIZABLE) != 0;
   g_accept_drop = (flags & SHELL_FLAG_ACCEPT_DROP) != 0;
   g_start_maximized = (flags & SHELL_FLAG_START_MAXIMIZED) != 0;
+  // 外部导航拦截的两个判据基准。在这里算而不是在 ui_thread 里算：
+  // 两者都是「启动地址的静态属性」，越早定下来越不会和后续状态混在一起。
+  //
+  //   g_origin  — http/https 应用的同源基准；`file://` 等无 origin 的地址为空串。
+  //   g_app_doc — 启动地址剥掉 `#fragment`，origin 为空时作为「同文档」基准。
+  //   g_allow_external_nav — 显式放弃导航拦截（应用本身就是浏览器）。
+  {
+    const std::wstring wurl = widen_utf8(g_url);
+    g_origin = url_origin(wurl);
+    g_app_doc = strip_fragment(wurl);
+  }
+  g_allow_external_nav = (flags & SHELL_FLAG_ALLOW_EXTERNAL_NAV) != 0;
   clear_err();
 
   g_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);

@@ -276,6 +276,63 @@
 - **证据**：`实测`。修前 2 条 `maximized:false`（相隔 1 ms）；修后 1 条
   `maximized:false` + 1 条 `maximized:true`（后者是真实状态变化）。
 
+### 2.11 「声明了但没接线」：241 行代码写完却从未生效
+
+- **症状**：外部导航拦截的整套实现（`NavigationGuard` / `NewWindowGuard` /
+  `open_external()` / `install_nav_guard()` / `uninstall_nav_guard()`）全部就位、
+  注释详尽，但 `install_nav_guard()` **全仓零调用点**。安全债一分未还，而
+  类型检查、`bun test`、`bun check` 全绿。
+- **三个缺陷各自独立、叠在一起才致命**：
+    1. `install_nav_guard()` 没有调用点 —— 守卫从未注册。
+    2. `SHELL_FLAG_ALLOW_EXTERNAL_NAV = 128` 枚举有、**没有任何解析处**；
+       TS 侧连对应常量都没有，所以调用方**无法表达**这个意图。
+    3. `g_origin` 的注释写着「由 `shell_start_ex` 从 `g_url` 算出」，
+       而赋值语句一句都没有 —— 恒为空串。
+  前两条足以让守卫不装；即使补上调用，第 3 条也会让
+  `if (g_allow_external_nav || g_origin.empty()) return;` 立刻提前返回。
+- **最刺眼的一条**：`NavEventBase` 定义了引用计数与 `QueryInterface` 的公共实现，
+  但 `NavigationGuard` / `NewWindowGuard` **都没有继承它**。也就是说这 241 行
+  **从未通过编译**——`error: use of undeclared identifier 'add_ref'` 一次就把
+  真相说穿了：写完之后一次 `bun run build:native` 都没跑过。
+- **为什么现有断言抓不到**：静态断言习惯写成「标识符是否存在」
+  （`toContain("install_nav_guard")`），而定义本身就让这条通过。真正该断言的是
+  **调用点与赋值点的存在性**，以及**两端取值的一致性**。
+- **修法**（`tests/nav-guard.test.ts` 逐条钉住）：
+    - `install_nav_guard();` 必须有调用，且位置在 `webview_navigate` **之前**；
+    - `uninstall_nav_guard();` 必须有调用，且在 `webview_destroy` **之前**；
+    - `g_allow_external_nav = (flags & SHELL_FLAG_ALLOW_EXTERNAL_NAV) != 0` 这种
+      赋值形态必须在（枚举定义不算解析）；
+    - `g_origin = url_origin(...)` / `g_app_doc = strip_fragment(...)` 必须是赋值；
+    - TS 与 C++ 两侧 `FLAG_*` 逐位一致，且**反向**断言「C++ 有的 TS 都得有」。
+- **反向断言的必要性**：正向（「TS 有的 C++ 必须有」）抓不到本次的形态——
+  本次正是 **C++ 先行、TS 缺失**。只有反向断言会红。
+- **证据**：`源码核实` + `实测`。补接线后 `bun run build:native` 首次报出
+  6 个编译错误（`NavEventBase` 未继承，以及多重继承下 `QueryInterface` 必须
+  回填**接口子对象**地址而非 `NavEventBase` 子对象地址）。
+
+### 2.12 探针自己的判据会撒谎，而且撒两次
+
+- **背景**：验证外部导航拦截时写了一个一次性探针：本地服务提供 index / other /
+  external 三页，页面自驱导航并回传 `location.href`。
+- **第一处伪判据**：在静态断言里写了
+  `expect(body).toContain("some_placeholder() === undefined")` —— 一个恒假的
+  占位表达式。它不会红，因为它压根不是断言，只是「看起来在检查」。**写了就
+  立刻删掉，不要想着「以后替换」。**
+- **第二处伪判据**：双向验证时想用「系统浏览器是否回连 external.html」判断
+  `open_external` 是否被调用。但 webview 内导航过去时 external.html 也会打同一个
+  `/report` 端点，**两者无法区分** —— 于是「没拦住」和「拦住并外开」给出同样的
+  信号，判据恒真。
+- **正确的判据形状**：「拦截生效」时页面不会被卸载，所以 `after-external` 这条
+  report **会**出现（且 href 未变）；「拦截失效」时 index 页被卸载，那条
+  `setTimeout` 永远不执行，`after-external` **根本不会出现**。
+  所以**「缺失」才是走过去的证据**，不是「变成新地址」。第一版判据按「变成新地址」
+  写，注入故障后拿到 `(none)` 却判成「原因不相干」，差点把双向验证判成失败。
+- **教训**：`goto` 类导航的失败信号是**下游动作消失**，不是「值变成别的」。
+  设计探针时先问「如果这一步发生，我期望看到什么」和「如果没发生，什么会消失」，
+  两者的差集才是判据。
+- **证据**：`实测`。双向验证：基线 PASS → 注释掉 `install_nav_guard();` → FAIL
+  且 `after-external` 缺失 → 还原 → PASS 且 `bun test` 全绿。
+
 ---
 
 ## 三、原生边界

@@ -42,6 +42,24 @@ export const FLAG_ACCEPT_DROP = 32;
  * 与 `FLAG_CENTER` 同时给时以本项为准（最大化会覆盖位置）。
  */
 export const FLAG_START_MAXIMIZED = 64;
+/**
+ * 允许页面把顶层框架导航到任意 http/https 地址，即**放弃外部导航拦截**。
+ *
+ * 默认（不给本位）时，壳会拦下跨源导航并改交系统默认浏览器：桌面应用没有地址栏、
+ * 没有后退按钮，也没有宿主 API 能把页面拉回来，一次误点外链就等于应用被换成了那个
+ * 网站。这是默认值应该选安全一侧的典型场景。
+ *
+ * 什么时候需要本位：应用本身就是浏览器（多标签、内置地址栏、能自己导航回来）。
+ *
+ * 边界（两条，别指望它能关掉更多）：
+ *
+ * - **只影响顶层框架导航**。`window.open` / `target=_blank` 仍然被拦下并外开，
+ *   因为壳只支持一个顶层窗口（原生层是进程级单例），开出来的新窗口没有任何宿主
+ *   API 能管它。这是能力边界，不是安全策略。
+ * - **不放宽 scheme 白名单**。交给系统浏览器的只有 http/https；`file:`、
+ *   `javascript:`、`ms-*:` 以及自定义 scheme 一律静默取消，与本位无关。
+ */
+export const FLAG_ALLOW_EXTERNAL_NAV = 128;
 
 /**
  * 关闭 WebView2 的浏览器行为（`ShellOptions.browserUi` 使用）。
