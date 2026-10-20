@@ -40,6 +40,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
+import { isEntrypoint } from "../scripts/lib/entrypoint";
+
 // ---- 常量 -------------------------------------------------------------------
 
 const PKG_NAME = "Microsoft.Web.WebView2.1.0.1150.38.nupkg";
@@ -380,8 +382,9 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
     }
 }
 
-// 只有直接执行时才跑 main；被 tests/ 导入时不产生副作用
-if (import.meta.main) {
+// 只有直接执行时才跑 main；被 tests/ 导入时不产生副作用。
+// 判据不能只用 import.meta.main —— 见 scripts/lib/entrypoint.ts 里的实测记录。
+if (isEntrypoint(import.meta.main, import.meta.path)) {
     const root = resolve(import.meta.dir, "..");
     const code = await main(process.argv.slice(2), root);
     process.exitCode = code;

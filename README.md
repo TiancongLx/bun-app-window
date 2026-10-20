@@ -407,7 +407,7 @@ The underlying commands remain available directly:
 
 ```bash
 bun check          # Run TypeScript type checker
-bun test           # Run automated test suite (tests/, 171 test cases)
+bun test           # Run automated test suite (tests/, 182 test cases)
 bun run demo       # Launch interactive self-test demo (requires desktop session)
 ```
 

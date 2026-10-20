@@ -380,6 +380,25 @@
 - **验证**：写一个 40 行的逐字节扫描器，统计每个文件的 `CR LF` 相邻对；一次性验证脚本跑完后全仓应为 0。
 - **证据**：`实测`（2026-10-20，冒烟验证 `.ps1` 语法门禁时污染了 `scripts/install-hooks.ps1`，内容 diff 为空但 EOL 已变）。
 
+### 5.7 Git 的 `sh` 与 pwsh 是两个环境：`tar` 和 `import.meta.main` 都会变
+
+`pre-push` 钩子跑在 Git 自带的 `sh` 里，其 PATH 与 pwsh 不同。同一份脚本在 pwsh 里全绿、在钩子里红，是真实发生过的。
+
+**（a）`tar` 会解析成 GNU tar，把盘符当主机名**
+
+- **症状**：钩子里跑门禁，第三段报 `tar (child): Cannot connect to C: resolve failed`。
+- **原因**：`Bun.which("tar")` 在钩子环境里解析到 `C:\Program Files\Git\usr\bin\tar.exe`，那是 **GNU tar 1.35**；它把 `C:/...` 解析成 `host:path` 远程语法。pwsh 里同一行代码解析到 `C:\Windows\System32\tar.exe`（bsdtar），认盘符，所以本地一直绿。
+- **修法**：两层防护，缺一不可——(1) win32 下优先用 `%SystemRoot%\System32\tar.exe`；(2) 传**相对文件名 + `cwd`**，而不是绝对路径。只做第一条，换个环境仍可能解析错；只做第二条，其它带冒号的场景仍会翻车。
+- **证据**：`实测`（2026-10-20，首次在 `pre-push` 里跑新门禁时命中；`/usr/bin/tar --version` = GNU tar 1.35，对 `C:/...` 复现同一报错）。
+
+**（b）`bun run <path>` 可能让 `import.meta.main` 变成 false**
+
+- **症状**：`bun run scripts/gate.ts` 在 Git 的 `sh` 里（cwd 以大小写不同的形式进入）**无任何输出、退出码 0**——门禁什么都没跑却报成功。
+- **原因**：`bun run` 保留调用方 cwd 的字面大小写（`_repositories`），而 `import.meta.path` 是真实路径（`_Repositories`）；`import.meta.main` 因此为 `false`。入口被 `if (import.meta.main)` 挡掉。实测三种组合：pwsh 里 `bun run` → true；Git 的 `sh` 里 `bun run`（cwd 小写）→ false；Git 的 `sh` 里 `bun` 直跑 → true。
+- **修法**：入口判据改成「或」关系——`import.meta.main` 为真，**或者** `argv[1]` 与自身路径在规范化（解析 + 正斜杠 + 小写）后相等。见 `scripts/lib/entrypoint.ts` 的 `isEntrypoint()`。
+- **踩的第二层坑**：第一版把判定写成无参函数、在 helper 模块内部读 `import.meta.main` / `import.meta.path`。但 `import.meta` 是**模块作用域**的——在被 import 的模块里 `main` 恒为 `false`、`path` 恒指向 helper 自己。于是函数恒返回 `false`，把三个脚本的入口全挡掉，同样是静默退出 0。**守护逻辑自己成了故障源。** 结论：这类判定必须是纯函数、两个值都由调用方传入，并且必须被测试钉住（`tests/entrypoint.test.ts`）。
+- **证据**：`实测`（2026-10-20）。
+
 ---
 
 ## 六、已确认的运行时行为基线

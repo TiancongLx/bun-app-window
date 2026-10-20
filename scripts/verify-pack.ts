@@ -17,9 +17,12 @@
  * 退出码：0 = 全部通过，1 = 判据失败，2 = 环境问题（bun / tar 不可用等）。
  */
 
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+
+import { isEntrypoint } from "./lib/entrypoint";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const BUN = process.execPath;
@@ -94,9 +97,38 @@ function hintFor(path: string): string {
     return "新增发布文件需先在 ALLOW 表登记";
 }
 
-/** tar -tzf：列出归档内的普通文件（去掉包目录前缀与目录条目） */
-async function listTarball(tarExe: string, tgz: string): Promise<RunResult & { files: string[] }> {
-    const res = await run([tarExe, "-tzf", tgz], REPO_ROOT);
+/**
+ * 挑一个能读懂 Windows 路径的 tar。
+ *
+ * 优先 System32 的 bsdtar（Windows 10+ 自带），它把 `C:/...` 当本地路径。
+ * Git 自带 sh 的 PATH 里 `/usr/bin/tar` 是 MSYS 版，它会把 `C:/...` 解析成
+ * `host:path` 远程语法，报 `Cannot connect to C: resolve failed`——而
+ * `pre-push` 钩子恰好跑在那个环境里。本仓第一次真正在钩子里跑门禁时撞上
+ * （2026-10-20）：pwsh 里 `Bun.which("tar")` 解析到 bsdtar，所以本地一直
+ * 是绿的，只在钩子里红。
+ */
+function findTar(): string | null {
+    if (process.platform === "win32") {
+        const sysTar = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "tar.exe");
+        if (existsSync(sysTar)) {
+            return sysTar;
+        }
+    }
+    return Bun.which("tar");
+}
+
+/**
+ * tar -tzf：列出归档内的普通文件（去掉包目录前缀与目录条目）。
+ *
+ * 用 `cwd` + 纯文件名而不是绝对路径：即使被迫落到 MSYS tar 上，相对名里也
+ * 没有冒号，不会被误判成远程主机。两层防护，缺一不可——只靠找一个好 tar，
+ * 换个环境仍可能解析错。
+ */
+async function listTarball(
+    tarExe: string,
+    tgz: string,
+): Promise<RunResult & { files: string[] }> {
+    const res = await run([tarExe, "-tzf", basename(tgz)], dirname(tgz));
     const files = res.out
         .split(/\r?\n/)
         .map((line) => line.trim())
@@ -237,9 +269,9 @@ async function removeWorkspace(dir: string): Promise<void> {
 
 export async function main(argv: readonly string[]): Promise<number> {
     const keep = argv.includes("--keep");
-    const tarExe = Bun.which("tar");
+    const tarExe = findTar();
     if (!tarExe) {
-        fatal("tar not found on PATH (needed to inspect the tarball)");
+        fatal("tar not found (needed to inspect the tarball)");
     }
 
     const pkg = (await Bun.file(join(REPO_ROOT, "package.json")).json()) as {
@@ -384,7 +416,8 @@ export async function main(argv: readonly string[]): Promise<number> {
 // 不用 process.exit()：它立即终止进程，会跳过 main 的 finally，
 // 临时工程因此漏删（2026-10-20 实测：每次门禁在 %TEMP% 留一个 25 文件的目录）。
 // 只有直接执行时才跑；被 tests/ 导入时不产生副作用。
-if (import.meta.main) {
+// 判据不能只用 import.meta.main —— 见 scripts/lib/entrypoint.ts 里的实测记录。
+if (isEntrypoint(import.meta.main, import.meta.path)) {
     let exitCode: number;
     try {
         exitCode = await main(process.argv.slice(2));

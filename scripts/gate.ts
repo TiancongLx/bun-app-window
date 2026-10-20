@@ -60,6 +60,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
+import { isEntrypoint } from "./lib/entrypoint";
+
 // ---- 类型 -------------------------------------------------------------------
 
 export type RunResult = { code: number; out: string; err: string };
@@ -374,7 +376,10 @@ async function runTest(cwd: string): Promise<StageResult> {
 
 async function runPack(cwd: string): Promise<StageResult> {
     const started = performance.now();
-    const res = await spawn([BUN, "run", join(cwd, "scripts", "verify-pack.ts")], cwd);
+    // 直接 `bun <path>` 而不是 `bun run <path>`：`run` 子命令在某些 cwd 大小写
+    // 组合下会给出 import.meta.main=false（见 scripts/lib/entrypoint.ts），
+    // 虽然入口已加防护，但少绕一层更稳。
+    const res = await spawn([BUN, join(cwd, "scripts", "verify-pack.ts")], cwd);
     const ms = performance.now() - started;
     replay(res);
 
@@ -540,7 +545,8 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
     return 1;
 }
 
-// 只有直接执行时才跑；被 tests/ 导入时不产生副作用
-if (import.meta.main) {
+// 只有直接执行时才跑；被 tests/ 导入时不产生副作用。
+// 判据不能只用 import.meta.main —— 见 scripts/lib/entrypoint.ts 里的实测记录。
+if (isEntrypoint(import.meta.main, import.meta.path)) {
     process.exitCode = await main(process.argv.slice(2), resolve(import.meta.dir, ".."));
 }
