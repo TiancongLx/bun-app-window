@@ -834,7 +834,7 @@ void append_json_string(std::string &out, const std::wstring &w) {
 
 // 拖放：把落进来的路径推给页面。
 //
-// 注意提权场景：本进程若是 High 完整性（例如由 OTT 派生），资源管理器（Medium）
+// 注意提权场景：本进程若是 High 完整性，资源管理器（Medium）
 // 发来的 WM_DROPFILES 会被 UIPI 拦掉。所以窗口建好后要显式放行这三条消息，
 // 否则「拖进来没反应」且完全没有错误提示。
 void enable_drop(HWND hwnd) {

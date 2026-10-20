@@ -1,5 +1,5 @@
 #Requires -Version 7.0
-param([string]$Out = 'C:\Users\root\_Projects\bunframe\build\window.png')
+param([string]$Out = (Join-Path $PSScriptRoot '..\build\window.png'))
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 

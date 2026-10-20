@@ -13,7 +13,7 @@ import { resolve } from "node:path";
  *     必须设 put_DefaultBackgroundColor。
  *  3) 首帧是半成品：显示时机要由页面 rAF 信号决定，不是固定延时。
  *
- * 第 3 条在 it-is-go-time 侧（page.ts 的 /api/ready），这里管住原生侧两条。
+ * 第 3 条在页面侧（rAF 之后 POST 一个 ready 信号），这里管住原生侧两条。
  */
 const SHELL_CC = await Bun.file(resolve(import.meta.dir, "../native/shell.cc")).text();
 

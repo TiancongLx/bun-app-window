@@ -33,7 +33,7 @@
 
 - **症状**：`webview_create` 返回 `nullptr`，错误信息看似「WebView2 运行时缺失」。逐层排查会发现注册表查找、`EmbeddedBrowserWebView.dll` 加载、environment 创建全部成功，只有 `CreateCoreWebView2Controller` 失败，返回 `0x80070578`（`ERROR_INVALID_WINDOW_HANDLE`）。
 - **原因**：终端工具调用运行在 Session 0（services 会话），那里没有交互式桌面。WebView2 的浏览器进程无法附着到非交互会话的窗口，只能以「无效窗口句柄」报错。
-- **修法**：使承载工具调用的进程本身位于 Session 1。2026-10-18 起 OTT 已迁为登录任务（OTT 仓 DECISIONS 37），`run_command` 子进程即 `SessionId=1`，无需任何跨会话派发；`session1-agent` 旁路已退役。若工具宿主退回服务形态，本条会复现。
+- **修法**：使承载窗口创建的进程位于 Session 1（交互式登录会话）。若工具宿主以服务形态运行，需要一条把命令派发到 Session 1 的旁路；本项目调试环境让宿主进程直接运行在登录会话中，`run_command` 子进程即为 `SessionId=1`，无需跨会话派发。若工具宿主退回服务形态，本条会复现。
 - **更正（2026-10-18 实测）**：本条曾记录「提权宿主不能创建 WebView2」，实测不成立——`dist/bunframe.exe` 由 High 进程直接启动时 `webview_create` 成功，九点命中与最大化/还原几何全部通过；降权到 Medium 亦通过。文档原文是「cannot be run as a system user」（SYSTEM/服务会话），Session 0 的失败是会话问题。仍待验证的一点：`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 等 `WEBVIEW2_*` 环境变量在提权宿主下是否被忽略（本项目的浏览器参数由代码内 environment options 传入，未走环境变量，故未受影响）。
 - **证据**：`实测`。`query.exe session` 显示当前 shell 为 `services`/Session 0，`explorer.exe` 在 Session 1。
 
@@ -115,8 +115,8 @@
     否则首帧会按浅色算变量（深色面板里冒出白底按钮）。
 - **证据**：`实测`。逐帧 `PrintWindow` 采样（不要用 `CopyFromScreen`，本机 z 序被锁、
   截图会被遮挡窗口覆盖）：修复前首帧 `mean=236`；修复后从第一帧起稳定 `mean=39`。
-- **回归守护**：`tests/first-paint.test.ts`（原生侧三条顺序约束）与
-  `it-is-go-time` 的 `src/gui/page.test.ts`（`data-theme` 必须在 head 内、且在 `<style>` 之前）。
+- **回归守护**：`tests/first-paint.test.ts`（原生侧三条顺序约束）；页面侧的
+  `data-theme` 必须在 `<head>` 内、且在 `<style>` 之前——这条同样值得一个断言。
 
 ### 2.4d `wsprintfA` 没有 `%f`：浮点参数会静默变成空串
 
