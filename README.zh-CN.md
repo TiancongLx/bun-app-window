@@ -405,7 +405,7 @@ bun run scripts/gate.ts --clean      # 同上，但在 HEAD 的干净副本里�
 
 ```bash
 bun check          # 执行 TypeScript 类型检查
-bun test           # 运行自动化测试套件（位于 tests/，共 122 个用例）
+bun test           # 运行自动化测试套件（位于 tests/，共 171 个用例）
 bun run demo       # 启动交互式自检示例程序（需在桌面会话下运行）
 ```
 

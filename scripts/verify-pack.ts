@@ -23,7 +23,6 @@ import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const BUN = process.execPath;
-const KEEP = process.argv.slice(2).includes("--keep");
 
 /** 发布面白名单：默认拒绝，未登记的文件一律失败 */
 const ALLOW: ReadonlyArray<readonly [RegExp, string]> = [
@@ -68,7 +67,11 @@ const NOISE_HINTS: ReadonlyArray<readonly [RegExp, string]> = [
     [/^(AGENTS\.md|\.internal\/|docs\/)/, "本地上下文不进版本控制，更不能进发布面"],
 ];
 
-type Check = { name: string; ok: boolean; detail: string };
+/** 发布面白名单与必需清单对外暴露，供 tests/verify-pack.test.ts 直接断言 */
+export const PUBLISH_ALLOW = ALLOW;
+export const PUBLISH_REQUIRED = REQUIRED;
+
+export type Check = { name: string; ok: boolean; detail: string };
 
 type RunResult = { code: number; out: string; err: string };
 
@@ -103,7 +106,14 @@ async function listTarball(tarExe: string, tgz: string): Promise<RunResult & { f
     return { ...res, files };
 }
 
-function checkPayload(files: readonly string[], declaredFiles: readonly string[]): Check[] {
+/**
+ * 内容白名单比对。默认拒绝——没在 `ALLOW` 表登记的文件被打进包即判失败。
+ *
+ * 这是有意留下的摩擦：「加文件」必须是一次显式决定。导出供
+ * `tests/verify-pack.test.ts` 覆盖，因为这条判据守的是发布面边界，
+ * 而它自己此前没有任何测试。
+ */
+export function checkPayload(files: readonly string[], declaredFiles: readonly string[]): Check[] {
     const checks: Check[] = [];
     const present = new Set(files);
 
@@ -225,7 +235,8 @@ async function removeWorkspace(dir: string): Promise<void> {
     }
 }
 
-async function main(): Promise<number> {
+export async function main(argv: readonly string[]): Promise<number> {
+    const keep = argv.includes("--keep");
     const tarExe = Bun.which("tar");
     if (!tarExe) {
         fatal("tar not found on PATH (needed to inspect the tarball)");
@@ -360,8 +371,8 @@ async function main(): Promise<number> {
         console.log(`VERIFY-PACK PASSED (${checks.length} checks)`);
         return 0;
     } finally {
-        // 只有 KEEP 才保留；否则无论成功失败还是 fatal，都要清掉
-        if (KEEP) {
+        // 只有 --keep 才保留；否则无论成功失败还是 fatal，都要清掉
+        if (keep) {
             console.log("");
             console.log(`workspace kept at: ${workspace}`);
         } else {
@@ -372,17 +383,20 @@ async function main(): Promise<number> {
 
 // 不用 process.exit()：它立即终止进程，会跳过 main 的 finally，
 // 临时工程因此漏删（2026-10-20 实测：每次门禁在 %TEMP% 留一个 25 文件的目录）。
-let exitCode: number;
-try {
-    exitCode = await main();
-} catch (err) {
-    if (err instanceof Fatal) {
-        console.error(`verify-pack: ${err.message}`);
-    } else {
-        console.error(
-            `verify-pack: unexpected error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-        );
+// 只有直接执行时才跑；被 tests/ 导入时不产生副作用。
+if (import.meta.main) {
+    let exitCode: number;
+    try {
+        exitCode = await main(process.argv.slice(2));
+    } catch (err) {
+        if (err instanceof Fatal) {
+            console.error(`verify-pack: ${err.message}`);
+        } else {
+            console.error(
+                `verify-pack: unexpected error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+            );
+        }
+        exitCode = 2;
     }
-    exitCode = 2;
+    process.exitCode = exitCode;
 }
-process.exitCode = exitCode;

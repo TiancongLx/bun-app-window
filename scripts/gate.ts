@@ -6,15 +6,20 @@
  * Windows x64 单平台、单人开发、零外部服务依赖，远端 CI 的边际价值低于维护成本。
  * 门禁在本地执行。
  *
- * 三段：
+ * 四个阶段：
  *
- *     bun check                    类型检查
- *     bun test                     行为测试
+ *     bun check                        类型检查
+ *     .ps1 syntax                      剩余 PowerShell 脚本的语法校验
+ *     bun test                         行为测试
  *     bun run scripts/verify-pack.ts   消费方验收（打包 → 白名单 → 装临时工程 → 类型 + 运行时）
  *
- * 第三段补的是仓库内 `bun test` 看不见的那一层：`bun test` 走「源码 + 本地 dist」，
+ * 第 3 段补的是仓库内 `bun test` 看不见的那一层：`bun test` 走「源码 + 本地 dist」，
  * 而「作为 tarball 被第三方安装」这条链路整段缺席。`exports` 拼错、`files` 漏项、
  * 类型声明缺位，这三种故障在仓库内全绿，装起来就炸。
+ *
+ * 第 2 段是迁移期的临时护栏：仓库里还剩 14 个依赖 Win32 API 的 `.ps1`，它们没有
+ * 类型检查也没有测试（ADR 0012）。语法级校验挡不住语义错误，但比零覆盖强。
+ * 等这些脚本全部迁走或明确留用，这一段就可以删掉。
  *
  * `--clean` 在 %TEMP% 里 clone 一份干净副本再跑，消除 `.build/` / `node_modules/` /
  * `vendor/webview2/` 等本地残留掩盖问题的可能；未提交改动会被提示并排除在外。
@@ -25,14 +30,13 @@
  *     `exited` 是每次调用绑定的值，不存在时序歧义
  *   - PowerShell 函数的所有输出都会进入返回值管道，写出「失败却报 GATE PASSED」
  *     那种 bug 的成本极低（docs/pitfalls.md 5.3 实录）；TS 没有这个语义陷阱
- *   - 本文件受 `bun check` 覆盖。此前的 gate.ps1 连类型都没有，唯一的静态判据
- *     是 `[Parser]::ParseFile`，而它本身还要在 pwsh 里跑
+ *   - 本文件受 `bun check` 覆盖，且自身的判定逻辑由 `tests/gate.test.ts` 覆盖
  *
  * 用法：
  *
- *     bun run scripts/gate.ts                 三段全跑
+ *     bun run scripts/gate.ts                 全部阶段
  *     bun run scripts/gate.ts --clean         在 HEAD 的干净副本里跑
- *     bun run scripts/gate.ts --skip-pack     跳过第三段（只在改门禁自身时用）
+ *     bun run scripts/gate.ts --skip-pack     跳过消费方验收（只在改门禁自身时用）
  *     bun run scripts/gate.ts --keep-clone    与 --clean 同用，保留副本供排查
  *
  * 退出码：0 = 全部通过，1 = 门禁失败，2 = 环境问题。
@@ -45,6 +49,10 @@
  * 的运行环境。package.json 里不放 gate 脚本（AGENTS.md 限定 scripts 只能有
  * build:native / build:exe / demo / pack 四项），所以入口固定为
  * `bun run scripts/gate.ts`。
+ *
+ * 结构说明：纯函数（参数归一化、摘要解析、阶段编排、汇总格式）全部导出，
+ * 执行部分通过 `GateDeps` 注入。这样 `tests/gate.test.ts` 能不启动子进程就
+ * 覆盖判定逻辑——门禁是所有质量保证的入口，它自己最不该没有测试。
  */
 
 import { rm } from "node:fs/promises";
@@ -52,13 +60,53 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-const REPO_ROOT = resolve(import.meta.dir, "..");
-const BUN = process.execPath;
+// ---- 类型 -------------------------------------------------------------------
 
-// ---- 参数 -------------------------------------------------------------------
+export type RunResult = { code: number; out: string; err: string };
 
-/** `-SkipPack` / `-skip-pack` / `--skip-pack` 归一为 `--skip-pack` */
-function normalizeArg(arg: string): string {
+export type Stage = "check" | "ps1" | "test" | "pack";
+
+export type StageResult = {
+    stage: Stage;
+    ok: boolean;
+    rc: number;
+    ms: number;
+    detail: string;
+};
+
+export type GateOptions = {
+    clean: boolean;
+    keepClone: boolean;
+    skipTest: boolean;
+    skipPack: boolean;
+};
+
+export type GateIO = {
+    step(text: string): void;
+    log(line: string): void;
+    warn(line: string): void;
+};
+
+/** 阶段执行器。测试注入假实现来验证短路，不必真的起四个子进程 */
+export type StageRunner = Record<Stage, (cwd: string) => Promise<StageResult>>;
+
+export type GateDeps = {
+    io: GateIO;
+    runner: StageRunner;
+    hasPackageJson(dir: string): Promise<boolean>;
+};
+
+export const LABELS: Record<Stage, string> = {
+    check: "bun check",
+    ps1: ".ps1 syntax",
+    test: "bun test",
+    pack: "pack verification",
+};
+
+// ---- 纯函数 -----------------------------------------------------------------
+
+/** `-SkipPack` / `--skip-pack` / `-skipPack` 归一为 `--skip-pack` */
+export function normalizeArg(arg: string): string {
     const m = /^-{1,2}([A-Za-z][\w-]*)$/.exec(arg);
     if (!m?.[1]) {
         return arg;
@@ -67,56 +115,161 @@ function normalizeArg(arg: string): string {
     return `--${kebab}`;
 }
 
-const parsed = parseArgs({
-    args: process.argv.slice(2).map(normalizeArg),
-    options: {
-        clean: { type: "boolean", default: false },
-        "keep-clone": { type: "boolean", default: false },
-        "skip-test": { type: "boolean", default: false },
-        "skip-pack": { type: "boolean", default: false },
-        help: { type: "boolean", default: false },
-    },
-    allowPositionals: false,
-    strict: true,
-});
-
-const CLEAN = parsed.values.clean;
-const KEEP_CLONE = parsed.values["keep-clone"];
-const SKIP_TEST = parsed.values["skip-test"];
-const SKIP_PACK = parsed.values["skip-pack"];
-
-if (parsed.values.help) {
-    console.log(`bun run scripts/gate.ts [options]
-
-  --clean        在 HEAD 的干净副本里跑（消除本地产物掩盖问题的可能）
-  --keep-clone   与 --clean 同用，保留副本供排查
-  --skip-test    只跑类型检查，跳过行为测试与消费方验收
-  --skip-pack    跳过消费方验收（只在改门禁自身时用）
-  -h, --help     显示本帮助`);
-    process.exitCode = 0;
-    process.exit(0);
+export function parseGateArgs(argv: readonly string[]): GateOptions & { help: boolean } {
+    const parsed = parseArgs({
+        args: argv.map(normalizeArg),
+        options: {
+            clean: { type: "boolean", default: false },
+            "keep-clone": { type: "boolean", default: false },
+            "skip-test": { type: "boolean", default: false },
+            "skip-pack": { type: "boolean", default: false },
+            help: { type: "boolean", default: false },
+        },
+        allowPositionals: false,
+        strict: true,
+    });
+    return {
+        clean: parsed.values.clean === true,
+        keepClone: parsed.values["keep-clone"] === true,
+        skipTest: parsed.values["skip-test"] === true,
+        skipPack: parsed.values["skip-pack"] === true,
+        help: parsed.values.help === true,
+    };
 }
 
-// ---- 工具 -------------------------------------------------------------------
-
-function writeStep(text: string): void {
-    console.log("");
-    console.log(`=== ${text} ===`);
+/**
+ * `bun check` 的摘要措辞有两种，成功与失败不同；都写在 stderr（stdout 是空的）。
+ * 取文件数是为了挡住「tsconfig 的 include 写歪了所以检查了 0 个文件」这种满分答卷。
+ */
+export function checkedFileCount(res: RunResult): number {
+    const combined = `${res.out}\n${res.err}`;
+    const m =
+        /No type errors in (\d+)\s+files?/i.exec(combined) ??
+        /checked\s+(\d+)\s+files?/i.exec(combined);
+    return m?.[1] ? Number(m[1]) : 0;
 }
 
-type RunResult = { code: number; out: string; err: string };
-
-async function run(argv: readonly string[], cwd: string): Promise<RunResult> {
-    const proc = Bun.spawn([...argv], { cwd, stdout: "pipe", stderr: "pipe" });
-    const [out, err] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-    ]);
-    const code = await proc.exited;
-    return { code, out, err };
+/** 从 `bun test` 的输出里取通过/失败计数；取不到返回 null */
+export function parseTestCounts(res: RunResult): { pass: number; fail: number } | null {
+    const combined = `${res.out}\n${res.err}`;
+    const pass = /(\d+)\s+pass/m.exec(combined);
+    if (!pass?.[1]) {
+        return null;
+    }
+    const fail = /(\d+)\s+fail/m.exec(combined);
+    return { pass: Number(pass[1]), fail: fail?.[1] ? Number(fail[1]) : 0 };
 }
 
-/** 原样回放子进程输出。`bun check` 的错误走 stdout、摘要走 stderr，两者都要 */
+/** 从 verify-pack 的输出里取最后一行结论；取不到返回空串 */
+export function parsePackSummary(res: RunResult): string {
+    return (
+        `${res.out}`
+            .split(/\r?\n|\r/)
+            .map((l) => l.trim())
+            .filter((l) => l.startsWith("VERIFY-PACK") || l.startsWith("verify-pack:"))
+            .pop() ?? ""
+    );
+}
+
+/** 从 .ps1 语法检查的输出里取结论行 */
+export function parsePs1Summary(res: RunResult): string {
+    return (
+        `${res.out}`
+            .split(/\r?\n|\r/)
+            .map((l) => l.trim())
+            .filter((l) => l.startsWith("PS1 SYNTAX"))
+            .pop() ?? ""
+    );
+}
+
+/**
+ * 该跑哪些阶段。
+ *
+ * `--skip-test` 连带跳过消费方验收——它与 `bun test` 同属「行为层」，
+ * 单独留下的价值很低，且原版就是这个语义，不在这里改。
+ */
+export function planStages(opts: GateOptions): Stage[] {
+    const stages: Stage[] = ["check", "ps1"];
+    if (!opts.skipTest) {
+        stages.push("test");
+        if (!opts.skipPack) {
+            stages.push("pack");
+        }
+    }
+    return stages;
+}
+
+/** 单个阶段的一行结论 */
+export function formatStage(r: StageResult): string {
+    const seconds = (r.ms / 1000).toFixed(1);
+    const tail = r.detail ? ` — ${r.detail}` : "";
+    return r.ok
+        ? `${LABELS[r.stage]} ok (${seconds}s)${tail}`
+        : `${LABELS[r.stage]} FAILED (rc=${r.rc}, ${seconds}s)${tail}`;
+}
+
+/** 汇总表。返回行数组而不是直接打印，便于断言 */
+export function summarize(results: readonly StageResult[]): string[] {
+    const width = Math.max(...Object.values(LABELS).map((l) => l.length));
+    const lines: string[] = ["", "--- summary ---"];
+    for (const r of results) {
+        const mark = r.ok ? "ok  " : "FAIL";
+        const tail = r.detail ? `  ${r.detail}` : "";
+        lines.push(`  ${mark} ${LABELS[r.stage].padEnd(width)} ${(r.ms / 1000).toFixed(2)}s${tail}`);
+    }
+    const total = results.reduce((sum, r) => sum + r.ms, 0);
+    lines.push(`  total ${(total / 1000).toFixed(2)}s`);
+    return lines;
+}
+
+// ---- 门禁主体 ---------------------------------------------------------------
+
+/**
+ * 按 `planStages` 的顺序跑，任一阶段失败立即短路。
+ *
+ * 短路不是优化，是语义：类型都过不了就没必要跑消费方验收，否则日志会被
+ * 后续阶段的失败淹没，人只会看最后一行。
+ */
+export async function runGate(
+    workDir: string,
+    opts: GateOptions,
+    deps: GateDeps,
+): Promise<boolean> {
+    if (!(await deps.hasPackageJson(workDir))) {
+        deps.io.warn(`not a package root: ${workDir}`);
+        return false;
+    }
+
+    const results: StageResult[] = [];
+
+    for (const stage of planStages(opts)) {
+        deps.io.step(LABELS[stage]);
+        const result = await deps.runner[stage](workDir);
+        results.push(result);
+        deps.io.log(formatStage(result));
+        if (!result.ok) {
+            for (const line of summarize(results)) {
+                deps.io.log(line);
+            }
+            return false;
+        }
+    }
+
+    // 被跳过的阶段要留痕，否则「门禁通过」这句话的覆盖面是模糊的
+    if (opts.skipTest) {
+        deps.io.log("bun test skipped (--skip-test)");
+    } else if (opts.skipPack) {
+        deps.io.log("pack verification skipped (--skip-pack)");
+    }
+
+    for (const line of summarize(results)) {
+        deps.io.log(line);
+    }
+    return true;
+}
+
+// ---- 真实执行器 -------------------------------------------------------------
+
 function replay(res: RunResult): void {
     if (res.out) {
         process.stdout.write(res.out.endsWith("\n") ? res.out : `${res.out}\n`);
@@ -126,31 +279,21 @@ function replay(res: RunResult): void {
     }
 }
 
-type Stage = "check" | "test" | "pack";
-
-type StageResult = { stage: Stage; ok: boolean; rc: number; ms: number; detail: string };
-
-const LABELS: Record<Stage, string> = {
-    check: "bun check",
-    test: "bun test",
-    pack: "pack verification",
-};
-
-/**
- * `bun check` 的摘要措辞有两种，成功与失败不同；都写在 stderr。
- * 取文件数是为了挡住「tsconfig 的 include 写歪了所以检查了 0 个文件」这种满分答卷。
- */
-function checkedFileCount(res: RunResult): number {
-    const combined = `${res.out}\n${res.err}`;
-    const m = /No type errors in (\d+)\s+files?/i.exec(combined) ?? /checked\s+(\d+)\s+files?/i.exec(combined);
-    return m?.[1] ? Number(m[1]) : 0;
+async function spawn(argv: readonly string[], cwd: string): Promise<RunResult> {
+    const proc = Bun.spawn([...argv], { cwd, stdout: "pipe", stderr: "pipe" });
+    const [out, err] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+    ]);
+    const code = await proc.exited;
+    return { code, out, err };
 }
 
-// ---- 单个阶段 ---------------------------------------------------------------
+const BUN = process.execPath;
 
 async function runCheck(cwd: string): Promise<StageResult> {
     const started = performance.now();
-    const res = await run([BUN, "check"], cwd);
+    const res = await spawn([BUN, "check"], cwd);
     const ms = performance.now() - started;
     replay(res);
 
@@ -172,103 +315,98 @@ async function runCheck(cwd: string): Promise<StageResult> {
     return { stage: "check", ok: true, rc: res.code, ms, detail: `${files} files` };
 }
 
-async function runTest(cwd: string): Promise<StageResult> {
+/**
+ * 剩余 `.ps1` 的语法校验。
+ *
+ * 依赖 pwsh 存在：本仓开发环境本来就需要它（`install-hooks.ps1`、`build.ps1` 还没迁），
+ * 但门禁不该因为缺一个可选的检查工具而整体失败——缺 pwsh 时判为跳过并说明。
+ * 一旦这些脚本全部迁走，这一段就该删掉，而不是留着当永久负担。
+ */
+async function runPs1Syntax(cwd: string): Promise<StageResult> {
     const started = performance.now();
-    const res = await run([BUN, "test"], cwd);
+    const pwsh = Bun.which("pwsh");
+    if (!pwsh) {
+        const ms = performance.now() - started;
+        return { stage: "ps1", ok: true, rc: 0, ms, detail: "pwsh not found — skipped" };
+    }
+
+    // 路径里的单引号在 PowerShell 单引号字符串里要成对转义
+    const rootLiteral = cwd.replace(/'/g, "''");
+    const script = `
+$ErrorActionPreference = 'Stop'
+$files = @(Get-ChildItem -LiteralPath '${rootLiteral}' -Filter *.ps1 -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '[\\\\/](node_modules|vendor)[\\\\/]' })
+$bad = @()
+foreach ($f in $files) {
+    $err = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$err)
+    foreach ($e in $err) {
+        $bad += ('{0}:{1}: {2}' -f $f.FullName, $e.Extent.StartLineNumber, $e.Message)
+    }
+}
+if ($files.Count -eq 0) { Write-Output 'PS1 SYNTAX OK (0 files)'; exit 0 }
+if ($bad.Count -gt 0) {
+    $bad | ForEach-Object { Write-Output $_ }
+    Write-Output ('PS1 SYNTAX FAILED ({0} errors in {1} files)' -f $bad.Count, $files.Count)
+    exit 1
+}
+Write-Output ('PS1 SYNTAX OK ({0} files)' -f $files.Count)
+`;
+
+    const res = await spawn([pwsh, "-NoProfile", "-NonInteractive", "-Command", script], cwd);
     const ms = performance.now() - started;
     replay(res);
 
-    const combined = `${res.out}\n${res.err}`;
-    const m = /(\d+)\s+pass/m.exec(combined);
-    const fail = /(\d+)\s+fail/m.exec(combined);
-    const detail = m?.[1] ? `${m[1]} pass / ${fail?.[1] ?? "?"} fail` : "";
+    const detail = parsePs1Summary(res);
+    return { stage: "ps1", ok: res.code === 0, rc: res.code, ms, detail };
+}
 
+async function runTest(cwd: string): Promise<StageResult> {
+    const started = performance.now();
+    const res = await spawn([BUN, "test"], cwd);
+    const ms = performance.now() - started;
+    replay(res);
+
+    const counts = parseTestCounts(res);
+    const detail = counts ? `${counts.pass} pass / ${counts.fail} fail` : "";
     return { stage: "test", ok: res.code === 0, rc: res.code, ms, detail };
 }
 
 async function runPack(cwd: string): Promise<StageResult> {
     const started = performance.now();
-    const res = await run([BUN, "run", join(cwd, "scripts", "verify-pack.ts")], cwd);
+    const res = await spawn([BUN, "run", join(cwd, "scripts", "verify-pack.ts")], cwd);
     const ms = performance.now() - started;
     replay(res);
 
-    const line =
-        `${res.out}`
-            .split(/\r?\n|\r/)
-            .map((l) => l.trim())
-            .filter((l) => l.startsWith("VERIFY-PACK") || l.startsWith("verify-pack:"))
-            .pop() ?? "";
-
-    return { stage: "pack", ok: res.code === 0, rc: res.code, ms, detail: line };
+    return { stage: "pack", ok: res.code === 0, rc: res.code, ms, detail: parsePackSummary(res) };
 }
 
-// ---- 门禁主体 ---------------------------------------------------------------
+const REAL_RUNNER: StageRunner = {
+    check: runCheck,
+    ps1: runPs1Syntax,
+    test: runTest,
+    pack: runPack,
+};
 
-/** 在指定工作目录跑全部阶段。返回是否全部通过 */
-async function runGate(workDir: string): Promise<boolean> {
-    if (!(await Bun.file(join(workDir, "package.json")).exists())) {
-        console.error(`not a package root: ${workDir}`);
-        return false;
-    }
+const CONSOLE_IO: GateIO = {
+    step(text) {
+        console.log("");
+        console.log(`=== ${text} ===`);
+    },
+    log(line) {
+        console.log(line);
+    },
+    warn(line) {
+        console.error(line);
+    },
+};
 
-    const results: StageResult[] = [];
-
-    writeStep(LABELS.check);
-    const check = await runCheck(workDir);
-    results.push(check);
-    reportStage(check);
-    if (!check.ok) {
-        return summarize(results, false);
-    }
-
-    if (!SKIP_TEST) {
-        writeStep(LABELS.test);
-        const test = await runTest(workDir);
-        results.push(test);
-        reportStage(test);
-        if (!test.ok) {
-            return summarize(results, false);
-        }
-    } else {
-        console.log("bun test skipped (--skip-test)");
-    }
-
-    if (!SKIP_TEST && !SKIP_PACK) {
-        writeStep(LABELS.pack);
-        const pack = await runPack(workDir);
-        results.push(pack);
-        reportStage(pack);
-        if (!pack.ok) {
-            return summarize(results, false);
-        }
-    } else if (SKIP_PACK) {
-        console.log("pack verification skipped (--skip-pack)");
-    }
-
-    return summarize(results, true);
-}
-
-function reportStage(r: StageResult): void {
-    const seconds = (r.ms / 1000).toFixed(1);
-    const tail = r.detail ? ` — ${r.detail}` : "";
-    if (r.ok) {
-        console.log(`${LABELS[r.stage]} ok (${seconds}s)${tail}`);
-    } else {
-        console.log(`${LABELS[r.stage]} FAILED (rc=${r.rc}, ${seconds}s)${tail}`);
-    }
-}
-
-function summarize(results: readonly StageResult[], ok: boolean): boolean {
-    console.log("");
-    console.log("--- summary ---");
-    for (const r of results) {
-        const mark = r.ok ? "ok  " : "FAIL";
-        const tail = r.detail ? `  ${r.detail}` : "";
-        console.log(`  ${mark} ${LABELS[r.stage].padEnd(18)} ${(r.ms / 1000).toFixed(2)}s${tail}`);
-    }
-    const total = results.reduce((sum, r) => sum + r.ms, 0);
-    console.log(`  total ${(total / 1000).toFixed(2)}s`);
-    return ok;
+function realDeps(): GateDeps {
+    return {
+        io: CONSOLE_IO,
+        runner: REAL_RUNNER,
+        hasPackageJson: async (dir) => Bun.file(join(dir, "package.json")).exists(),
+    };
 }
 
 // ---- 干净副本模式 -----------------------------------------------------------
@@ -278,32 +416,33 @@ function summarize(results: readonly StageResult[], ok: boolean): boolean {
  * 而门禁看起来一直是绿的。maxRetries 是给 Windows 的：刚退出的子进程可能
  * 还短暂持着句柄。
  */
-async function removeClone(dir: string): Promise<void> {
+async function removeClone(dir: string, io: GateIO): Promise<void> {
     try {
         await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-        console.log("clean clone removed");
+        io.log("clean clone removed");
     } catch (err) {
-        console.warn("");
-        console.warn(`warning: could not remove clean clone: ${dir}`);
-        console.warn(`         ${err instanceof Error ? err.message : String(err)}`);
-        console.warn("         remove it by hand");
+        io.warn("");
+        io.warn(`warning: could not remove clean clone: ${dir}`);
+        io.warn(`         ${err instanceof Error ? err.message : String(err)}`);
+        io.warn("         remove it by hand");
     }
 }
 
-async function gateClean(): Promise<boolean> {
-    const status = await run(["git", "status", "--porcelain"], REPO_ROOT);
-    const head = await run(["git", "rev-parse", "--short", "HEAD"], REPO_ROOT);
+export async function gateClean(root: string, opts: GateOptions, deps: GateDeps): Promise<boolean> {
+    const io = deps.io;
+    const status = await spawn(["git", "status", "--porcelain"], root);
+    const head = await spawn(["git", "rev-parse", "--short", "HEAD"], root);
     const headSha = head.out.trim() || "unknown";
 
     const dirty = status.out.split(/\r?\n|\r/).filter((line) => line.trim().length > 0);
     if (dirty.length > 0) {
-        console.log("");
-        console.log("WARNING: working tree has uncommitted changes.");
-        console.log("         --clean clones HEAD only; those changes are NOT included.");
+        io.log("");
+        io.log("WARNING: working tree has uncommitted changes.");
+        io.log("         --clean clones HEAD only; those changes are NOT included.");
         for (const line of dirty) {
-            console.log(`         ${line}`);
+            io.log(`         ${line}`);
         }
-        console.log("         Run without --clean to verify the working tree as-is.");
+        io.log("         Run without --clean to verify the working tree as-is.");
     }
 
     // 只留数字：toISOString() 是 2026-10-20T14:25:07.123Z，去掉 -:T 后仍剩小数点，
@@ -312,66 +451,96 @@ async function gateClean(): Promise<boolean> {
     const probe = join(tmpdir(), `baw-gate-${stamp}`);
     const totalStart = performance.now();
 
-    writeStep(`clean clone HEAD(${headSha}) -> ${probe}`);
+    io.step(`clean clone HEAD(${headSha}) -> ${probe}`);
 
     // file:// 前缀：本地路径直接 clone 时 git 会忽略 --depth 并告警
-    const srcUrl = `file:///${REPO_ROOT.replace(/\\/g, "/")}`;
-    const clone = await run(["git", "clone", "--quiet", "--depth", "1", srcUrl, probe], REPO_ROOT);
+    const srcUrl = `file:///${root.replace(/\\/g, "/")}`;
+    const clone = await spawn(["git", "clone", "--quiet", "--depth", "1", srcUrl, probe], root);
     if (clone.code !== 0) {
-        console.error(`git clone failed (rc=${clone.code})`);
+        io.warn(`git clone failed (rc=${clone.code})`);
         replay(clone);
         return false;
     }
 
     try {
-        writeStep("bun install --frozen-lockfile");
-        const install = await run([BUN, "install", "--frozen-lockfile"], probe);
+        io.step("bun install --frozen-lockfile");
+        const install = await spawn([BUN, "install", "--frozen-lockfile"], probe);
         replay(install);
         if (install.code !== 0) {
-            console.error(`bun install failed (rc=${install.code})`);
+            io.warn(`bun install failed (rc=${install.code})`);
             return false;
         }
 
-        const ok = await runGate(probe);
+        const ok = await runGate(probe, opts, deps);
         const elapsed = ((performance.now() - totalStart) / 1000).toFixed(1);
-        console.log("");
-        console.log(`total (clean): ${elapsed}s`);
+        io.log("");
+        io.log(`total (clean): ${elapsed}s`);
         return ok;
     } finally {
-        if (KEEP_CLONE) {
-            console.log("");
-            console.log(`clone kept at: ${probe}`);
+        if (opts.keepClone) {
+            io.log("");
+            io.log(`clone kept at: ${probe}`);
         } else {
-            await removeClone(probe);
+            await removeClone(probe, io);
         }
     }
 }
 
 // ---- 入口 -------------------------------------------------------------------
 
-// 不用 process.exit() 表达结果：它立即终止进程，会跳过 gateClean 的 finally，
-// 临时副本因此漏删（scripts/verify-pack.ts 踩过同一个坑，2026-10-20 实测）。
-let ok: boolean;
-let envProblem = false;
-try {
-    ok = CLEAN ? await gateClean() : await runGate(REPO_ROOT);
-} catch (err) {
-    console.error("");
-    console.error(
-        `gate: unexpected error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-    );
-    ok = false;
-    envProblem = true;
+/** 跑完整个门禁并设置退出码。返回退出码，便于测试 */
+export async function main(argv: readonly string[], root: string): Promise<number> {
+    const parsed = parseGateArgs(argv);
+
+    if (parsed.help) {
+        console.log(`bun run scripts/gate.ts [options]
+
+  --clean        在 HEAD 的干净副本里跑（消除本地产物掩盖问题的可能）
+  --keep-clone   与 --clean 同用，保留副本供排查
+  --skip-test    只跑类型检查与 .ps1 语法，跳过行为测试与消费方验收
+  --skip-pack    跳过消费方验收（只在改门禁自身时用）
+  -h, --help     显示本帮助`);
+        return 0;
+    }
+
+    const opts: GateOptions = {
+        clean: parsed.clean,
+        keepClone: parsed.keepClone,
+        skipTest: parsed.skipTest,
+        skipPack: parsed.skipPack,
+    };
+    const deps = realDeps();
+
+    // 不用 process.exit() 表达结果：它立即终止进程，会跳过 gateClean 的 finally，
+    // 临时副本因此漏删（scripts/verify-pack.ts 踩过同一个坑，2026-10-20 实测）。
+    let ok: boolean;
+    let envProblem = false;
+    try {
+        ok = opts.clean ? await gateClean(root, opts, deps) : await runGate(root, opts, deps);
+    } catch (err) {
+        CONSOLE_IO.warn("");
+        CONSOLE_IO.warn(
+            `gate: unexpected error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
+        ok = false;
+        envProblem = true;
+    }
+
+    const suffix = opts.clean ? " (clean)" : "";
+    console.log("");
+    if (envProblem) {
+        console.log(`GATE ERROR${suffix}`);
+        return 2;
+    }
+    if (ok) {
+        console.log(`GATE PASSED${suffix}`);
+        return 0;
+    }
+    console.log(`GATE FAILED${suffix}`);
+    return 1;
 }
 
-console.log("");
-if (envProblem) {
-    console.log(CLEAN ? "GATE ERROR (clean)" : "GATE ERROR");
-    process.exitCode = 2;
-} else if (ok) {
-    console.log(CLEAN ? "GATE PASSED (clean)" : "GATE PASSED");
-    process.exitCode = 0;
-} else {
-    console.log(CLEAN ? "GATE FAILED (clean)" : "GATE FAILED");
-    process.exitCode = 1;
+// 只有直接执行时才跑；被 tests/ 导入时不产生副作用
+if (import.meta.main) {
+    process.exitCode = await main(process.argv.slice(2), resolve(import.meta.dir, ".."));
 }

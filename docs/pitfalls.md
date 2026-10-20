@@ -370,6 +370,16 @@
 - **证据**：`实测`（2026-10-20）。`git clone` 到非空目录返回 `128`、clone 到空目录返回 `0`，两者均为实测。
 - **后续**：该脚本已于 2026-10-20 迁为 `native/fetch.ts`（ADR 0012）。四种目录状态的决策逻辑抽成了纯函数 `decideWebview` / `decideSdk`，由 `tests/fetch.test.ts` 的 14 个用例覆盖——「目录存在但不完整」这一态此前从未被验证过（旧版判据恒为真，根本进不去），现在被钉住了。另加一条静态断言：`INPUTS` 的每条路径都必须出现在 `native/build.ps1` 的前置校验里，防止两个脚本再次漂移。
 
+### 5.6 PowerShell 的 `Set-Content` 会静默改写换行符
+
+- **症状**：用 PS 脚本批量改一个 `.ps1` 再「回滚」，`git diff` 显示内容完全相同，但 `git status` 仍报 `M`，且 `git` 警告 `CRLF will be replaced by LF the next time Git touches it`。文件的实际字节已经从 LF 变成 CRLF。
+- **原因**：`Set-Content` / `Out-File` 在 Windows 上默认用 `[Environment]::NewLine`（即 CRLF）写盘，**不保留原文件的 EOL**。而本仓 `.gitattributes` 固化 LF，于是「内容没变但文件变了」。
+    - 同理，`Add-Content` 追加内容时也会引入 CRLF 段。
+    - 这条在 TS 侧不存在：`write_file` / `Bun.write` 保留原编码与 EOL，Node 的 `writeFileSync` 写的是调用方给的字节。
+- **修法**：PS 脚本要改文件时显式指定——`Set-Content -NoNewline` 配 `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))`，或者干脆用 TS 改文件。回滚后用 `git diff --stat` 确认，再用逐字节扫描复核（见验证）。
+- **验证**：写一个 40 行的逐字节扫描器，统计每个文件的 `CR LF` 相邻对；一次性验证脚本跑完后全仓应为 0。
+- **证据**：`实测`（2026-10-20，冒烟验证 `.ps1` 语法门禁时污染了 `scripts/install-hooks.ps1`，内容 diff 为空但 EOL 已变）。
+
 ---
 
 ## 六、已确认的运行时行为基线
