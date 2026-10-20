@@ -200,12 +200,32 @@ function printReport(checks: readonly Check[]): void {
     }
 }
 
+/** 环境问题：由顶层捕获并映射为 exit 2。抛错而非 exit，让 main 的 finally 得以执行 */
+class Fatal extends Error {}
+
 function fatal(message: string): never {
-    console.error(`verify-pack: ${message}`);
-    process.exit(2);
+    throw new Fatal(message);
 }
 
-async function main(): Promise<void> {
+/**
+ * 删临时工程。
+ *
+ * 这里的失败必须被看见：静默吞掉会让 %TEMP% 每次门禁都多一个 25 文件的目录，
+ * 而门禁看起来一直是绿的——「失败报通过」的另一种形态。
+ * maxRetries 是给 Windows 的：刚退出的子进程可能还短暂持着句柄。
+ */
+async function removeWorkspace(dir: string): Promise<void> {
+    try {
+        await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (err) {
+        console.warn("");
+        console.warn(`warning: could not remove temp workspace: ${dir}`);
+        console.warn(`         ${err instanceof Error ? err.message : String(err)}`);
+        console.warn("         remove it by hand, or re-run with --keep to inspect it");
+    }
+}
+
+async function main(): Promise<number> {
     const tarExe = Bun.which("tar");
     if (!tarExe) {
         fatal("tar not found on PATH (needed to inspect the tarball)");
@@ -273,7 +293,7 @@ async function main(): Promise<void> {
             printReport(checks);
             console.log("");
             console.log("VERIFY-PACK FAILED");
-            process.exit(1);
+            return 1;
         }
         checks.push({ name: "从 tarball 安装成功", ok: true, detail: `${addMs.toFixed(0)}ms` });
 
@@ -335,20 +355,34 @@ async function main(): Promise<void> {
         console.log("");
         if (failed.length > 0) {
             console.log(`VERIFY-PACK FAILED (${failed.length}/${checks.length})`);
-            if (KEEP) {
-                console.log(`workspace kept at: ${workspace}`);
-                process.exit(1);
-            }
-            process.exit(1);
+            return 1;
         }
         console.log(`VERIFY-PACK PASSED (${checks.length} checks)`);
+        return 0;
     } finally {
+        // 只有 KEEP 才保留；否则无论成功失败还是 fatal，都要清掉
         if (KEEP) {
+            console.log("");
             console.log(`workspace kept at: ${workspace}`);
         } else {
-            await rm(workspace, { recursive: true, force: true }).catch(() => {});
+            await removeWorkspace(workspace);
         }
     }
 }
 
-await main();
+// 不用 process.exit()：它立即终止进程，会跳过 main 的 finally，
+// 临时工程因此漏删（2026-10-20 实测：每次门禁在 %TEMP% 留一个 25 文件的目录）。
+let exitCode: number;
+try {
+    exitCode = await main();
+} catch (err) {
+    if (err instanceof Fatal) {
+        console.error(`verify-pack: ${err.message}`);
+    } else {
+        console.error(
+            `verify-pack: unexpected error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
+    }
+    exitCode = 2;
+}
+process.exitCode = exitCode;

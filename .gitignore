@@ -31,6 +31,10 @@ node_modules/
 # native/build.ps1 的必需输入，缺失时报错信息并不指向这里。
 #
 # 复现：clone → `pwsh -File native/fetch.ps1` → `bun run build:native`
+#
+# fetch.ps1 默认只补齐缺的输入，且尽量离线：vendor/webview 已入库，
+# vendor/webview2 从同样已入库的 nupkg 解压。clone 上游源码要显式加 -Webview，
+# 它会覆盖 vendor/webview 下受版本控制的文件。见 ADR 0011。
 /vendor/webview2/
 
 # 临时与编辑器
