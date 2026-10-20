@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { countEvents, describeTarget, findMpCmdRun, queryThreatEvents } from "../scripts/test-av";
 import { parseExtractArgs } from "../scripts/extract-icon";
 import { parseTrustArgs, KNOWN_STORES } from "../scripts/trust-cert";
 import { fingerprintDll, parseMemArgs } from "../scripts/probe-memory";
-import { capture, parseCaptureArgs, pickTarget } from "../tools/capture-window";
+import { capture, parseCaptureArgs, pickEncoder, pickTarget } from "../tools/capture-window";
 import { cropBgra } from "../native/gdi";
 import { estimateImageTokens } from "../native/model-image";
 import { parseArgs as parseChildArgs } from "../tools/probe-child-windows";
@@ -271,6 +271,53 @@ describe("capture-window", () => {
         test("pid=0 时不过滤进程", () => {
             const any = { ...plan, pid: 0 };
             expect(pickTarget([win({ pid: 777 })], any)?.pid).toBe(777);
+        });
+    });
+
+    describe("pickEncoder：编码路线只由格式决定", () => {
+        /**
+         * 这组断言守的是一个**已经发生过**的 bug，不是假设。
+         *
+         * 旧路由写的是 `else if (plan.maxEdge > 0 || plan.format !== "png")`，
+         * 于是「窗口比上限小 + 给了 --max-edge」会掉进 Bun.Image 分支：
+         * 不需要缩放却绕道重编一次。同一个 800×1032 窗口实测——
+         * 不带 `--max-edge` 是 15,409 B，带 `--max-edge 1300` 变成 17,601 B（大 14%）。
+         *
+         * 修法不是加断言，而是把签名改成只吃 `format`：`maxEdge` 传不进来，
+         * 这个 bug 在类型层面不可复现。下面的断言守的是「别把 maxEdge 加回签名」。
+         */
+        test("png 走自家编码器（唯一不需要 Bun.Image 的格式）", () => {
+            expect(pickEncoder("png")).toBe("own");
+        });
+
+        test("palette / jpeg / webp 交给 Bun.Image（自家做不到的那三件事）", () => {
+            expect(pickEncoder("palette")).toBe("bun-image");
+            expect(pickEncoder("jpeg")).toBe("bun-image");
+            expect(pickEncoder("webp")).toBe("bun-image");
+        });
+
+        test("签名只有一个参数——路线与 maxEdge 无关", () => {
+            // 加回第二个参数就会红。这条比「断言某个分支不执行」可靠：
+            // 它检查的是**无法表达**，而不是**恰好没走到**。
+            expect(pickEncoder.length).toBe(1);
+        });
+
+        test("源码里不再有按 maxEdge 选路线的判据", async () => {
+            const src = await Bun.file(
+                resolve(import.meta.dir, "../tools/capture-window.ts"),
+            ).text();
+            // 必须剔掉整行注释再查。pickEncoder 的文档里刻意留了旧写法作反面教材，
+            // 不剔就会「测注释」——这正是 pitfalls 2.9 那个坑。
+            const code = src
+                .split(/\r?\n/)
+                .filter((line) => {
+                    const t = line.trim();
+                    return !(t.startsWith("//") || t.startsWith("*") || t.startsWith("/*"));
+                })
+                .join("\n");
+            expect(code).not.toContain("plan.maxEdge > 0 ||");
+            // 正向：唯一的路线判据就是 pickEncoder 里的 format 比较
+            expect(code).toContain('return format === "png" ? "own" : "bun-image";');
         });
     });
 

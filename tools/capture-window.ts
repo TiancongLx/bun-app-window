@@ -182,6 +182,33 @@ export type CaptureOutcome =
       }
     | { ok: false; error: string; detail: Record<string, unknown> };
 
+export type EncoderRoute = "own" | "bun-image";
+
+/**
+ * 选编码路线。签名只有 `format` —— `maxEdge` 传不进来，这类 bug 在类型层面不可复现。
+ *
+ * 判据的两个方向都有实测支撑（`pitfalls` 3.14 / 3.16）：truecolor PNG 自家编码
+ * 比 `Bun.Image` 快 7–12 倍且更小；缩小由 `downscaleBgra` 的面积平均承担
+ * （`lanczos3` 的振铃反而让图更大）。`Bun.Image` 只保留自家做不到的三件事：
+ * palette 量化、jpeg / webp 编码。
+ *
+ * 历史：这条判据曾经是内联的
+ *
+ * ```ts
+ * if (needsDownscale && target && plan.format === "png") { /* 自家 *\/ }
+ * else if (plan.maxEdge > 0 || plan.format !== "png") { /* Bun.Image *\/ }
+ * else { /* 自家 *\/ }
+ * ```
+ *
+ * 中间那句 `plan.maxEdge > 0 ||` 是错的：窗口比上限还小时 `needsDownscale` 为假，
+ * 于是「png + 给了 maxEdge」掉进 Bun.Image 分支——**不需要缩放却绕道重编了一次**。
+ * 实测同一个 800×1032 窗口：不带 `--max-edge` 是 15,409 B，带 `--max-edge 1300`
+ * 变成 17,601 B（大 14%），因为编码器换了。
+ */
+export function pickEncoder(format: CapturePlan["format"]): EncoderRoute {
+    return format === "png" ? "own" : "bun-image";
+}
+
 /**
  * 执行一次截图。
  *
@@ -189,12 +216,15 @@ export type CaptureOutcome =
  * 任何一环失败都返回结构化的 `ok:false`，让调用方（含 agent）能区分
  * 「窗口没找到」和「窗口找到了但画不出东西」。
  *
- * 落盘前会按 `--max-edge` / `--format` 压成模型友好尺寸。三条路见下方注释：
- * 「缩小 + png」走自家降采样，「放大 / 非 png」才交给 `Bun.Image`。
+ * 落盘前会按 `--max-edge` / `--format` 压成模型友好尺寸，路线由 {@link pickEncoder}
+ * 决定：`png` 全程走自家（缩不缩都不碰 `Bun.Image`），其余交给它。
  *
  * 提前缩到视觉模型的规范化上界（约 1300）是有意义的：模型侧无论如何都会缩，
  * 但在本地缩能省掉**上传字节**和**轮次驻留**（OWUI 把历史消息留在后端内存里，
  * base64 后每轮反复携带）。
+ *
+ * 注意 1300 长边**不等于**吃满 1024 token：token 按面积折算，1300×1300 才满，
+ * 而 16:10 的屏幕缩到 1300 长边只有 1.01 MP，实测 611 token。
  */
 export async function capture(
     plan: CapturePlan,
@@ -295,36 +325,37 @@ export async function capture(
     };
 
     if (plan.shot) {
-        const rawPng = bgraToPng(pixels.bgra, pixels.width, pixels.height, "rgb");
-
-        // 三条路，判据只有两个：**要不要缩小**、**是不是只要 png**。
-        //
-        // 实测（真实窗口 3098×1850 → 1300×776，5 次取中位数）：
-        //
-        //     route                    ms        bytes
-        //     自家 downscaleBgra        45.9     102,036    ← 路径 A
-        //     Bun.Image resize + png    95.9     222,621    ← 路径 B
-        //
-        // 自家版本快 2.1 倍、小 2.2 倍。快是因为省掉「编码成 PNG 再解码」这一圈；
-        // 小是因为 `Bun.Image` 默认 lanczos3 —— 那是锐化滤波器，在文字边缘产生
-        // 振铃，高频细节反而更难压。面积平均对 UI 截图两头都占优。
-        //
-        // 所以只要「缩小 + png」就完全不碰 `Bun.Image`；
-        // 它只保留自家做不到的：放大、palette 量化、jpeg / webp。
+        // 两条路，判据只有一个：**格式**。见 pickEncoder 的注释——
+        // 这里曾经还看 `plan.maxEdge`，于是「窗口比上限小 + 给了 maxEdge」
+        // 会绕道 Bun.Image 重编一次（实测大 14%）。
         const target =
             plan.maxEdge > 0 ? fitInside(pixels.width, pixels.height, plan.maxEdge) : null;
         const needsDownscale =
             target !== null && (target.width < pixels.width || target.height < pixels.height);
 
-        if (needsDownscale && target && plan.format === "png") {
-            const small = downscaleBgra(
-                pixels.bgra,
-                pixels.width,
-                pixels.height,
-                target.width,
-                target.height,
-            );
-            if (!small) {
+        if (pickEncoder(plan.format) === "own") {
+            // 自家链路：缩就 downscaleBgra（面积平均），不缩就原样，都不碰 Bun.Image。
+            //
+            // 实测对比（3098×1850 → 1300×776，5 次取中位数）：
+            //
+            //     route                    ms        bytes
+            //     自家 downscaleBgra        45.9     102,036
+            //     Bun.Image resize + png    95.9     222,621
+            //
+            // 快 2.1 倍、小 2.2 倍。快是因为省掉「编码成 PNG 再解码」这一圈；
+            // 小是因为它默认 lanczos3 —— 锐化滤波器在文字边缘产生振铃，
+            // 高频细节反而更难压。面积平均对 UI 截图两头都占优。
+            const src =
+                needsDownscale && target
+                    ? downscaleBgra(
+                          pixels.bgra,
+                          pixels.width,
+                          pixels.height,
+                          target.width,
+                          target.height,
+                      )
+                    : pixels;
+            if (!src) {
                 return {
                     ok: false,
                     error: "downscale rejected the requested size",
@@ -336,30 +367,26 @@ export async function capture(
             }
             model = {
                 bytes: encodePng(
-                    bgraToPng(small.bgra, small.width, small.height, "rgb"),
+                    bgraToPng(src.bgra, src.width, src.height, "rgb"),
                     "rgb",
                     plan.level,
                 ),
-                width: small.width,
-                height: small.height,
+                width: src.width,
+                height: src.height,
                 format: "png",
-                estimatedTokens: estimateImageTokens(small.width, small.height),
+                estimatedTokens: estimateImageTokens(src.width, src.height),
             };
-        } else if (plan.maxEdge > 0 || plan.format !== "png") {
-            // 路径 B：放大 / 非 png 格式。这两件事都需要插值或量化，自家不做。
-            model = await toModelImage(encodePng(rawPng, "rgb", plan.level), {
-                maxEdge: plan.maxEdge,
-                format: plan.format,
-                quality: plan.quality,
-            });
         } else {
-            model = {
-                bytes: encodePng(rawPng, "rgb", plan.level),
-                width: pixels.width,
-                height: pixels.height,
-                format: "png",
-                estimatedTokens: estimateImageTokens(pixels.width, pixels.height),
-            };
+            // Bun.Image：palette 量化、jpeg / webp 编码——这三件自家做不到。
+            // 注意它吃的是**已编码字节**，所以这条路必然多一次解码。
+            model = await toModelImage(
+                encodePng(bgraToPng(pixels.bgra, pixels.width, pixels.height, "rgb"), "rgb", plan.level),
+                {
+                    maxEdge: plan.maxEdge,
+                    format: plan.format,
+                    quality: plan.quality,
+                },
+            );
         }
         mkdirSync(dirname(outPath), { recursive: true });
         await Bun.write(outPath, model.bytes);
