@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import {
@@ -149,26 +149,24 @@ describe("missingInputs", () => {
         expect(missing).toEqual([sdkRel]);
     });
 
-    test("当前仓库三份输入齐备", () => {
-        expect(missingInputs(REPO)).toEqual([]);
+    test("三份输入齐备时 missingInputs 为空（以真实文件系统为准）", () => {
+        // 注意：vendor/webview2/ 是 .gitignore 排除的解压产物，干净 clone 里没有它。
+        // 因此这条断言只在「已跑过 native/fetch.ts」的环境下成立——而 --clean 的
+        // 干净副本恰恰不满足。这里不断言「当前仓库齐备」，只断言两个方向一致：
+        // 真实存在 → 不报缺失；真实缺失 → 报出来。
+        const actual = missingInputs(REPO);
+        const reallyMissing = INPUTS.filter(
+            (i) => !existsSync(join(REPO, "vendor", i.rel)),
+        ).map((i) => i.rel);
+        expect(actual).toEqual(reallyMissing);
     });
 });
 
-describe("与 build.ps1 的判据一致性", () => {
-    test("build.ps1 仍存在时，其三个前置路径都能在 INPUTS 里找到", () => {
-        // 迁移过渡期：两个脚本共存时判据必须一致。
-        // build.ps1 删掉后这条自动跳过（readFileSync 会抛错，改用 existsSync 保护）
-        const ps1 = join(REPO, "native", "build.ps1");
-        const exists = readFileSync;
-        let source: string;
-        try {
-            source = exists(ps1, "utf8");
-        } catch {
-            return; // 已删除，本断言不再适用
-        }
-        for (const input of INPUTS) {
-            const tail = input.rel.split("/").slice(1).join("\\");
-            expect(source).toContain(tail);
-        }
+describe("与已删除的 build.ps1 的关系", () => {
+    test("build.ps1 已不存在（迁移完成）", () => {
+        // 迁移完成后这条从「一致性断言」变成「迁移状态断言」：
+        // 若哪天 build.ps1 又回来了，说明有人回退，这里会红。
+        expect(existsSync(join(REPO, "native", "build.ps1"))).toBe(false);
+        expect(existsSync(join(REPO, "native", "build.ts"))).toBe(true);
     });
 });

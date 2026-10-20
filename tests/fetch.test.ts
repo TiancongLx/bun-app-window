@@ -34,14 +34,9 @@ describe("INPUTS 与实际构建脚本的依赖", () => {
         expect(buildTs).toContain('from "./fetch"');
         expect(buildTs).toContain("INPUTS");
 
-        // 三份输入的实际路径都能被 buildPaths 的 include 目录覆盖
-        for (const input of INPUTS) {
-            const header = join(REPO_ROOT, "vendor", input.rel);
-            expect({ rel: input.rel, exists: Bun.file(header).size > 0 }).toEqual({
-                rel: input.rel,
-                exists: true,
-            });
-        }
+        // 不断言「三份头文件存在」：vendor/webview2/ 是 .gitignore 排除的解压产物，
+        // 干净 clone 里没有它（--clean 会暴露这一点）。存在性由 fetch.ts 负责，
+        // 这里只守「判据来源同一」。
     });
 
     test("入库的那两份与未入库的那份分得清", () => {
