@@ -377,7 +377,7 @@ Built with Bun 1.4.3 and TypeScript 7.0.2 with full strict type-checking enabled
 
 ```bash
 bun check          # Run TypeScript type checker
-bun test           # Run automated test suite (tests/, 103 test cases)
+bun test           # Run automated test suite (tests/, 108 test cases)
 bun run demo       # Launch interactive self-test demo (requires desktop session)
 ```
 

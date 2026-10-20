@@ -84,4 +84,4 @@ First public release.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
 [Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/TiancongLx/bun-app-window/tree/v0.1.0
+[0.1.0]: https://github.com/TiancongLx/bun-app-window/releases/tag/v0.1.0
