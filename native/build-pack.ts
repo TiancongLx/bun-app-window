@@ -17,7 +17,10 @@
  *    能直接断言「传了什么给 bun build」，不必真的跑一次 90 MB 的编译。
  *
  * 3. **不改变版本号的落点。** `--windows-version` 仍然是源码里的一行字面量
- *    `"--windows-version", "0.2.0.0"`，只把引号从单改双（TS 惯例）。
+ *    （形如 `"--windows-version", "<x.y.z.0>"`），只把引号从单改双（TS 惯例）。
+ *    **注释里不写真实版本号** —— 写过一次，结果是 `version.test.ts` 的
+ *    非锚定正则先命中注释、再命中断代码，读到的是注释里的旧值，
+ *    而 `bump-version.ts` 的锚定正则改的却是真代码。两处都对，合起来错。
  *    `bump-version.ts` 与 `version.test.ts` 的定位正则同步放宽为接受两种引号。
  *
  * ## 为什么不用 process.exit()

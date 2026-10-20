@@ -29,12 +29,24 @@ const PE_VERSION = /^\d+\.\d+\.\d+\.\d+$/;
 /**
  * 从打包脚本源码里取出 `--windows-version` 的字面值。
  *
- * 引号接受 `"` 与 `'`：`.ps1` 时代是单引号，迁到 TS 后是双引号。
- * 这条断言守的是「两处版本同源」，不该因为换语言就失效。
+ * 三条约束，每条都对应一次真实事故：
+ *
+ * 1. 引号接受 `"` 与 `'`：`.ps1` 时代是单引号，迁到 TS 后是双引号。
+ * 2. **必须排除注释行。** 初版用的非锚定正则会先命中注释里的示例
+ *    （`* \`"--windows-version", "0.2.0.0"\``），于是版本号升到 0.2.1 之后
+ *    这条断言仍然读到注释里的 0.2.0.0 并判失败 —— 而 `bump-version.ts`
+ *    带行首锚定的正则改的是真代码。两处各自都对，合起来错。
+ * 3. 因此注释里也不许写真实版本号（`build-pack.ts` 的文档注释里有说明）。
  */
 function windowsVersionFrom(source: string): string | null {
-    const m = /["']--windows-version["']\s*,\s*["']([^"']+)["']/.exec(source);
-    return m?.[1] ?? null;
+    for (const raw of source.split(/\r?\n/)) {
+        const line = raw.trim();
+        // 跳过注释行：`//`、`*`（块注释续行）、`/*`
+        if (line.startsWith("//") || line.startsWith("*") || line.startsWith("/*")) continue;
+        const m = /["']--windows-version["']\s*,\s*["']([^"']+)["']/.exec(line);
+        if (m?.[1]) return m[1];
+    }
+    return null;
 }
 
 test("package.json 的 version 是合法 semver", () => {
@@ -78,4 +90,27 @@ test("exe 版本第四段固定为 0（PE 资源不承载 prerelease）", () => 
     const parts = (win ?? "").split(".");
     expect(parts).toHaveLength(4);
     expect(parts[3]).toBe("0");
+});
+
+/**
+ * 注释里不许出现**完整的版本字面量**。
+ *
+ * 这条是被真事逼出来的：`build-pack.ts` 的文档注释里原本有一行示例
+ * `` `"--windows-version", "0.2.0.0"` ``，`windowsVersionFrom` 的非锚定正则
+ * 先命中它、再命中断代码，于是版本号升到 0.2.1 之后这条断言仍读到 0.2.0.0。
+ * 而 `bump-version.ts` 用的是行首锚定正则，改的确实是真代码。
+ * **两处各自都对，合起来错** —— 只有一条「注释不许放真值」的断言能防住。
+ */
+test("注释里不得出现完整版本字面量", () => {
+    const offenders: string[] = [];
+    BUILD_PACK.split(/\r?\n/).forEach((line, i) => {
+        const t = line.trim();
+        const isComment =
+            t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+        if (!isComment) return;
+        if (/["']--windows-version["']\s*,\s*["']\d+\.\d+\.\d+\.\d+["']/.test(t)) {
+            offenders.push(`L${i + 1}: ${t}`);
+        }
+    });
+    expect(offenders).toEqual([]);
 });
