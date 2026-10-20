@@ -395,8 +395,8 @@ Built with Bun 1.4.3 and TypeScript 7.0.2 with full strict type-checking enabled
 **This project has no remote CI.** GitHub Actions cannot allocate runners for this account (billing lock), and the project is a single-platform, single-developer package with no external service dependencies — so the gates run locally instead. The recommended entry point is:
 
 ```powershell
-pwsh -File scripts/gate.ps1          # bun check + bun test against the working tree
-pwsh -File scripts/gate.ps1 -Clean   # same gates, but inside a fresh clone of HEAD
+bun run scripts/gate.ts              # bun check + bun test + consumer acceptance
+bun run scripts/gate.ts --clean      # same gates, but inside a fresh clone of HEAD
 ```
 
 `-Clean` reproduces the conditions a hosted runner would provide: it clones `HEAD` into `%TEMP%`, installs from the lockfile, and runs the gates there, so local artefacts (`.build/`, `node_modules/`, `vendor/webview2/`) cannot mask a missing file. It takes about two seconds. Uncommitted changes are reported and excluded — run without `-Clean` to verify the working tree as-is.

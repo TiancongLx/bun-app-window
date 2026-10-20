@@ -8,7 +8,7 @@
     本脚本把仓库内的钩子模板复制到 .git/hooks/ 并标记为可执行，
     让门禁在任何机器上都能一致地恢复。
 
-    目前只安装 pre-push：它在推送前转调 scripts/gate.ps1。
+    目前只安装 pre-push：它在推送前转调 scripts/gate.ts。
 
 .PARAMETER Force
     覆盖已存在的同名钩子（默认不覆盖，避免冲掉本地自定义）。
@@ -59,8 +59,11 @@ $content = @'
 # pre-push —— 本地推送门禁
 #
 # 本仓库不使用远端 CI（账户 billing lock，且项目是单平台单人开发）。
-# 门禁逻辑的唯一事实源是 scripts/gate.ps1，本钩子只做转调，不复制逻辑，
+# 门禁逻辑的唯一事实源是 scripts/gate.ts，本钩子只做转调，不复制逻辑，
 # 以免两处判定标准漂移。
+#
+# 为什么用 `bun run` 而不是直接执行：Windows 不解析 shebang，`./gate.ts`
+# 会被当作「打开文档」；bun 全平台一致，且本来就是本项目的硬前提。
 #
 # 归属：位于 .git/hooks/，不纳入版本控制，不随仓库分发。
 #       新机器 clone 后需手动创建，或用 scripts/install-hooks.ps1。
@@ -69,13 +72,13 @@ $content = @'
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-if [ ! -f scripts/gate.ps1 ]; then
-    echo "[pre-push] scripts/gate.ps1 不存在，跳过门禁。" >&2
+if [ ! -f scripts/gate.ts ]; then
+    echo "[pre-push] scripts/gate.ts 不存在，跳过门禁。" >&2
     echo "[pre-push] 若这是刚 clone 的仓库，请确认脚本已就位。" >&2
     exit 0
 fi
 
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/gate.ps1
+bun run scripts/gate.ts
 rc=$?
 
 if [ "$rc" -ne 0 ]; then

@@ -393,8 +393,8 @@ bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 **本项目不使用远端 CI。** 该账户的 GitHub Actions 因 billing lock 无法分配 runner；而项目本身是单平台、单人开发、零外部服务依赖的依赖包，远端 CI 的边际价值低于其维护成本，因此质量门禁改为本地执行。推荐入口：
 
 ```powershell
-pwsh -File scripts/gate.ps1          # 对当前工作区跑 bun check + bun test
-pwsh -File scripts/gate.ps1 -Clean   # 同上，但在 HEAD 的干净副本里跑
+bun run scripts/gate.ts              # 对当前工作区跑三段门禁
+bun run scripts/gate.ts --clean      # 同上，但在 HEAD 的干净副本里跑
 ```
 
 `-Clean` 复现了托管 runner 的条件：把 `HEAD` clone 到 `%TEMP%`，按 lockfile 安装依赖，再在其中跑门禁。这样本地产物（`.build/`、`node_modules/`、`vendor/webview2/`）就无法掩盖缺失的文件。耗时约两秒。未提交改动会被提示并排除在干净副本之外——如需验证工作区现状，请去掉 `-Clean`。
