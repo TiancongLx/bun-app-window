@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 
 $wv = Join-Path $Root 'vendor\webview'
 $sdk = Join-Path $Root 'vendor\webview2'
-$out = Join-Path $Root 'build'
+$out = Join-Path $Root '.build'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 if ($Clean -and (Test-Path $out)) {

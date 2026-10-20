@@ -1,8 +1,14 @@
 # 构建产物：native/build.ps1 与 build-pack.ps1 可重建
-/build/*
-# 发布目录里只有原生库是「必须随包分发」的资产，其余是重建品
+#
+# 用点前缀而非 `build/`：全局 gitignore 常见一条 `build/` 规则，会连带
+# 匹配任意层级的 build 目录（曾经因此把 vendor/webview2/build 下的
+# WebView2.h 意外排除在外）。本项目不依赖用户环境的全局配置。
+/.build/*
+
+# 发布产物：只有原生库是「必须随包分发」的资产，其余是重建品
 /dist/*.exe
 /dist/*.log
+
 # 打完包留下的 tarball
 /*.tgz
 
@@ -15,7 +21,7 @@ node_modules/
 # 内部开发文档：本地记录，不进版本控制、不进发布产物
 # 见 AGENTS.md 顶部说明：这两处没有 git 历史，也不随远端同步
 /AGENTS.md
-/doc/
+/.internal/
 
 # WebView2 SDK 解压产物：由 native/fetch.ps1 从 vendor/*.nupkg 生成
 #

@@ -193,7 +193,7 @@
 - **原因**：包名 + 版本号相同，Bun 认为无需重新解包（实测：`bun add` 后
   node_modules 的 DLL 942080 vs 新包 943104，哈希不同）。
 - **修法**：每次改动原生库就提版号；确需同版本重装时 `rm -rf node_modules/<pkg>` 后
-  `bun install --force`。验收时永远比对 `build/` 与 `node_modules/` 的 DLL 哈希，
+  `bun install --force`。验收时永远比对 `.build/` 与 `node_modules/` 的 DLL 哈希，
   不要只看「install 成功」。
 
 ### 2.5 最大化矩形不能靠 `SM_CXSIZEFRAME` 推算

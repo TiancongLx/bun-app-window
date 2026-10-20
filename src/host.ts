@@ -28,7 +28,7 @@ const PACKED = /^[A-Za-z]:[\\/]~BUN[\\/]/i.test(import.meta.dir);
 // 打包后 import.meta.dir 是 B:\~BUN\root（不可写），日志改落 exe 所在目录
 const LOG = PACKED
   ? resolve(process.execPath, "..", "host.log")
-  : resolve(ROOT, "build", "host.log");
+  : resolve(ROOT, ".build", "host.log");
 
 writeFileSync(
   LOG,

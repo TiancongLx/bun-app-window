@@ -10,7 +10,7 @@
  *   1. options.nativeLibPath          显式指定，跳过一切推断
  *   2. 编译产物 + 内嵌字节            释放到 %LOCALAPPDATA%\<appName>\runtime，内容哈希命名
  *   3. 编译产物 + 可执行文件同级       exe 旁放 libshell.dll（无需内嵌）
- *   4. 开发态                         包根 build/libshell.dll → dist/libshell.dll
+ *   4. 开发态                         包根 .build/libshell.dll → dist/libshell.dll
  */
 
 import { createHash } from "node:crypto";
@@ -194,10 +194,10 @@ export async function resolveNativeLib(opts: ResolveOptions = {}): Promise<Nativ
     );
   }
 
-  // 4. 开发态 / 包安装态：包根下的 build/ 再 dist/
+  // 4. 开发态 / 包安装态：包根下的 .build/ 再 dist/
   const source: NativeLibInfo["source"] = INSTALLED ? "package" : "dev";
   for (const candidate of [
-    join(PKG_ROOT, "build", "libshell.dll"),
+    join(PKG_ROOT, ".build", "libshell.dll"),
     join(PKG_ROOT, "dist", "libshell.dll"),
   ]) {
     if (existsSync(candidate)) return fromPath(candidate, source);

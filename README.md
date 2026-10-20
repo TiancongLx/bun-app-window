@@ -4,6 +4,37 @@ Windows 上用系统 WebView2 承载界面的**原生窗口壳**，给 Bun 应�
 
 不是 Electron 的替代品，也不是应用框架：它只负责一个窗口，业务与 UI 都在壳之外。
 
+---
+
+**English** — A native window shell for Bun on Windows. Your web UI runs in the
+system WebView2 runtime (no bundled browser); window control, DPI-aware geometry,
+typed IPC and a Windows 11 title bar are exposed to TypeScript over `bun:ffi`.
+
+```ts
+import { openShell, serveOnSafePort, FLAG_FRAMELESS } from "bun-app-window";
+
+const server = serveOnSafePort({ fetch: () => new Response("<h1>Hello</h1>") });
+await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS });
+```
+
+Read the platform notes below before adopting this — the scope is deliberately narrow.
+
+---
+
+## 采用前请先读这三条
+
+本项目刻意把边界画得很窄。以下三点不是免责声明，是会直接影响你能否使用的事实：
+
+| 事实 | 后果 |
+| --- | --- |
+| **仅 Windows x64** | `package.json` 的 `os` / `cpu` 字段会**直接拒绝**为其他平台安装。名字里的平台中立只是预留，不是能力 |
+| **发布的是 TypeScript 源码** | 包内没有编译产物（`dist/` 只有 `.dll`）。消费者必须用 **Bun ≥ 1.4.3**；Node.js 装得上也跑不了 |
+| **`bun:ffi` 在 Bun 中标注为 experimental** | Bun 官方建议生产环境改用 Node-API。本项目的取舍是用这一点换「零第三方依赖 + 全栈同源」，理由见 `docs/pitfalls.md` 与 `.internal/adr/0007`（后者不进版本控制） |
+
+另外：需要**交互式桌面会话**（Session 0 的服务里 WebView2 起不来），且系统需已安装 WebView2 Runtime（Win11 自带）。
+
+---
+
 ```
 你的 Bun 进程
 ├─ 业务逻辑（原样）
@@ -11,6 +42,7 @@ Windows 上用系统 WebView2 承载界面的**原生窗口壳**，给 Bun 应�
 └─ bun-app-window  ← 开窗、几何、DPI、消息桥
         └─ libshell.dll  →  WebView2
 ```
+
 
 ## 安装
 
@@ -397,7 +429,7 @@ d.hittest(x, y);
 1. `opts.nativeLibPath` —— 显式指定，跳过一切推断
 2. 编译产物内嵌字节 —— 释放到 `%LOCALAPPDATA%\<appName>\runtime`，内容哈希命名，旧版本自动清理
 3. 编译产物同级 —— exe 旁放 `libshell.dll`
-4. 开发态 —— 包根 `build/libshell.dll` → `dist/libshell.dll`
+4. 开发态 —— 包根 `.build/libshell.dll` → `dist/libshell.dll`
 
 ## 打成单文件 exe
 
@@ -464,6 +496,32 @@ bun run demo       # 自检程序，需要交互式会话
 
 传错类名会表现为「窗口明明在，却枚举不到」。
 
+## 致谢
+
+本项目的平台层不是从零写的，它站在两个上游之上。
+
+### [webview/webview](https://github.com/webview/webview) — 平台层
+
+| 项 | 值 |
+| --- | --- |
+| 版本 | `0.12.0` |
+| 许可 | MIT |
+| 作者 | Serge Zaitsev · Steffen André Langnes |
+
+`vendor/webview/` 是它的原样拷贝，**未做任何源码改动**（`git log` 里只有一次初始导入）。它承担 COM 样板、DPI 换算、WebView2 环境创建与重试；本项目在它之上写 `native/shell.cc` 负责窗口所有权、命中测试与消息队列。
+
+选它的理由与依赖边界记录在 `.internal/adr/0001`（本地文档，不进版本控制）；升级时要留意的三处时序依赖见 `.internal/adr/0007`。
+
+### [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) — 运行时 SDK
+
+`vendor/webview2/` 由 `native/fetch.ps1` 从 `Microsoft.Web.WebView2.1.0.1150.38.nupkg` 解压得到（该 nupkg 随仓库分发，供离线构建）。WebView2 Runtime 本身由系统提供，不随包分发。
+
+### 本项目
+
+原生层 `native/shell.cc`、TypeScript 层（`src/shell/`、`src/ui/titlebar.ts`）与测试由 **Dolores（[TiancongLx](https://github.com/TiancongLx)）** 与 **DeepSeek** 共同完成——调研、实现、调试与反复修改都是一起做的。
+
+---
+
 ## 许可
 
-MIT。
+MIT，见 [LICENSE](./LICENSE)。上游 `vendor/webview/` 亦为 MIT，其著作权声明保留在原文件中。

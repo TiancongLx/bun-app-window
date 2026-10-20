@@ -7,7 +7,7 @@ import { isPackedRuntime, resolveNativeLib } from "@/shell/resolve";
 /** 包根：tests/ → 上一级 */
 const PKG_ROOT = resolve(import.meta.dir, "..");
 const DIST_DLL = join(PKG_ROOT, "dist", "libshell.dll");
-const BUILD_DLL = join(PKG_ROOT, "build", "libshell.dll");
+const BUILD_DLL = join(PKG_ROOT, ".build", "libshell.dll");
 
 test("测试环境不是编译产物", () => {
     // 若这条失败，说明测试被塞进了 bun build --compile 产物里
@@ -32,9 +32,9 @@ test("显式路径不存在时抛错且信息可读", async () => {
     expect(String(err)).toContain("nativeLibPath does not exist");
 });
 
-test("开发态自动定位到 build/ 下的 DLL", async () => {
+test("开发态自动定位到 .build/ 下的 DLL", async () => {
     const info = await resolveNativeLib();
-    // 仓库内开发态：build/ 优先于 dist/
+    // 仓库内开发态：.build/ 优先于 dist/
     expect(info.source).toBe("dev");
     expect(existsSync(info.path)).toBe(true);
     expect(info.path.endsWith("libshell.dll")).toBe(true);
@@ -48,7 +48,7 @@ test("解析结果的 sha256 在非内嵌分支为空串（不假装算过）", 
     expect(info.sha256).toBe("");
 });
 
-test("build/ 与 dist/ 的 DLL 是同一份产物", async () => {
+test(".build/ 与 dist/ 的 DLL 是同一份产物", async () => {
     if (!existsSync(BUILD_DLL)) return;
     const a = Bun.file(BUILD_DLL);
     const b = Bun.file(DIST_DLL);
