@@ -368,6 +368,7 @@
 - **修法**：判据换成 `native/build.ps1` 自己校验的那三个文件（`webview.h` / `EventToken.h` / `WebView2.h`），缺哪个补哪个；联网动作（clone 上游、下载 nupkg）改为显式开关 `-Webview` / `-Sdk`，默认路径全程离线。clone 后剥掉 `.git`，与入库状态保持同构。
 - **验证**（四种目录状态各跑一次，均在 `-Root` 隔离目录内进行）：不完整 → `exit 1` 并指路 `-Webview`；缺 SDK 但 nupkg 在 → `exit 0` 且离线解压出 927,399 B 的头文件；三份齐备 → `exit 0` 且文件数不变；目录整个不存在 → 走 clone 分支。
 - **证据**：`实测`（2026-10-20）。`git clone` 到非空目录返回 `128`、clone 到空目录返回 `0`，两者均为实测。
+- **后续**：该脚本已于 2026-10-20 迁为 `native/fetch.ts`（ADR 0012）。四种目录状态的决策逻辑抽成了纯函数 `decideWebview` / `decideSdk`，由 `tests/fetch.test.ts` 的 14 个用例覆盖——「目录存在但不完整」这一态此前从未被验证过（旧版判据恒为真，根本进不去），现在被钉住了。另加一条静态断言：`INPUTS` 的每条路径都必须出现在 `native/build.ps1` 的前置校验里，防止两个脚本再次漂移。
 
 ---
 
