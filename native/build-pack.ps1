@@ -17,7 +17,7 @@ $common = @(
     '--windows-title', 'WebView Shell',
     '--windows-description', 'Native shell for Bun + WebView2',
     '--windows-publisher', 'bun-app-window',
-    '--windows-version', '0.1.0.0'
+    '--windows-version', '0.2.0.0'
 )
 $iconPath = Join-Path $Root 'assets\app.ico'
 if (Test-Path $iconPath) {
