@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
+### Fixed
+
+- **A page link could navigate the app away, permanently.** In a desktop shell there is no address bar, no back button, and no host API that can navigate the page back — so one mis-click on an ordinary `<a href="https://example.com">` replaced the application with that website, and the only recovery was to close and relaunch. The native layer could not stop it either: `NavigationStarting` was never subscribed, `NewWindowRequested` was never subscribed, and `g_origin` was never assigned.
+
+    This is worth describing precisely, because the failure was not a wrong decision — it was **241 lines of correct-looking code that had never been compiled**. `NavigationGuard`, `NewWindowGuard`, `open_external()`, `install_nav_guard()` and `uninstall_nav_guard()` were all present and heavily commented, but: `install_nav_guard()` had **no call site anywhere in the tree**; `SHELL_FLAG_ALLOW_EXTERNAL_NAV = 128` was declared in the C++ enum with **no parsing site**, and the TypeScript side had no corresponding constant at all, so a caller could not even express the intent; and `g_origin` carried a comment saying it was "computed by `shell_start_ex` from `g_url`" while never being assigned — which alone would have made `install_nav_guard()`'s first guard clause return early forever. Type checking, 532 test cases and the full gate were green throughout. The first `bun run build:native` produced six compile errors and settled it: `NavEventBase` existed to hold the refcount and `QueryInterface` plumbing, and **neither guard inherited it**.
+
+    Two independent guards now install before `webview_navigate` and uninstall before `webview_destroy` (after destroy, `core_webview()` returns `nullptr` and `remove_` is unreachable). Verified end-to-end on a real window: a cross-origin navigation is cancelled and handed to the system browser — which then actually loaded the URL — while a same-origin navigation in the same run went through untouched.
+
+### Changed
+
+- **`FLAG_ALLOW_EXTERNAL_NAV` (new, `128`) opts out of navigation interception** for applications that genuinely are browsers. This is the release's one breaking-in-effect change: without the flag, a cross-origin top-level navigation now opens the system browser instead of replacing the app. Nothing else about the flag's surrounding policy moved — `window.open` / `target=_blank` is still cancelled and opened externally **even with this flag**, because that is a capability boundary rather than a safety policy: the shell owns exactly one top-level window (the native side is a process-level singleton), so a second window would have no host API able to close, read or message it.
+- Only `http:` / `https:` ever reach `ShellExecuteW`. `file:`, `javascript:`, `ms-*:` and custom schemes are cancelled silently and never touch a protocol handler, and `mailto:` / `tel:` are deliberately **not** on the list either — a dead `mailto:` link is preferable to handing a page an arbitrary protocol dispatcher.
+- **An origin-less startup URL is no longer a free pass.** The old predicate returned "same origin" whenever `g_origin` was empty, which meant `file://`, `about:blank` and custom-scheme apps — the most common shape for a desktop shell — were the least protected. That branch now degrades to a *same-document* test: a navigation stays inside the window only if it matches the startup URL after stripping the `#fragment`. In-app hash routing keeps working; anything else is external.
+
+### Added
+
+- `tests/nav-guard.test.ts` — eleven assertions, written against the **call-site and assignment-site** shapes rather than identifier presence, because `toContain("install_nav_guard")` passes on the definition alone and the definition was never the problem. It also pins the two `FLAG_*` tables together in both directions: every type constant must exist in the C++ enum **and** every C++ flag constant must exist in the type table. The forward assertion alone would not have caught this release's failure — the C++ side was written first and the TypeScript side was simply missing.
+- `docs/pitfalls.md` 2.11 (declared-but-not-wired) and 2.12 (a probe's own criterion can lie), the latter recording two false criteria written during this work: a placeholder expression dressed as an assertion, and a "did the system browser load the page" check that cannot distinguish the browser from an in-webview navigation because both hit the same endpoint.
+
+### Note
+
+- The published tarball gains one exported constant (`FLAG_ALLOW_EXTERNAL_NAV`) and one `dist/libshell.dll` rebuild. Native exports are unchanged at 33 symbols.
+- The behaviour change is observable without a flag: an app that was silently relying on external links navigating its own window will now see them open in the browser instead. That is the intent, and it is why this is a minor rather than a patch.
+
 ## [0.2.2] - 2026-10-21
 
 ### Fixed
@@ -195,7 +221,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.1.0...v0.2.0
