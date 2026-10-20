@@ -12,9 +12,20 @@
 # Bun / Node
 node_modules/
 
-# 内部开发文档：不属于公开产物，也不进版本库
+# 内部开发文档：本地记录，不进版本控制、不进发布产物
+# 见 AGENTS.md 顶部说明：这两处没有 git 历史，也不随远端同步
 /AGENTS.md
 /doc/
+
+# WebView2 SDK 解压产物：由 native/fetch.ps1 从 vendor/*.nupkg 生成
+#
+# 显式声明这一条是为了不依赖用户环境的全局 gitignore。此前它只靠
+# `~/.gitignore_global` 里一条 `build/` 偶然被忽略——换机器或换用户后
+# 行为会变，且 `vendor/webview2/build/native/include/WebView2.h` 是
+# native/build.ps1 的必需输入，缺失时报错信息并不指向这里。
+#
+# 复现：clone → `pwsh -File native/fetch.ps1` → `bun run build:native`
+/vendor/webview2/
 
 # 临时与编辑器
 *.tmp
