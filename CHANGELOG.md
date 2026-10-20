@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `bun-app-window/app` — an application skeleton, and the answer to a specific number: **180**. That is how much host boilerplate a first app needed before this release, against roughly 30 lines of business code. Picking a browser-safe port, minting a per-run auth token, handling the WebSocket upgrade, serving HTML as a string, wiring `createIpcServer` into Bun's websocket callbacks, composing window flags, handling `openShell` failure, polling `isAlive()` for window close, and calling `stop()` on two things — each piece is easy, but they are only correct in one order. `createApp()` collapses it:
+
+    ```ts
+    const app = await createApp({ html, service: { greet: (n) => `hi ${n}` } });
+    await app.wait();
+    ```
+
+    Three decisions worth recording:
+
+    **It does not default to `FLAG_FRAMELESS`.** A frameless window has no system title bar, so it cannot be dragged until the page mounts `mountTitleBar`. A skeleton whose default value breaks the "hello world" case is worse than no skeleton, so the default is `FLAG_RESIZABLE | FLAG_CENTER` — the side that works even when the page does nothing.
+
+    **It is not re-exported from the main entry.** `app.ts` imports `openShell` from `./index`; exporting it back from `index.ts` would make that a cycle. It is a subpath like `./state` and `./ipc`, and a static assertion in `tests/app.test.ts` keeps it that way.
+
+    **Static assets are inline strings only.** `import html from "./index.html" with { type: "text" }` yields a compile-time constant: nothing touches the filesystem, no temp files, and it survives `bun build --compile`. Reading from a directory has to cope with `import.meta.dir` pointing at `B:\~BUN\root` after packing — the `PACKED` branch in `src/host.ts` exists precisely for that. Five lines in a `routes` callback is a better trade than leaking that problem into the skeleton.
+
+- `decideWs()` — the `/ws` decision, extracted as a pure function because it is the only branch in the skeleton and it has three ways to be wrong. `/ws` with IPC disabled is a **404, not a 403**: a 403 advertises that a channel exists. The token check must happen **before** the upgrade — after upgrading there is no chance to refuse. And the path comparison must come first, or a caller's catch-all route (the usual SPA fallback) swallows the upgrade request, leaving a page that can never connect while HTTP looks perfectly healthy.
+
+### Changed
+
+- Twelve assertions in `tests/app.test.ts` plus seven in `scripts/consumer-probe.ts`. The probe now also exercises `bun-app-window/app` from the installed package.
+- Three hardcoded counts in the docs are gone (`40 assertions`, `8 subpaths`, `182 test cases`): all three had already drifted. The consumer probe reports its own count now, and `AGENTS.md` says so.
+
+### Note
+
+- This is **not** a competitor to `Bun.WebView`, and the READMEs now say so explicitly. `Bun.WebView` is a *headless* browser for automation, testing and scraping: it has no window, and it can only screenshot its own page. This package draws a real desktop window — system title bar, DPI awareness, snap layouts, taskbar identity — and its capture tool can photograph **any** window, which is the whole point for computer-use. Comparing API surface between the two is comparing different problems.
+
 ## [0.3.0] - 2026-10-21
 
 ### Fixed

@@ -20,6 +20,7 @@ import {
     BROWSER_UI_ALL,
     FLAG_CENTER,
     FLAG_FRAMELESS,
+    FLAG_RESIZABLE,
     RESIZE_EDGE,
     STATE_FOCUSED,
     createShell,
@@ -33,6 +34,7 @@ import { connect, createIpcServer } from "bun-app-window/ipc";
 import type { Channel } from "bun-app-window/ipc";
 import nativeLibPath from "bun-app-window/native" with { type: "file" };
 import { parseBounds, parsePlacement } from "bun-app-window/state";
+import { DEFAULT_APP_FLAGS, buildAppUrl, decideWs } from "bun-app-window/app";
 import { glyphFor, labelFor, titleBarCss } from "bun-app-window/titlebar";
 
 type Result = { name: string; ok: boolean; detail: string };
@@ -64,6 +66,7 @@ equal("package.json 的 cpu 限制为 x64", JSON.stringify(meta["cpu"]), '["x64"
 const exportsMap = (meta["exports"] ?? {}) as Record<string, unknown>;
 const expectedSubpaths = [
     ".",
+    "./app",
     "./embedded",
     "./debug",
     "./state",
@@ -223,6 +226,21 @@ check(
 );
 equal("serveOnSafePort 的 fetch 可达", await (await fetch(`http://127.0.0.1:${boundPort}/`)).text(), "ok");
 server.stop(true);
+
+// ---- 11. app：应用骨架 -------------------------------------------------------
+
+// 只测纯函数。`createApp` 本身要开窗，探针在无桌面环境下跑会挂。
+equal("app.DEFAULT_APP_FLAGS 不含无边框位", DEFAULT_APP_FLAGS & FLAG_FRAMELESS, 0);
+equal("app.DEFAULT_APP_FLAGS 含可缩放", DEFAULT_APP_FLAGS & FLAG_RESIZABLE, FLAG_RESIZABLE);
+check(
+    "app.buildAppUrl 拼出带 token 的回环地址",
+    /^http:\/\/127\.0\.0\.1:\d+\/\?t=[0-9a-f-]{36}$/.test(buildAppUrl(45678, "11111111-2222-3333-4444-555555555555")),
+    buildAppUrl(45678, "11111111-2222-3333-4444-555555555555"),
+);
+equal("app.decideWs 非 /ws 交回默认处理", decideWs("/", null, "k", true), "not-ws");
+equal("app.decideWs 未开 ipc 时 404", decideWs("/ws", "k", "k", false), "ipc-disabled");
+equal("app.decideWs token 不符拒绝", decideWs("/ws", "x", "k", true), "forbidden");
+equal("app.decideWs token 相符升级", decideWs("/ws", "k", "k", true), "upgrade");
 
 // ---- 汇总 -------------------------------------------------------------------
 

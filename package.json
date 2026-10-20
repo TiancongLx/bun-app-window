@@ -29,6 +29,7 @@
     ],
     "exports": {
         ".": "./src/shell/index.ts",
+        "./app": "./src/shell/app.ts",
         "./embedded": "./src/shell/embedded.ts",
         "./debug": "./src/shell/debug.ts",
         "./state": "./src/shell/state.ts",

@@ -1,0 +1,147 @@
+import { expect, test } from "bun:test";
+
+import { resolve } from "node:path";
+
+import { DEFAULT_APP_FLAGS, buildAppUrl, decideWs } from "@/shell/app";
+import { FLAG_CENTER, FLAG_FRAMELESS, FLAG_RESIZABLE } from "@/shell/types";
+
+/**
+ * 应用骨架的守护。
+ *
+ * 这个模块是纯编排，主体（起服务 + 开窗）需要交互式桌面，测不了。所以断言集中在
+ * 两处**真会写错**的地方：
+ *
+ *  1. `/ws` 的处置判据 —— 三个分支的顺序与状态码都有陷阱（`ipc` 没开该是 404 不是 403；
+ *     token 必须在升级**之前**拒绝，升级之后就没有机会说不了）。
+ *  2. 默认 flags —— 上一版的直觉是「无边框才配得上这个包」，但无边框窗口没有系统
+ *     标题栏就**拖不动**，必须由页面先挂 `mountTitleBar`。默认值若选错，「只写了
+ *     HTML」的应用一上来就无法拖动。
+ *
+ * 另外两条静态断言守住顺序与卫生——它们在运行时才出错，而运行时出错得靠人盯着窗口看。
+ */
+const APP_TS = await Bun.file(resolve(import.meta.dir, "../src/shell/app.ts")).text();
+
+/** 剔掉整行注释后的源码（同 `first-paint.test.ts`：注释掉的实现不算实现） */
+const APP_CODE = APP_TS.split(/\r?\n/)
+    .filter((line) => {
+        const t = line.trim();
+        return !(t.startsWith("//") || t.startsWith("*") || t.startsWith("/*"));
+    })
+    .join("\n");
+
+const TOKEN = "11111111-2222-3333-4444-555555555555";
+
+test("默认 flags 不含 FLAG_FRAMELESS", () => {
+    // 这不是偏好问题：无边框 = 没有系统标题栏 = 拖不动，
+    // 而那要求页面先 mountTitleBar。默认值必须选「页面什么都不做也能用」的那一侧。
+    expect(DEFAULT_APP_FLAGS & FLAG_FRAMELESS).toBe(0);
+});
+
+test("默认 flags 含可缩放与居中", () => {
+    expect(DEFAULT_APP_FLAGS & FLAG_RESIZABLE).toBe(FLAG_RESIZABLE);
+    expect(DEFAULT_APP_FLAGS & FLAG_CENTER).toBe(FLAG_CENTER);
+});
+
+test("buildAppUrl 把 token 放进查询参数，且端口落在安全区间", () => {
+    const url = buildAppUrl(51234, TOKEN);
+    const parsed = new URL(url);
+    expect(parsed.hostname).toBe("127.0.0.1");
+    expect(parsed.port).toBe("51234");
+    expect(parsed.pathname).toBe("/");
+    // 页面侧 connect() 默认从 ?t= 取 token；键名改了等于改协议
+    expect(parsed.searchParams.get("t")).toBe(TOKEN);
+});
+
+test("buildAppUrl 不会拼出 undefined 端口", () => {
+    // `Bun.serve` 的 port 是 `number | undefined`，顺手断言会让这里变成
+    // "http://127.0.0.1:undefined/?t=..." —— WebView2 会把它当合法 URL 打开一个空白窗
+    const url = buildAppUrl(40000, TOKEN);
+    expect(url).not.toContain("undefined");
+});
+
+test("decideWs：非 /ws 一律交回默认处理", () => {
+    expect(decideWs("/", TOKEN, TOKEN, true)).toBe("not-ws");
+    expect(decideWs("/index.html", TOKEN, TOKEN, true)).toBe("not-ws");
+    // 前缀相同但不是 /ws 的路径不能被当成通道
+    expect(decideWs("/wsx", TOKEN, TOKEN, true)).toBe("not-ws");
+    expect(decideWs("/api/ws", TOKEN, TOKEN, true)).toBe("not-ws");
+});
+
+test("decideWs：没开 ipc 时是 404 而不是 403", () => {
+    // 差别不只是状态码：403 等于告诉扫描者「这里有通道，只是你没钥匙」
+    expect(decideWs("/ws", TOKEN, TOKEN, false)).toBe("ipc-disabled");
+    // 即便 token 对也一样——通道压根不存在
+    expect(decideWs("/ws", null, TOKEN, false)).toBe("ipc-disabled");
+});
+
+test("decideWs：token 不符必须拒绝", () => {
+    expect(decideWs("/ws", null, TOKEN, true)).toBe("forbidden");
+    expect(decideWs("/ws", "", TOKEN, true)).toBe("forbidden");
+    expect(decideWs("/ws", "wrong", TOKEN, true)).toBe("forbidden");
+    // 前缀匹配不算通过
+    expect(decideWs("/ws", TOKEN.slice(0, -1), TOKEN, true)).toBe("forbidden");
+    expect(decideWs("/ws", `${TOKEN}x`, TOKEN, true)).toBe("forbidden");
+});
+
+test("decideWs：token 相符才升级", () => {
+    expect(decideWs("/ws", TOKEN, TOKEN, true)).toBe("upgrade");
+});
+
+/**
+ * `/ws` 必须在 `routes` 之前处理。
+ *
+ * 反过来写会让调用方的 catch-all 路由（SPA fallback 常写成「总是返回 index.html」）
+ * 把 WebSocket 升级请求吃掉，表现为页面连不上 IPC、而 HTTP 一切正常。
+ */
+test("handle 里 /ws 的判定早于 routes 回调", () => {
+    const wsAt = APP_CODE.indexOf("decideWs(");
+    const routesAt = APP_CODE.indexOf("opts.routes?.(");
+    expect(wsAt).toBeGreaterThan(0);
+    expect(routesAt).toBeGreaterThan(0);
+    expect(wsAt).toBeLessThan(routesAt);
+});
+
+/**
+ * `stop()` 必须先等窗口销毁再关服务。
+ *
+ * 原生层是进程级单例，`shell_stop()` 只是投一个 `WM_QUIT`，UI 线程真正退出约 50 ms。
+ * 抢在前面关服务，或紧接着再 `start()`，会撞上「shell already started」
+ * （`pitfalls` 2.4g / 7.1）。
+ */
+test("stop 里 shell.stop 早于 server.stop，且中间有等销毁的轮询", () => {
+    const stopAt = APP_CODE.indexOf("async stop()");
+    expect(stopAt).toBeGreaterThan(0);
+    const body = APP_CODE.slice(stopAt, stopAt + 700);
+
+    const shellStopAt = body.indexOf("shell.stop()");
+    const pollAt = body.indexOf("shell.isAlive()");
+    const serverStopAt = body.indexOf("server.stop(");
+
+    expect(shellStopAt).toBeGreaterThan(0);
+    expect(serverStopAt).toBeGreaterThan(0);
+    // 缺了这段轮询，关服务的时机就退化成「投完 WM_QUIT 立刻关」——顺序对了也不够
+    expect(pollAt).toBeGreaterThan(shellStopAt);
+    expect(serverStopAt).toBeGreaterThan(shellStopAt);
+});
+
+test("openShell 失败时必须关掉本地服务，不留半启动状态", () => {
+    const shellAt = APP_CODE.indexOf("shell = await openShell(");
+    expect(shellAt).toBeGreaterThan(0);
+    // 失败分支里要有 server.stop；否则端口被占着，「重试一次」也会失败
+    const catchAt = APP_CODE.indexOf("} catch (err) {", shellAt);
+    expect(catchAt).toBeGreaterThan(shellAt);
+    const catchBody = APP_CODE.slice(catchAt, catchAt + 200);
+    expect(catchBody).toContain("server.stop(");
+});
+
+/**
+ * 模块卫生。`app.ts` 从 `./index` 导入 `openShell`，如果 `index.ts` 反过来导出
+ * `app`，就成循环。本仓 `src/shell/index.ts` 有一条「零顶层副作用」的硬约束，
+ * 循环会让评估顺序变得不可推理。
+ */
+test("app 不被主入口导出（避免 app → index → app 循环）", async () => {
+    const indexPath = resolve(import.meta.dir, "../src/shell/index.ts");
+    const index = await Bun.file(indexPath).text();
+    expect(index).not.toContain('from "./app"');
+    expect(index).not.toContain("export * from \"./app\"");
+});

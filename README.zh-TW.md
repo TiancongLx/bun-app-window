@@ -136,6 +136,65 @@ shell.setTitle("Doing work…");
 
 核心視窗控制之外的擴充能力均拆分於獨立子路徑下，可依需求匯入。
 
+### `bun-app-window/app` — 應用程式骨架
+
+用這個套件寫第一個應用程式時，業務程式碼可能只有 30 行，但**宿主樣板是 180 行**：挑安全埠、
+產生驗證 token、處理 WebSocket 升級、把 HTML 當字串吐出去、把 `createIpcServer`
+接到 Bun 的 websocket 回呼上、拼視窗旗標、處理 `openShell` 失敗、輪詢 `isAlive()`
+等視窗關閉、依序 `stop()` 兩個東西。每一段單看都不難，但它們**只在特定順序下正確**
+（`stop()` 不先等視窗真的銷毀就關服務，下次啟動會撞上 "already started"）。
+`app` 把這些收成一次呼叫：
+
+```ts
+// main.ts
+import { createApp } from "bun-app-window/app";
+import { BROWSER_UI_ALL, FLAG_FRAMELESS } from "bun-app-window";
+import html from "./index.html" with { type: "text" };
+
+const app = await createApp({
+  html,
+  title: "我的應用程式",
+  flags: FLAG_FRAMELESS,          // 想要自繪標題列就明確加上
+  browserUi: BROWSER_UI_ALL,
+  service: {
+    greet: (name: string) => `hi ${name}`,
+    pickFolder: () => app.shell.pickFolder(),
+  },
+});
+
+await app.wait();                  // 視窗關閉時 resolve
+```
+
+```ts
+// page.ts —— index.html 的 bundle 內
+import { connect } from "bun-app-window/ipc";
+const api = await connect();       // token 從頁面 URL 的 ?t= 取得
+await api.greet("Ada");
+```
+
+它替你做的事：
+
+- 綁定瀏覽器安全的埠（絕不會是 `ERR_UNSAFE_PORT` 那幾個），並把 HTML 服務出去。
+- 每次執行產生一個 token，並在**升級之前**用它校驗 `/ws` —— 升級之後就沒有機會拒絕了。
+  `ipc` 未開啟時 `/ws` 是 `404` 而不是 `403`：403 等於告訴對方「這裡有通道」。
+- 把 `createIpcServer` 接到 websocket 的 `open` / `message` / `close` 上，`ipc.emit()` 才能到頁面。
+- `stop()` 有序且冪等：`shell.stop()` → 輪詢 `isAlive()` → `server.stop()`。
+- 啟動失敗不留半啟動狀態：`openShell` 拋錯時，已綁定的埠會被釋放。
+
+注意事項：
+
+- **預設不帶 `FLAG_FRAMELESS`。** 無邊框視窗沒有系統標題列就拖不動，必須由頁面先掛上
+  `mountTitleBar`。預設值選的是「頁面什麼都不做也能用」的那一側。
+- **靜態資源只吃內嵌字串。** `with { type: "text" }` 得到的是編譯期常數：不碰檔案系統、
+  不產生暫存檔、`bun build --compile` 後仍然成立。要從磁碟讀東西就寫個 `routes` 函式 ——
+  五行，而且路徑解析的問題留在你這邊，不會滲進骨架。
+- **不從主入口匯出。** 它和 `./state`、`./ipc` 一樣是子路徑。它從 `./index` 匯入
+  `openShell`；若 `index.ts` 反過來匯出它，就成了循環。
+
+**這不是 `Bun.WebView` 的替代品。** 那個是 headless 瀏覽器，做自動化 / 測試 / 擷取 ——
+沒有視窗，而且只能截自己的頁面。本專案畫的是真實桌面視窗：系統標題列、DPI 感知、
+貼齊版面配置、工作列歸屬。兩者不在同一條賽道上。
+
 ### `bun-app-window/ipc` — 型別化雙向通訊與事件匯流排
 
 宿主與前端頁面共用同一份 TypeScript 型別宣告，用戶端透過泛型在編譯期完成方法簽章與事件負載驗證：
@@ -417,7 +476,7 @@ bun run scripts/gate.ts --clean      # 同上，但在 HEAD 的乾淨副本內�
 
 `-Clean` 重現了託管 runner 的條件：將 `HEAD` clone 到 `%TEMP%`，依 lockfile 安裝相依套件，再於其中執行把關。如此一來，本機產物（`.build/`、`node_modules/`、`vendor/webview2/`）便無法掩蓋缺少的檔案。耗時約兩秒。未提交的變更會被提示並排除於乾淨副本之外——如需驗證工作區現況，請移除 `-Clean`。
 
-品質把關分三段：`bun check`、`bun test`，以及消費方驗收（`scripts/verify-pack.ts`）。第三段會把 tarball 打包到 `%TEMP%`，安裝進一個臨時專案，對該專案執行型別檢查，再執行 `scripts/consumer-probe.ts`——40 條斷言涵蓋全部子路徑、DLL 是否真的從 `node_modules` 被 `dlopen`、以及 `libInfo.source` 是否為 `package`。可離線執行，約 0.4 秒，且預設拒絕：任何未在允許清單登記的檔案被打進套件，把關就會失敗。只有在改動把關腳本本身時才用 `-SkipPack`。
+品質把關分三段：`bun check`、`bun test`，以及消費方驗收（`scripts/verify-pack.ts`）。第三段會把 tarball 打包到 `%TEMP%`，安裝進一個臨時專案，對該專案執行型別檢查，再執行 `scripts/consumer-probe.ts`——斷言涵蓋全部子路徑、DLL 是否真的從 `node_modules` 被 `dlopen`、以及 `libInfo.source` 是否為 `package`（條數由探針自報）。可離線執行，約 0.4 秒，且預設拒絕：任何未在允許清單登記的檔案被打進套件，把關就會失敗。只有在改動把關腳本本身時才用 `-SkipPack`。
 
 底層指令仍可直接呼叫：
 

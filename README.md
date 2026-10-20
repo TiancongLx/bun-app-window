@@ -138,6 +138,71 @@ the default picks the safe side.
 
 Additional capabilities outside core window management are modularized into dedicated subpath exports.
 
+### `bun-app-window/app` — Application Skeleton
+
+The first app you write with this package is about 30 lines of business code and **180 lines of
+host boilerplate**: picking a safe port, minting an auth token, handling the WebSocket upgrade,
+serving the HTML as a string, wiring `createIpcServer` into Bun's websocket callbacks, composing
+window flags, handling `openShell` failure, polling `isAlive()` for window close, and calling
+`stop()` on two things in the right order. Each piece is easy; they are only correct in a specific
+order (`stop()` must wait for the window to actually die before closing the server, or the next
+start hits "already started"). `app` collapses all of it into one call:
+
+```ts
+// main.ts
+import { createApp } from "bun-app-window/app";
+import { BROWSER_UI_ALL, FLAG_FRAMELESS } from "bun-app-window";
+import html from "./index.html" with { type: "text" };
+
+const app = await createApp({
+  html,
+  title: "My App",
+  flags: FLAG_FRAMELESS,          // opt in to a self-drawn title bar
+  browserUi: BROWSER_UI_ALL,
+  service: {
+    greet: (name: string) => `hi ${name}`,
+    pickFolder: () => app.shell.pickFolder(),
+  },
+});
+
+await app.wait();                  // resolves when the window closes
+```
+
+```ts
+// page.ts — inside index.html's bundle
+import { connect } from "bun-app-window/ipc";
+const api = await connect();       // token comes from the page URL's ?t=
+await api.greet("Ada");
+```
+
+What it does for you:
+
+- Binds a browser-safe port (never one that yields `ERR_UNSAFE_PORT`) and serves your HTML.
+- Generates a per-run token and guards `/ws` with it **before** the upgrade — after upgrading there
+  is no chance to refuse. `/ws` with IPC disabled is a `404`, not a `403`: a 403 would advertise
+  that a channel exists.
+- Wires `createIpcServer` into the websocket `open` / `message` / `close` callbacks so
+  `ipc.emit()` reaches the page.
+- `stop()` is ordered and idempotent: `shell.stop()` → poll `isAlive()` → `server.stop()`.
+- Startup failures leave nothing half-started: if `openShell` throws, the bound port is released.
+
+Notes:
+
+- **Does not default to `FLAG_FRAMELESS`.** A frameless window has no system title bar, so it cannot
+  be dragged until the page mounts `mountTitleBar`. The default is the side that works even when the
+  page does nothing.
+- **Static assets are inline strings only.** `with { type: "text" }` yields a compile-time constant:
+  nothing touches the filesystem, no temp files, and it survives `bun build --compile`. For
+  anything read from disk, write a `routes` function — five lines, and the path-resolution problem
+  stays yours instead of leaking into the skeleton.
+- **Not re-exported from the main entry.** It is a subpath like `./state` and `./ipc`. It imports
+  `openShell` from `./index`; exporting it from `index.ts` would make that a cycle.
+
+This is **not** a replacement for `Bun.WebView`. That one is a *headless* browser for automation,
+testing and scraping — it has no window, and it can only screenshot its own page. This package
+draws a real desktop window with a system title bar, DPI awareness, snap layouts and taskbar
+identity. The two do not compete.
+
 ### `bun-app-window/ipc` — Typed RPC & Event Bus
 
 Share a single TypeScript contract between the host and the web page for compile-time verification of method signatures and event payloads:
@@ -421,7 +486,7 @@ bun run scripts/gate.ts --clean      # same gates, but inside a fresh clone of H
 
 `-Clean` reproduces the conditions a hosted runner would provide: it clones `HEAD` into `%TEMP%`, installs from the lockfile, and runs the gates there, so local artefacts (`.build/`, `node_modules/`, `vendor/webview2/`) cannot mask a missing file. It takes about two seconds. Uncommitted changes are reported and excluded — run without `-Clean` to verify the working tree as-is.
 
-The gate has three stages: `bun check`, `bun test`, and consumer acceptance (`scripts/verify-pack.ts`). The third packs the tarball, installs it into a scratch project under `%TEMP%`, type-checks that project, and runs `scripts/consumer-probe.ts` against the installed package — 40 assertions covering every subpath, the DLL actually being `dlopen`-ed out of `node_modules`, and `libInfo.source === "package"`. It runs offline in about 0.4 s and denies by default: a file packed without being listed in the allow-list fails the gate. Pass `-SkipPack` only when the gate itself is what you are changing.
+The gate has three stages: `bun check`, `bun test`, and consumer acceptance (`scripts/verify-pack.ts`). The third packs the tarball, installs it into a scratch project under `%TEMP%`, type-checks that project, and runs `scripts/consumer-probe.ts` against the installed package — assertions covering every subpath, the DLL actually being `dlopen`-ed out of `node_modules`, and `libInfo.source === "package"` (the probe reports its own count). It runs offline in about 0.4 s and denies by default: a file packed without being listed in the allow-list fails the gate. Pass `-SkipPack` only when the gate itself is what you are changing.
 
 The underlying commands remain available directly:
 
