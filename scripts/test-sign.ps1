@@ -3,8 +3,8 @@
 # 注意：这是「流程可行性」验证，不是「受信任分发」验证。
 # 自签证书没有公共信任链，普通用户机器上仍会触发 SmartScreen / 未知发布者。
 param(
-    [string]$Exe = (Join-Path $PSScriptRoot '..\dist\bunframe.exe'),
-    [string]$SignedOut = (Join-Path $PSScriptRoot '..\dist\bunframe.signed.exe')
+    [string]$Exe = (Join-Path $PSScriptRoot '..\dist\bun-app-window.exe'),
+    [string]$SignedOut = (Join-Path $PSScriptRoot '..\dist\bun-app-window.signed.exe')
 )
 
 Set-StrictMode -Version Latest

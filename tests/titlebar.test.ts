@@ -208,7 +208,7 @@ test("样式只注入一次，多个标题栏共用", () => {
 
     let count = 0;
     walk(doc.body, (n) => {
-        if (n.getAttribute("id") === "bunframe-titlebar-css") {
+        if (n.getAttribute("id") === "bun-app-window-titlebar-css") {
             count++;
         }
     });

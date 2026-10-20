@@ -2,7 +2,7 @@
 # 运行态杀软验证：通过 /IT 计划任务把 GUI 进程放到 Session 1，
 # 再用当前 Session 0 的权限跨会话观察它的模块映射与 Defender 反应。
 param(
-    [string]$Exe = (Join-Path $PSScriptRoot '..\dist\bunframe.exe'),
+    [string]$Exe = (Join-Path $PSScriptRoot '..\dist\bun-app-window.exe'),
     [string]$TaskName = 'wv-avrt'
 )
 
@@ -33,7 +33,7 @@ Write-Host 'task started, waiting for process...'
 $target = $null
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Milliseconds 500
-    $target = Get-Process -Name 'bunframe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $target = Get-Process -Name 'bun-app-window' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($target) { break }
 }
 
@@ -80,7 +80,7 @@ try {
     Write-Host '=== cleanup ==='
     & schtasks.exe /end /tn $TaskName 2>&1 | Out-Null
     & schtasks.exe /delete /tn $TaskName /f 2>&1 | Out-Null
-    Get-Process -Name 'bunframe' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name 'bun-app-window' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Remove-Item $launcher -Force -ErrorAction SilentlyContinue
 
     $after = @(Get-MpThreatDetection -ErrorAction SilentlyContinue)

@@ -148,7 +148,7 @@ export type ResolveOptions = {
 };
 
 export async function resolveNativeLib(opts: ResolveOptions = {}): Promise<NativeLibInfo> {
-  const appName = opts.appName ?? "BunFrame";
+  const appName = opts.appName ?? "BunAppWindow";
 
   // 1. 显式指定
   if (opts.nativeLibPath) {
@@ -189,7 +189,7 @@ export async function resolveNativeLib(opts: ResolveOptions = {}): Promise<Nativ
     throw new Error(
       "cannot locate libshell.dll in a compiled executable. " +
         "Either place libshell.dll next to the executable, or import " +
-        "`bunframe/embedded` so it gets bundled. " +
+        "`bun-app-window/embedded` so it gets bundled. " +
         `Searched: ${dirname(process.execPath)}`,
     );
   }

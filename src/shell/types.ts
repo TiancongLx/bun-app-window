@@ -136,7 +136,7 @@ export type ShellOptions = {
   browserUi?: number;
   /**
    * 编译产物内嵌字节的提供者。
-   * 使用 `bun build --compile` 时传入 `embeddedDll`（见 `bunframe/embedded`）。
+   * 使用 `bun build --compile` 时传入 `embeddedDll`（见 `bun-app-window/embedded`）。
    */
   embedded?: () => Promise<Uint8Array | null>;
 };

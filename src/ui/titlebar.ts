@@ -7,7 +7,7 @@
  *
  * 三条边界：
  *
- *   1. **不依赖 `bunframe` 的任何内部模块。** 窗口控制走注入的 `bridge`，
+ *   1. **不依赖 `bun-app-window` 的任何内部模块。** 窗口控制走注入的 `bridge`，
  *      因此这个组件也能用在 Electron / Tauri / 纯浏览器里。
  *   2. **不依赖 DOM 类型声明。** `tsconfig` 的 `lib` 只有 ESNext，这里自带一套
  *      最小的元素接口；运行时用真实的 DOM 对象，类型上按结构匹配。
@@ -96,7 +96,7 @@ export function labelFor(action: "minimize" | "maximize" | "close", maximized: b
     return maximized ? "向下还原" : "最大化";
 }
 
-const STYLE_ID = "bunframe-titlebar-css";
+const STYLE_ID = "bun-app-window-titlebar-css";
 
 /**
  * 组件样式。
@@ -406,7 +406,7 @@ export function mountTitleBar(opts: TitleBarOptions): TitleBarHandle {
 }
 
 /**
- * 便利函数：把 `bunframe/ipc` 的客户端包成 `TitleBarBridge`。
+ * 便利函数：把 `bun-app-window/ipc` 的客户端包成 `TitleBarBridge`。
  *
  * 传进来的服务需要暴露四个方法（见 `WindowService`）。单独做成函数而不是
  * 让 `mountTitleBar` 自己认 IPC，是为了让组件与控制通道保持解耦。

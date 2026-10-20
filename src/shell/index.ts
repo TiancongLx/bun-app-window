@@ -1,11 +1,11 @@
 /**
- * index.ts — bunframe 内核门面
+ * index.ts — bun-app-window 内核门面
  *
  * 这是包的唯一稳定入口。它只做三件事：解析原生库、暴露窗口操作、暴露排障探针。
  * 不带任何业务逻辑、不读环境变量、不写日志文件、不调用 process.exit。
  *
  * ```ts
- * import { createShell, FLAG_FRAMELESS, FLAG_CENTER } from "bunframe";
+ * import { createShell, FLAG_FRAMELESS, FLAG_CENTER } from "bun-app-window";
  *
  * const shell = await createShell({
  *   url: "http://127.0.0.1:40001",
@@ -122,14 +122,14 @@ export type Shell = {
    * 当前窗口矩形，格式 "x,y,w,h,maximized,dpi"（物理像素）。
    * 最大化时返回的是「还原后」的矩形。窗口未启动时返回空串。
    *
-   * 一般不需要直接解析它——用 bunframe/state 的 capturePlacement()。
+   * 一般不需要直接解析它——用 bun-app-window/state 的 capturePlacement()。
    */
   getBounds(): string;
   /**
    * 恢复窗口矩形。savedDpi 是保存时的 DPI，用于跨缩放比例换算；
    * 原生侧还会校验矩形是否仍在某块屏上，不在则居中。
    *
-   * 一般不需要直接调用——用 bunframe/state 的 estorePlacement()。
+   * 一般不需要直接调用——用 bun-app-window/state 的 estorePlacement()。
    */
   restoreBounds(
     x: number,
@@ -163,7 +163,7 @@ export type Shell = {
   readonly symbols: NativeSymbols;
 
   // 排障面（hittest / metrics / dpi / selfBase / selfPath）已移到独立入口
-  //     import { debugOf } from "bunframe/debug"
+  //     import { debugOf } from "bun-app-window/debug"
   // 目的：公共面只承诺产品向能力。把排障面留在主入口，等于把它也变成契约，
   // 将来改一次诊断输出就成了破坏性变更。
 };
@@ -189,7 +189,7 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
       if (started) return { rc: -1, error: "shell already started" };
       const rc = symbols.shell_start_ex(
         cstr(opts.url),
-        cstr(opts.title ?? "bunframe"),
+        cstr(opts.title ?? "bun-app-window"),
         opts.width ?? 1000,
         opts.height ?? 680,
         opts.flags ?? 0,

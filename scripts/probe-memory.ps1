@@ -4,7 +4,7 @@
 # 2) 用 VirtualQuery 遍历目标进程地址空间，找包含 "MZ"/"PE" 的私有映射
 # 3) 与磁盘上的 libshell.dll 做特征比对
 param(
-    [string]$Exe = (Join-Path $PSScriptRoot '..\dist\bunframe.exe'),
+    [string]$Exe = (Join-Path $PSScriptRoot '..\dist\bun-app-window.exe'),
     [string]$Dll = (Join-Path $PSScriptRoot '..\build\libshell.dll'),
     [string]$TaskName = 'wv-memprobe'
 )
@@ -26,7 +26,7 @@ $launcher = Join-Path ([System.IO.Path]::GetTempPath()) 'memprobe-hold.cmd'
 $target = $null
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Milliseconds 500
-    $target = Get-Process -Name 'bunframe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $target = Get-Process -Name 'bun-app-window' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($target) { break }
 }
 
@@ -156,7 +156,7 @@ public struct MEMORY_BASIC_INFORMATION {
 } finally {
     & schtasks.exe /end /tn $TaskName 2>&1 | Out-Null
     & schtasks.exe /delete /tn $TaskName /f 2>&1 | Out-Null
-    Get-Process -Name 'bunframe' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name 'bun-app-window' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Remove-Item $launcher -Force -ErrorAction SilentlyContinue
     Write-Host ''
     Write-Host 'cleanup done'

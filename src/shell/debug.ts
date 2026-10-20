@@ -9,8 +9,8 @@ import { readBuffer } from "./native";
  * 将来改一次诊断输出的格式，就成了破坏性变更。放到子路径后，
  * 主入口的 `Shell` 类型可以稳定演进，而排障手段仍随手可用。
  *
- *     import { openShell } from "bunframe";
- *     import { debugOf } from "bunframe/debug";
+ *     import { openShell } from "bun-app-window";
+ *     import { debugOf } from "bun-app-window/debug";
  *
  * 这些接口随时可能变化，生产代码不应依赖。
  */

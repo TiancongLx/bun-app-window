@@ -10,13 +10,13 @@ $ErrorActionPreference = 'Stop'
 
 $dist = Join-Path $Root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
-$out = Join-Path $dist 'bunframe.exe'
+$out = Join-Path $dist 'bun-app-window.exe'
 
 $common = @(
     'build', '--compile', '--minify',
     '--windows-title', 'WebView Shell',
     '--windows-description', 'Native shell for Bun + WebView2',
-    '--windows-publisher', 'bunframe',
+    '--windows-publisher', 'bun-app-window',
     '--windows-version', '0.1.0.0'
 )
 $iconPath = Join-Path $Root 'assets\app.ico'

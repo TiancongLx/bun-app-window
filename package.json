@@ -1,6 +1,6 @@
 {
     "$schema": "https://json.schemastore.org/package.json",
-    "name": "bunframe",
+    "name": "bun-app-window",
     "version": "0.7.0",
     "description": "Native WebView2 window shell for Bun — frameless or system-decorated windows, DPI-aware geometry, typed IPC, system-accurate title bar",
     "type": "module",
@@ -8,11 +8,11 @@
     "author": "Dolores <tiancong.li@hotmail.com> (https://github.com/TiancongLx)",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/TiancongLx/bunframe.git"
+        "url": "git+https://github.com/TiancongLx/bun-app-window.git"
     },
-    "homepage": "https://github.com/TiancongLx/bunframe#readme",
+    "homepage": "https://github.com/TiancongLx/bun-app-window#readme",
     "bugs": {
-        "url": "https://github.com/TiancongLx/bunframe/issues"
+        "url": "https://github.com/TiancongLx/bun-app-window/issues"
     },
     "os": ["win32"],
     "cpu": ["x64"],

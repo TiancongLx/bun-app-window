@@ -1,4 +1,4 @@
-# bunframe
+# bun-app-window
 
 Windows 上用系统 WebView2 承载界面的**原生窗口壳**，给 Bun 应用用。无边框、DPI 感知、缩放边框、双向消息通道，ABI 与原生层都在你自己的代码里。
 
@@ -8,14 +8,14 @@ Windows 上用系统 WebView2 承载界面的**原生窗口壳**，给 Bun 应�
 你的 Bun 进程
 ├─ 业务逻辑（原样）
 ├─ 本地 HTTP + WebSocket（自己起，或用 serveOnSafePort）
-└─ bunframe  ← 开窗、几何、DPI、消息桥
+└─ bun-app-window  ← 开窗、几何、DPI、消息桥
         └─ libshell.dll  →  WebView2
 ```
 
 ## 安装
 
 ```bash
-bun add bunframe
+bun add bun-app-window
 ```
 
 要求：Windows 10/11 x64、Bun ≥ 1.4、系统已安装 WebView2 Runtime（Win11 自带）。
@@ -23,7 +23,7 @@ bun add bunframe
 ## 最小用法
 
 ```ts
-import { openShell, serveOnSafePort, FLAG_FRAMELESS, FLAG_CENTER } from "bunframe";
+import { openShell, serveOnSafePort, FLAG_FRAMELESS, FLAG_CENTER } from "bun-app-window";
 
 const server = serveOnSafePort({
   fetch: () => new Response("<h1>Hello</h1>", {
@@ -114,7 +114,7 @@ WebView2 的默认设置是**浏览器**语义。这不是缺陷——对浏览�
 #### 1. 关掉浏览器行为
 
 ```ts
-import { openShell, BROWSER_UI_ALL } from "bunframe";
+import { openShell, BROWSER_UI_ALL } from "bun-app-window";
 
 const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 ```
@@ -189,7 +189,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 一条单向的 `post()`，收发的形状要应用自己约定——于是每个接入方都要手写一遍
 「消息类型 + 路由 + 错误处理」。
 
-`bunframe/ipc` 把这件事收敛成一份声明：**方法表**。
+`bun-app-window/ipc` 把这件事收敛成一份声明：**方法表**。
 
 #### 与 MyGo 的差别：不生成代码
 
@@ -214,8 +214,8 @@ export type Events = {
 #### 宿主侧
 
 ```ts
-import { createIpcServer } from "bunframe/ipc";
-import { serveOnSafePort } from "bunframe";
+import { createIpcServer } from "bun-app-window/ipc";
+import { serveOnSafePort } from "bun-app-window";
 
 const ipc = createIpcServer({
     service: {
@@ -242,7 +242,7 @@ ipc.emit("windowState", { width: 900, height: 700, maximized: false });
 #### 页面侧
 
 ```ts
-import { connect } from "bunframe/ipc";
+import { connect } from "bun-app-window/ipc";
 import type { Api, Events } from "./api";
 
 const api = await connect<Api, Events>();
@@ -274,12 +274,12 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 无边框模式下窗口没有系统标题栏，得自己画。自己画容易画出「网页顶上贴了三个按钮」
 的效果，差在尺寸、悬停色、按钮字形这些细节上。
 
-`bunframe/titlebar` 是一份调好的实现：32px 高、46×32 按钮、关闭键悬停 `#c42b1c`、
+`bun-app-window/titlebar` 是一份调好的实现：32px 高、46×32 按钮、关闭键悬停 `#c42b1c`、
 深色/浅色两套配色、最大化与还原按钮自动换字形。
 
 ```ts
-import { mountTitleBar, bridgeFromWindowService } from "bunframe/titlebar";
-import { connect } from "bunframe/ipc";
+import { mountTitleBar, bridgeFromWindowService } from "bun-app-window/titlebar";
+import { connect } from "bun-app-window/ipc";
 
 const api = await connect<WindowApi, Events>();
 const bar = mountTitleBar({
@@ -311,7 +311,7 @@ const ipc = createIpcServer({
 
 #### 两点设计取舍
 
-**不依赖 `bunframe` 的任何内部模块。** 窗口控制走注入的 `bridge`，所以这个组件
+**不依赖 `bun-app-window` 的任何内部模块。** 窗口控制走注入的 `bridge`，所以这个组件
 也能用在 Electron 或 Tauri 里。要接别的壳，实现 `TitleBarBridge` 四个方法即可。
 
 **配色和尺寸全走 CSS 变量**，覆盖 `--ws-tb-*` 就能换肤：
@@ -342,11 +342,11 @@ Edge 菜单、`Ctrl+P` 会打印页面。见上一节。
 ### 窗口位置持久化（独立入口）
 
 库主体有一条硬约束：`index.ts` 不引入副作用。持久化按定义就是副作用，所以它是
-**显式调用**的可选件，放在 `bunframe/state`——不调用就不会有任何文件产生。
+**显式调用**的可选件，放在 `bun-app-window/state`——不调用就不会有任何文件产生。
 
 ```ts
-import { openShell } from "bunframe";
-import { attachPlacementStore, loadPlacement, restorePlacement } from "bunframe/state";
+import { openShell } from "bun-app-window";
+import { attachPlacementStore, loadPlacement, restorePlacement } from "bun-app-window/state";
 
 const FILE = "C:\\Users\\me\\AppData\\Roaming\\MyApp\\window.json";
 const shell = await openShell({ url, width: 900, height: 700, flags: FLAG_DEFER_SHOW });
@@ -382,7 +382,7 @@ process.on("beforeExit", () => store.flush());
 变更。它们随时可能变化，生产代码不应依赖：
 
 ```ts
-import { debugOf } from "bunframe/debug";
+import { debugOf } from "bun-app-window/debug";
 
 const d = debugOf(shell);
 d.metrics();   // pos / win / client / work / border / round
@@ -402,8 +402,8 @@ d.hittest(x, y);
 ## 打成单文件 exe
 
 ```ts
-import { createShell } from "bunframe";
-import { embeddedDll } from "bunframe/embedded";   // 关键：把 DLL 带进包
+import { createShell } from "bun-app-window";
+import { embeddedDll } from "bun-app-window/embedded";   // 关键：把 DLL 带进包
 
 const shell = await createShell({ url, embedded: embeddedDll });
 ```
@@ -412,7 +412,7 @@ const shell = await createShell({ url, embedded: embeddedDll });
 bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 ```
 
-只写 `import "bunframe/embedded";` 也可以——resolve 会自动从 `Bun.embeddedFiles` 里找到它。
+只写 `import "bun-app-window/embedded";` 也可以——resolve 会自动从 `Bun.embeddedFiles` 里找到它。
 
 不需要 `--windows-hide-console` 之外的特殊参数；不加会出现黑色控制台窗口。
 
