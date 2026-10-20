@@ -83,6 +83,12 @@ const user32 = dlopen("user32.dll", {
     GetWindowTextLengthW: { args: [FFIType.u64_fast], returns: "i32" },
     GetWindowRect: { args: [FFIType.u64_fast, "buffer"], returns: "bool" },
     GetClientRect: { args: [FFIType.u64_fast, "buffer"], returns: "bool" },
+    // ClientToScreen 的 POINT 是「输入输出同体」：传进来客户区坐标，调用后就地改写成
+    // 屏幕坐标。所以传进去的缓冲必须先填好值，不能是空指针（空指针会写崩）。
+    ClientToScreen: { args: [FFIType.u64_fast, "buffer"], returns: "bool" },
+    // GetDpiForWindow 需要 WINVER >= 0x0A00（Win10 1607+）；本仓 win32.ts 不定义
+    // WINVER，但那是 MinGW 头文件的门控，运行时按导出名解析，与编译期宏无关。
+    GetDpiForWindow: { args: [FFIType.u64_fast], returns: "u32" },
     GetForegroundWindow: { args: [], returns: FFIType.u64_fast },
     SetProcessDPIAware: { args: [], returns: "bool" },
     OpenInputDesktop: { args: ["u32", "bool", "u32"], returns: FFIType.u64_fast },
@@ -175,13 +181,64 @@ function windowPid(hwnd: bigint): number {
 }
 
 const rectBuf = new Uint8Array(16);
+const pointBuf = new Uint8Array(8);
 
-function windowRect(hwnd: bigint): Rect {
+/**
+ * 整窗矩形（屏幕坐标，物理像素）。
+ *
+ * 这就是 `PrintWindow` 拍出来的那张图的坐标基准：图像 (0,0) 对应 `left, top`。
+ */
+export function windowRect(hwnd: bigint): Rect {
     rectBuf.fill(0);
     if (!user32.symbols.GetWindowRect(hwnd, rectBuf)) {
         return { left: 0, top: 0, right: 0, bottom: 0 };
     }
     return readRect(rectBuf);
+}
+
+/**
+ * 客户区矩形。
+ *
+ * 注意 `GetClientRect` 返回的恒以 `(0,0)` 为左上角——它是**尺寸**，不是位置。
+ * 客户区在屏幕上的位置要用 {@link clientOrigin}。这两个概念混用是坐标映射里最容易
+ * 错的一处：拿 `GetClientRect().left` 当屏幕 x 会恒得 0，于是「点击总是落在左上角」。
+ */
+export function clientRect(hwnd: bigint): Rect {
+    rectBuf.fill(0);
+    if (!user32.symbols.GetClientRect(hwnd, rectBuf)) {
+        return { left: 0, top: 0, right: 0, bottom: 0 };
+    }
+    return readRect(rectBuf);
+}
+
+/**
+ * 客户区左上角在屏幕上的位置（物理像素）。
+ *
+ * 这是「截图坐标 → 页面元素坐标」那条链的锚点：模型在一张 PrintWindow 图上圈出的点，
+ * 先换算成整窗坐标，再减 `(clientOrigin - windowRect左上角)` 才是客户区坐标。
+ *
+ * 失败返回 `null` 而不是 `(0,0)`：`(0,0)` 是个合法坐标（左上角屏幕），
+ * 用它表示失败会让调用方悄悄点到屏幕角落去。
+ */
+export function clientOrigin(hwnd: bigint): { x: number; y: number } | null {
+    const view = new DataView(pointBuf.buffer);
+    view.setInt32(0, 0, true);
+    view.setInt32(4, 0, true);
+    if (!user32.symbols.ClientToScreen(hwnd, pointBuf)) {
+        return null;
+    }
+    return { x: view.getInt32(0, true), y: view.getInt32(4, true) };
+}
+
+/**
+ * 窗口所在显示器的 DPI（96 = 100%）。
+ *
+ * 进程未声明 DPI 感知时系统会把坐标伪装成 96，所以调用方必须**先** `setDpiAware()`，
+ * 否则这里读到 96、而窗口矩形其实是物理像素——两者比例对不上，映射会整体偏移。
+ */
+export function dpiOfWindow(hwnd: bigint): number {
+    const dpi = user32.symbols.GetDpiForWindow(hwnd);
+    return typeof dpi === "number" && dpi > 0 ? dpi : 96;
 }
 
 /**
