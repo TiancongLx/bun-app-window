@@ -323,6 +323,60 @@ test("超时后 reject，且迟到的回复被丢弃", async () => {
     expect(api.pending).toBe(0);
 });
 
+/**
+ * `timeoutMs: 0` 的契约是「**不超时**」，不是「0 毫秒超时」。
+ *
+ * 这不是理论问题：`pickFolder()` 内部是 `SHBrowseForFolder`，同步阻塞、
+ * 耗时完全由用户决定（挑一分钟很正常）。拿着默认 30 秒去调它，客户端会在
+ * 服务端还正常阻塞时先 reject；调用方若没接 `.catch`，表现就是「选完了界面
+ * 什么反应都没有」—— 而取消很快返回，所以只有「挑久了」才复现。
+ *
+ * 应用侧的正确做法是 `connect({ timeoutMs: 0 })`（`baw-mvp` 的 `page.ts` 就是这么做的）。
+ * 但此前**没有任何断言守着这个值**，两处改动都能把它悄悄打回 30 秒而门禁全绿：
+ *
+ *   opts.timeoutMs ?? 30000   →   opts.timeoutMs || 30000   （0 是 falsy）
+ *   timeoutMs > 0             →   timeoutMs >= 0            （0 也挂 0ms 定时器）
+ *
+ * 第一种回归等 50ms 看不出来（30 秒才触发），所以行为断言之外再加一条静态断言。
+ */
+test("timeoutMs: 0 表示不超时（不是 0 毫秒）", async () => {
+    const channel: Channel = {
+        send: () => undefined, // 永不回复，模拟服务端还在阻塞
+        close: () => undefined,
+        onMessage: () => undefined,
+        onClose: () => undefined,
+    };
+
+    let settled: "resolved" | "rejected" | "pending" = "pending";
+    const api = await connect<{ pickFolder(): string | null }>({ channel, timeoutMs: 0 });
+    const call = api.pickFolder().then(
+        () => {
+            settled = "resolved";
+        },
+        () => {
+            settled = "rejected";
+        },
+    );
+
+    // 50ms 足以抓住「0 被当成 0ms」（那样会立刻 reject）
+    await Bun.sleep(50);
+    expect(settled).toBe("pending");
+    expect(api.pending).toBe(1);
+
+    // 收尾：关通道让它 reject，否则会留下悬挂 promise
+    void call;
+});
+
+test("timeoutMs 的默认值只能靠 ?? 落到，不能靠 ||", async () => {
+    // 静态判据：`||` 会把 0 当 falsy，把「不超时」静默退化成 30 秒。
+    // 这条断言存在的理由见上一条测试的注释。
+    const source = await Bun.file(`${import.meta.dir}/../src/shell/ipc.ts`).text();
+    expect(source).toContain("opts.timeoutMs ?? 30000");
+    expect(source).not.toContain("opts.timeoutMs || 30000");
+    // 定时器只在 > 0 时挂
+    expect(source).toContain("timeoutMs > 0");
+});
+
 test("通道关闭时，未完成的调用全部 reject", async () => {
     // 用对象持有回调：闭包里给 let 变量赋值，TS 的控制流分析看不见，
     // 会把它收窄成 null 进而推出 never

@@ -97,7 +97,7 @@ shell.setTitle("Doing work…");
 | `reload()` / `openDevTools()` / `toggleFullscreen()` | 頁面重新載入、開啟開發人員工具、切換全螢幕（分別對應 `Ctrl+R` / `F12` / `F11`） |
 | `setBrowserUi(mask)` | 停用指定的瀏覽器預設行為，傳入 `BROWSER_UI_*` 旗標的按位元 OR 組合 |
 | `showContextMenu(x, y, items)` | 於指定螢幕座標彈出 Win32 原生右鍵快顯功能表（詳見下文用法） |
-| `pickFolder(title?)` | 呼叫原生資料夾選擇對話方塊（同步阻塞目前呼叫執行緒） |
+| `pickFolder(title?)` | 呼叫原生資料夾選擇對話方塊（同步阻塞目前呼叫執行緒；**經 IPC 暴露時務必搭配 `timeoutMs: 0`**，見下文） |
 | `libInfo` | 原生動態連結程式庫解析中繼資料（包含實際路徑、載入來源、SHA-256 雜湊值） |
 | `symbols` | 底層直通介面：直接存取透過 `dlopen` 匯出的底層 C 符號 |
 
@@ -251,6 +251,28 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
 預設情況下，`connect` 會從目前頁面 URL 的查詢參數 `?t=` 中讀取驗證 Token 並連線至 `/ws`。若需自訂連線方式，可明確傳入 `url` 或自訂 `channel` 實例。
+
+#### `timeoutMs` —— 長時人機互動必須明確關閉
+
+單次呼叫預設 **30 秒**逾時。這對一般方法合理，對**人機互動**卻是致命的：
+
+```ts
+// 服務端：pickFolder 內部是 SHBrowseForFolder，同步阻塞、耗時完全由使用者決定
+const service = { pickFolder: () => shell.pickFolder() };
+
+// 頁面端：必須關閉逾時，否則使用者挑久一點，用戶端先 reject，而服務端還在正常阻塞
+const api = await connect<Api, Events>({ timeoutMs: 0 });
+```
+
+`0` 表示**不逾時**（不是「0 毫秒逾時」）。踩坑的形態有兩種，都不會讓門禁變紅：
+
+- 頁面沒接 `.catch` → 拒絕完全靜默，表現為「選完了介面毫無反應」。
+- 使用者按了「取消」很快返回，所以只有**挑久了**才重現，容易被判成偶發。
+
+還有一層要知道：`shell.pickFolder()` **阻塞的是 Bun 主執行緒**。對話方塊開啟期間，
+同一行程裡的計時器不會觸發，其他 IPC 呼叫也會排隊（不是 reject，是沒有回應）。
+用戶端那 30 秒計時器跑在瀏覽器渲染行程裡，不受影響——所以調短逾時並不能解決阻塞，
+只能讓症狀更早暴露。需要併發就得把 `pickFolder` 放進 Worker 裡呼叫。
 
 #### 用戶端保留名稱
 

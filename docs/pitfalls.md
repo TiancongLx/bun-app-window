@@ -863,6 +863,51 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
   中部翻一个字节 → `VERIFY-DLL FAILED` 并精确报出 `差异偏移：0x72d00`；
   `git checkout` 恢复 → 重新 PASSED 且该字节回到原值。
 
+### 4.9 验收标准写着 `embedded`，但那个分支从来没被接上
+
+- **背景**：`AGENTS.md` §4 把「`libInfo.source === "embedded"`，且二次运行
+  `reused === true`」写成形态 B（单文件 exe）的验收标准，§8 收尾清单也要求
+  「桌面会话下手动跑通」。这两句话在 0.4.1 之前**一条都成立不了**。
+- **症状**：`bun run build:exe` 一切正常，打包报告里也看不出问题——
+  `=== embedded assets ===` 那一段只列出 `index-*.html`，然后附一句
+  `(no libshell-* : 入口未静态 import 内嵌 DLL，DLL 走 resolve.ts 的磁盘解析)`。
+  把产物单独放进空目录运行，直接：
+
+    ```text
+    openShell failed: Error: cannot locate libshell.dll in a compiled executable.
+    Either place libshell.dll next to the executable, or import `bun-app-window/embedded`
+    so it gets bundled. Searched: C:\Users\root\AppData\Local\Temp\<dir>
+    ```
+
+- **根因**：`src/host.ts` 没有 `import "./shell/embedded"`。`resolve.ts` 在
+  `packed=true` 下三级回退是「内嵌字节 → exe 同级 → 抛错」，第一级因为打包器
+  没记录 `type: "file"` 而永远拿不到字节，于是只剩「exe 旁边放一份 DLL」能用。
+  那条路的 `source` 是 **`package`**，不是 `embedded`——**与验收标准写的不是同一个
+  东西**，所以照着标准看永远是红的，而实际又「能跑」，于是没人深究。
+- **为什么一直没被发现**：「exe 旁边放一份 DLL」确实能跑（自检全套 `exit 0`），
+  于是人工验收很容易停在「窗口起来了」这一步。而 §8 那句「形态 B 需在桌面会话
+  下手动跑通」既没有判据、也没有人真的每个版本都跑。**验收标准与验收装置脱节，
+  就等于没有验收。**
+- **修法**：`src/host.ts` 加一行副作用导入（`import "./shell/embedded";`）。
+  必须在**自检程序**里，不能在 `src/shell/` 里——那会给所有非编译型消费者加一条
+  静态 `type: "file"` 依赖，`embedded.ts` 自己写着这条禁令。`host.ts` 不在
+  `package.json` 的 `files` 白名单，所以这改动不进 tarball。
+- **正确的观察点**：`build:exe` 的 `=== embedded assets ===` 段必须出现
+  `libshell-<hash>.dll`。没有它就别往下测——先看导入在不在。
+- **验证**（删掉 `%LOCALAPPDATA%\BunAppWindow\runtime\`，产物单独放空目录）：
+
+    | 条件 | 结果 |
+    | --- | --- |
+    | 修前，空目录 | exit 1，`cannot locate libshell.dll` |
+    | 修前，exe + DLL 同级 | exit 0，`source=package` |
+    | 修后，空目录 | **exit 0，`source=embedded`**，释放到 `%LOCALAPPDATA%\BunAppWindow\runtime\libshell-15ef6452e3fcc26f.dll` |
+    | 修后，二次运行 | `source` 仍 `embedded`，释放文件 **mtime 不变**（`reused === true`） |
+
+- **副产物**：`ADR 0003` 的「自管理释放到 `%LOCALAPPDATA%`」这条路径，也是在这一刻
+  才第一次被真实 exe 走通（此前只被单测覆盖过「同名同内容复用」的纯函数部分）。
+- **证据**：`实测` + `工具核实`（2026-10-21）。打包体积从 96,158,208 涨到
+  97,165,824，差值 1,007,616 —— 正好是 `dist/libshell.dll` 的字节数。
+
 ---
 
 ## 五、工具链陷阱
@@ -1028,6 +1073,7 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 | 还原 | 回到 `pos=536,232 win=client=2000×1360` |
 | 边缘命中 | 九点分别为 13/12/14/10/1/11/16/15/17 |
 | `FLAG_CENTER`（请求 900×820，带边框） | `pos=623,56 win=1826×1711`，四边留白 623/623/56/57 |
-| 单文件 exe 体积 | 约 92.6 MiB（Bun 运行时占绝大部分） |
-| DLL 体积 | 约 971 KB（994,304 B，含外部导航守卫与窗口事件环） |
+| 单文件 exe 体积 | 约 92.7 MiB（97,165,824 B，含内嵌 DLL） |
+| DLL 体积 | 约 984 KB（1,007,616 B，含外部导航守卫与窗口事件环） |
+| 内嵌释放 | `%LOCALAPPDATA%\BunAppWindow\runtime\libshell-<sha 前 16 位>.dll`，二次运行复用（mtime 不变） |
 | 签名开销 | 约 7.2 KB |

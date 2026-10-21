@@ -97,7 +97,7 @@ Note: `createShell(opts)` only resolves and loads the native DLL without opening
 | `reload()` / `openDevTools()` / `toggleFullscreen()` | Equivalent to `Ctrl+R`, `F12`, and `F11` respectively |
 | `setBrowserUi(mask)` | Disables specific default browser behaviors using a bitwise OR of `BROWSER_UI_*` flags |
 | `showContextMenu(x, y, items)` | Displays a native Win32 context menu at the specified screen coordinates (see below) |
-| `pickFolder(title?)` | Opens a native folder selection dialog (synchronously blocks the calling thread) |
+| `pickFolder(title?)` | Opens a native folder selection dialog (synchronously blocks the calling thread; **when exposed over IPC, pair it with `timeoutMs: 0`**, see below) |
 | `libInfo` | Metadata of the resolved native library (file path, resolution source, SHA-256 hash) |
 | `symbols` | Escape hatch providing direct access to the raw `dlopen` FFI symbols |
 
@@ -262,6 +262,25 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
 By default, `connect()` extracts the auth token from the page URL's `?t=` query parameter and connects to `/ws`. Pass a custom `url` or `channel` option to override this behavior.
+
+#### `timeoutMs` — long-running human interaction must opt out
+
+Calls time out after **30 seconds** by default. That is right for ordinary methods and wrong for anything a human sits in front of:
+
+```ts
+// Host: pickFolder wraps SHBrowseForFolder — synchronous, and however long the user takes
+const service = { pickFolder: () => shell.pickFolder() };
+
+// Page: you must disable the timeout, or the client rejects while the host is still working
+const api = await connect<Api, Events>({ timeoutMs: 0 });
+```
+
+`0` means **no timeout** (not "a zero-millisecond timeout"). Two ways this bites, neither caught by any gate:
+
+- The page forgets `.catch` → the rejection is completely silent; the UI just does nothing after the user picks.
+- Cancelling returns quickly, so only a **slow** pick reproduces it — easy to write off as flaky.
+
+One more layer worth knowing: `shell.pickFolder()` **blocks the Bun main thread**. While the dialog is open, timers in that process do not fire and other IPC calls queue up (they are not rejected — they simply get no answer). The client's 30-second timer lives in the browser renderer process and is unaffected, so lowering the timeout does not fix the blocking, only surfaces it sooner. Real concurrency means running `pickFolder` in a Worker.
 
 #### Reserved client names
 

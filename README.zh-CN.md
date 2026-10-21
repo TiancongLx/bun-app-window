@@ -97,7 +97,7 @@ shell.setTitle("Doing work…");
 | `reload()` / `openDevTools()` / `toggleFullscreen()` | 页面重载、打开开发者工具、切换全屏（分别对应 `Ctrl+R` / `F12` / `F11`） |
 | `setBrowserUi(mask)` | 禁用指定的浏览器默认行为，传入 `BROWSER_UI_*` 标志位的按位或组合 |
 | `showContextMenu(x, y, items)` | 在指定屏幕坐标弹出 Win32 原生上下文菜单（详见下文用法） |
-| `pickFolder(title?)` | 调用原生文件夹选择对话框（同步阻塞当前调用线程） |
+| `pickFolder(title?)` | 调用原生文件夹选择对话框（同步阻塞当前调用线程；**经 IPC 暴露时务必配 `timeoutMs: 0`**，见下文） |
 | `libInfo` | 原生动态库解析元数据（包含实际路径、加载来源、SHA-256 校验值） |
 | `symbols` | 底层直通接口：直接访问通过 `dlopen` 导出的底层 C 符号 |
 
@@ -164,6 +164,7 @@ const app = await createApp({
   browserUi: BROWSER_UI_ALL,
   service: {
     greet: (name: string) => `hi ${name}`,
+    // 人机交互的调用耗时不可控：页面侧必须 connect({ timeoutMs: 0 })，见 ipc 一节
     pickFolder: () => app.shell.pickFolder(),
   },
 });
@@ -251,6 +252,28 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
 默认情况下，`connect` 会从当前页面 URL 的查询参数 `?t=` 中读取鉴权 Token 并连接至 `/ws`。若需自定义连接方式，可显式传入 `url` 或自定义 `channel` 实例。
+
+#### `timeoutMs` —— 长时人机交互必须显式关掉
+
+单次调用默认 **30 秒**超时。这对普通方法合理，对**人机交互**是致命的：
+
+```ts
+// 服务端：pickFolder 内部是 SHBrowseForFolder，同步阻塞、耗时完全由用户决定
+const service = { pickFolder: () => shell.pickFolder() };
+
+// 页面端：必须关掉超时，否则用户挑久一点，客户端先 reject，而服务端还在正常阻塞
+const api = await connect<Api, Events>({ timeoutMs: 0 });
+```
+
+`0` 表示**不超时**（不是「0 毫秒超时」）。踩坑的形态有两种，都不会让门禁变红：
+
+- 页面没接 `.catch` → 拒绝完全静默，表现为「选完了界面毫无反应」。
+- 用户点了「取消」很快返回，所以只有**挑久了**才复现，容易被判成偶发。
+
+还有一层要知道：`shell.pickFolder()` **阻塞的是 Bun 主线程**。对话框打开期间，
+同一进程里的定时器不会触发，其他 IPC 调用也会排队（不是 reject，是没有响应）。
+客户端那 30 秒定时器跑在浏览器渲染进程里，不受影响——所以调短超时并不能解决阻塞，
+只能让症状更早暴露。需要并发就得把 `pickFolder` 放进 Worker 里调。
 
 #### 客户端保留名
 

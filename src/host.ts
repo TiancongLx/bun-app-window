@@ -20,6 +20,17 @@ import {
   type Shell,
 } from "./shell/index";
 import { debugOf } from "./shell/debug";
+// 副作用导入：让 `bun build --compile` 把 dist/libshell.dll 记进内嵌资源表。
+//
+// 没有这一行时，打包产物在空目录里会直接失败：
+//   cannot locate libshell.dll in a compiled executable.
+// 因为 resolve.ts 的三级回退（内嵌字节 → exe 同级 → 开发态路径）在
+// `packed=true` 下只剩「exe 同级」可用，而空目录里没有那个文件。
+//
+// 只在自检程序里导入：`src/shell/` 本身不能有它——那会给所有非编译型消费者
+// 加上一条静态 `type: "file"` 依赖（见 embedded.ts 的说明）。
+// 本文件不在发布面（package.json 的 files 白名单），所以这只影响 `build:exe`。
+import "./shell/embedded";
 import uiHtml from "./ui/index.html" with { type: "text" };
 
 const ROOT = resolve(import.meta.dir, "..");
