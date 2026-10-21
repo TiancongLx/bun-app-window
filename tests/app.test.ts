@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import { resolve } from "node:path";
 
-import { DEFAULT_APP_FLAGS, buildAppUrl, decideWs } from "@/shell/app";
+import { DEFAULT_APP_FLAGS, PAGE_JS_PATH, buildAppUrl, decideWs } from "@/shell/app";
 import { FLAG_CENTER, FLAG_FRAMELESS, FLAG_RESIZABLE } from "@/shell/types";
 
 /**
@@ -99,6 +99,49 @@ test("handle 里 /ws 的判定早于 routes 回调", () => {
     expect(wsAt).toBeGreaterThan(0);
     expect(routesAt).toBeGreaterThan(0);
     expect(wsAt).toBeLessThan(routesAt);
+});
+
+/**
+ * `/page.js` 的三条顺序约束。
+ *
+ * 这是 `AppOptions.page` 的全部接线，而它有三个容易写反的次序：
+ *
+ * 1. 必须在 `routes` **之后**——调用方要能覆盖它（与 `/` 的处理同一原则）；
+ * 2. 必须在 `"/"` 判断**之前或之后都行**，但不能落进 404；
+ * 3. `content-type` 必须是 `text/javascript`，否则 `<script type="module">`
+ *    拒绝执行且不报语法错，表现是白屏加一条 MIME 警告。
+ *
+ * 三条都是「跑起来才知道」的错误，所以钉在静态形状上。
+ */
+test("handle 里 /page.js 的处理在 routes 之后、404 之前", () => {
+    const routesAt = APP_CODE.indexOf("opts.routes?.(");
+    const pageAt = APP_CODE.indexOf("url.pathname === PAGE_JS_PATH");
+    const notFoundAt = APP_CODE.lastIndexOf('new Response("not found"');
+
+    expect(routesAt).toBeGreaterThan(0);
+    expect(pageAt).toBeGreaterThan(0);
+    expect(notFoundAt).toBeGreaterThan(0);
+
+    expect(pageAt).toBeGreaterThan(routesAt);
+    expect(pageAt).toBeLessThan(notFoundAt);
+});
+
+test("/page.js 的 content-type 是 text/javascript", () => {
+    // 浏览器对 module 脚本做严格 MIME 检查。写错不报语法错，只是不执行。
+    expect(APP_CODE).toContain('const PAGE_JS_CONTENT_TYPE = "text/javascript; charset=utf-8"');
+    // 且这条常量必须真的用在 page 分支上，不能只是定义着
+    expect(APP_CODE).toContain("PAGE_JS_CONTENT_TYPE");
+});
+
+test("PAGE_JS_PATH 固定为 /page.js", () => {
+    // 路径与调用方 HTML 里的 `<script src>` 必须一致，所以不给它留配置项。
+    expect(PAGE_JS_PATH).toBe("/page.js");
+});
+
+test("没给 page 时该路径不被占用 —— 行为与引入本项之前一致", () => {
+    // `opts.page !== undefined &&` 这半句是「不给就不生效」的唯一保证。
+    // 少了它，`page` 未定义时会返回一个内容为 "undefined" 的脚本响应。
+    expect(APP_CODE).toContain("opts.page !== undefined && url.pathname === PAGE_JS_PATH");
 });
 
 /**

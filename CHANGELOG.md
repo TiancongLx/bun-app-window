@@ -30,6 +30,12 @@ _(nothing yet)_
 
 - **`App.attachPlacement(file, opts?)`** — wires placement persistence to the skeleton's single event pump. Calling `attachPlacementStore(shell, file)` without `{ events }` makes it start a **second** pump, and `shell.pollEvents()` is consumptive: the two pumps each get part of the stream, window position is dropped at random, and neither side reports anything. This was the library's easiest way to fail silently, so the choice was removed rather than documented harder.
 
+- **`bun-app-window/pack`** — the page-script bundler, so consumers stop writing it. `bundlePage({ entry })` returns `{ code, bytes }`; `writePageBundle({ entry, out })` also writes and re-checks the on-disk size. Three things are fixed rather than configurable: `target: "browser"` and `format: "esm"` (that is what a page script *is*), and reporting **bytes** instead of `string.length` — the latter is UTF-16 code units, which on a source containing CJK drifts from the byte count by a wide margin while the unit is printed as `B`. Measured on a consumer: reported `35,085 B`, on-disk `37,319 B`.
+
+    Failure handling covers both shapes `Bun.build` produces, which was not obvious: compile-time diagnostics come back as `{ success: false, logs }`, but an **unreachable entry point throws an `AggregateError`** whose `message` is only `Bundle failed` and whose members live on `.errors` — `.logs` does not exist on that path. Without the second branch, the most common mistake (a wrong entry path) produced a message with no information in it.
+
+- **`AppOptions.page`** — pass the packed page script and `createApp` serves it at `PAGE_JS_PATH` (`/page.js`) with `content-type: text/javascript; charset=utf-8`. This removes the ten-line `routes` callback from every consumer and, more importantly, removes the way it goes wrong: a wrong or missing MIME type makes `<script type="module">` refuse to execute with no syntax error, which reads as "the page logic is broken". A caller's `routes` still wins, so the path stays overridable.
+
 ### Changed
 
 - **BREAKING: `Shell.beginResize(edge)` takes `RESIZE_EDGE` values (10–17).** Migrating from 0.5.x:

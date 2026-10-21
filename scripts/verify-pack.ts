@@ -54,6 +54,7 @@ const REQUIRED: readonly string[] = [
     "src/shell/ipc.ts",
     "src/shell/events.ts",
     "src/shell/state.ts",
+    "src/shell/pack.ts",
     "src/shell/debug.ts",
     "src/shell/embedded.ts",
     "src/shell/assets.d.ts",

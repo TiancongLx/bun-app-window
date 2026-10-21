@@ -134,6 +134,24 @@ export type AppOptions = {
     nativeLibPath?: string;
     embedded?: () => Promise<Uint8Array | null>;
     /**
+     * 页面脚本（已打包的单文件 ESM 源码）。给了就自动在 `{@link PAGE_JS_PATH}`
+     * 提供它，`content-type` 固定为 `text/javascript; charset=utf-8`。
+     *
+     * 传的是**字符串**，不是路径：构建期由 `bun-app-window/pack` 打好后内联进来，
+     * 运行期不碰磁盘。写成路径会在 `bun build --compile` 之后失效，
+     * 因为那时 `import.meta.dir` 指向 `B:\~BUN\root`。
+     *
+     * ```ts
+     * import pageCode from "./ui/page.bundle.txt" with { type: "text" };
+     * const app = await createApp({ html, page: pageCode as unknown as string });
+     * ```
+     *
+     * 不给时该路径交回 `routes` 与默认处理（即 404），行为与引入本项之前一致。
+     *
+     * 调用方的 `routes` 仍然优于此项：返回非 `undefined` 就能覆盖它。
+     */
+    page?: string;
+    /**
      * IPC 服务方法表。给了就自动挂 `/ws`（含 token 校验）。
      *
      * 页面侧：
@@ -189,6 +207,26 @@ export const DEFAULT_APP_FLAGS = FLAG_RESIZABLE | FLAG_CENTER;
 export function buildAppUrl(port: number, token: string): string {
     return `http://127.0.0.1:${port}/?t=${token}`;
 }
+
+/**
+ * `AppOptions.page` 的服务路径。
+ *
+ * 固定为 `/page.js` 而不是可配置：页面 HTML 里写的是
+ * `<script type="module" src="/page.js">`，两侧必须一致。留一个可配置项意味着
+ * 多一处「配置与 HTML 对不上」的失败方式，而它换不来任何能力——路径本身没有人关心。
+ *
+ * 导出是为了让调用方的 HTML 与 `routes` 都能引用同一个常量，而不是各写一份字符串。
+ */
+export const PAGE_JS_PATH = "/page.js";
+
+/**
+ * 页面脚本响应的 `content-type`。
+ *
+ * 必须是 `text/javascript`。写成 `application/javascript` 浏览器也接受，但写成
+ * `text/plain` 或漏掉时，`<script type="module">` 会**拒绝执行**且不报语法错——
+ * 表现是页面白屏、控制台只有一条 MIME 类型警告，很容易被当成「脚本逻辑有问题」。
+ */
+const PAGE_JS_CONTENT_TYPE = "text/javascript; charset=utf-8";
 
 /**
  * `/ws` 请求的处置结论。
@@ -277,6 +315,14 @@ export async function createApp(opts: AppOptions): Promise<App> {
         const custom = await opts.routes?.(req);
         if (custom) {
             return custom;
+        }
+
+        // 页面脚本。给了 `page` 才有这一条；不给时该路径落到底部的 404，
+        // 与引入本项之前的行为一致。
+        if (opts.page !== undefined && url.pathname === PAGE_JS_PATH) {
+            return new Response(opts.page, {
+                headers: { "content-type": PAGE_JS_CONTENT_TYPE },
+            });
         }
 
         if (url.pathname === "/") {
