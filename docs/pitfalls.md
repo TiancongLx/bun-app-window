@@ -239,7 +239,7 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 - **症状**：鼠标移到窗口边缘没有出现缩放光标。
 - **原因**：WebView2 的容器子窗口（widget）铺满整个客户区，`WM_NCHITTEST` 先落到它身上，永远返回 `HTCLIENT`。
 - **修法**：`SetWindowLongPtrW(widget, GWLP_WNDPROC, ...)` 子类化，在 `WM_NCHITTEST` 里判定落在边框区域时返回 `HTTRANSPARENT`，让同一线程的父窗口接手判定。
-- **几何判据不在本仓**（`ADR 0017`）：本仓的静态断言只钉「子类化在 `webview_set_size` 之前安装」，钉不住「widget 的实际客户区尺寸对不对」。要看清顶层窗口与每一层子窗口的矩形，跑 `agent-eyes` 的 `probe-child-windows`（`--pid` 或 `--class webview_shell`）。**别为了这一条在本仓重造窗口枚举。**
+- **几何判据不在本仓**（`ADR 0017`）：本仓的静态断言只钉「子类化在 `webview_set_size` 之前安装」，钉不住「widget 的实际客户区尺寸对不对」。要看清顶层窗口与每一层子窗口的矩形，跑 `echoes-of-the-eye` 的 `probe-child-windows`（`--pid` 或 `--class webview_shell`）。**别为了这一条在本仓重造窗口枚举。**
 - **证据**：`实测`。九个边缘点的命中码全部正确，中心为 `HTCLIENT`。
 
 ### 2.7 DPI 感知必须尽早声明
@@ -1205,7 +1205,7 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 - **证据**：`实测`（2026-10-21）。同一次排查里，前一条命令用长度法安全，
   后一条命令用 `Select-String` 泄漏。
 
-### 5.12 `agent-eyes --title` 是**子串**匹配，会抓到路径里带该串的任何窗口
+### 5.12 `echoes-of-the-eye --title` 是**子串**匹配，会抓到路径里带该串的任何窗口
 
 - **症状**：`eyes --title baw-mvp --shot` 报 `stage: "minimized"`，
   而目标窗口其实**可见、973×716、`iconic=false`**。于是很容易转去查
