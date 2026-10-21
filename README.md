@@ -46,7 +46,7 @@ bun add bun-app-window
 
 ### What the tarball contains
 
-The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 19 files, ~0.36 MB packed. The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
+The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 21 files, roughly 0.4 MB packed. The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
 
 ## Quick Start
 
@@ -153,7 +153,12 @@ start hits "already started"). `app` collapses all of it into one call:
 // main.ts
 import { createApp } from "bun-app-window/app";
 import { BROWSER_UI_ALL, FLAG_FRAMELESS } from "bun-app-window";
-import html from "./index.html" with { type: "text" };
+import htmlText from "./index.html" with { type: "text" };
+
+// `with { type: "text" }` inlines the file at build time, so it survives `bun build --compile`.
+// TS 7.0.2 cannot see that declaration — bun-types gates it behind `typesVersions >= 7.1`,
+// so the import resolves to `HTMLBundle` instead of `string`. Hence the bridge.
+const html = htmlText as unknown as string;
 
 const app = await createApp({
   html,
@@ -167,6 +172,7 @@ const app = await createApp({
 });
 
 await app.wait();                  // resolves when the window closes
+await app.stop();                  // releases the event pump and the server; idempotent
 ```
 
 ```ts
@@ -195,10 +201,18 @@ Notes:
 - **Does not default to `FLAG_FRAMELESS`.** A frameless window has no system title bar, so it cannot
   be dragged until the page mounts `mountTitleBar`. The default is the side that works even when the
   page does nothing.
+- **`wait()` only waits.** It resolves on `EVENT_CLOSED` but does not stop the event pump or the
+  server — and the pump timer is ref'd (`keepAlive: true`), so a process that stops at `wait()`
+  keeps running after the window is gone. Always follow it with `stop()`: it is idempotent and
+  returns immediately once the close has already been observed.
 - **Static assets are inline strings only.** `with { type: "text" }` yields a compile-time constant:
-  nothing touches the filesystem, no temp files, and it survives `bun build --compile`. For
-  anything read from disk, write a `routes` function — five lines, and the path-resolution problem
-  stays yours instead of leaking into the skeleton.
+  nothing touches the filesystem, no temp files, and it survives `bun build --compile`. TS 7.0.2
+  resolves that import to `HTMLBundle` rather than `string` — `bun-types` gates the correct
+  declaration behind `typesVersions >= 7.1` — which is what the `as unknown as string` in the
+  example is for. Do not "fix" it with `Bun.file().text()`: that reads at run time, and the HTML
+  would no longer travel inside the compiled executable. For anything read from disk, write a
+  `routes` function — five lines, and the path-resolution problem stays yours instead of leaking
+  into the skeleton.
 - **Not re-exported from the main entry.** It is a subpath like `./state` and `./ipc`. It imports
   `openShell` from `./index`; exporting it from `index.ts` would make that a cycle.
 
@@ -249,37 +263,57 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 
 By default, `connect()` extracts the auth token from the page URL's `?t=` query parameter and connects to `/ws`. Pass a custom `url` or `channel` option to override this behavior.
 
+#### Reserved client names
+
+The client is a `Proxy`: a handful of names resolve to the client itself and never reach a remote
+method. If your service exposes a method under one of these names, **the server-side method becomes
+unreachable** — the page calls the client's own member instead, and neither end reports an error.
+
+| Name | What the page actually gets |
+| --- | --- |
+| `on` / `off` | Event subscription helpers |
+| `close()` | Closes the WebSocket channel — every later call is rejected |
+| `connected` | `boolean`: whether the channel is open |
+| `pending` | `number` of calls still awaiting a reply |
+| `then` | `undefined`, so `await client` cannot hang on a never-resolving thenable |
+
+Symbol keys are reserved as well. Pick a different service name (`winClose` instead of `close`) and
+map it back on the page side — see the title bar section below.
+
 ### `bun-app-window/titlebar` — Windows 11 Title Bar
 
-Mounts a customizable Windows 11 title bar inside frameless windows:
+Mounts a customizable Windows 11 title bar inside frameless windows. The IPC service is **flat** —
+there is no `window` namespace — and one of the four natural names is taken by the client itself,
+so the host exposes `winClose` and the page maps it back:
 
 ```ts
-// Page
+// Host — flat service; `close` is reserved by the IPC client
+createIpcServer({
+  service: {
+    minimize: () => shell.minimize(),
+    toggleMaximize: () => shell.toggleMaximize(),
+    winClose: () => shell.close(),
+    drag: () => shell.drag(),
+  },
+});
+```
+
+```ts
+// Page — build the bridge explicitly
 import { mountTitleBar, bridgeFromWindowService } from "bun-app-window/titlebar";
 
 const bar = mountTitleBar({
   title: "My App",
   icon: "/icon.svg",
-  bridge: bridgeFromWindowService(api.window),
+  bridge: bridgeFromWindowService({
+    minimize: () => api.minimize(),
+    toggleMaximize: () => api.toggleMaximize(),
+    close: () => api.winClose(),          // mapped back to the bridge's own name
+    drag: () => api.drag(),
+  }),
 });
 
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
-```
-
-Expose the four corresponding window control methods on the host IPC service:
-
-```ts
-// Host
-createIpcServer({
-  service: {
-    window: {
-      minimize: () => shell.minimize(),
-      toggleMaximize: () => shell.toggleMaximize(),
-      close: () => shell.close(),
-      drag: () => shell.drag(),
-    },
-  },
-});
 ```
 
 Implementation notes:
@@ -375,10 +409,13 @@ Exposes internal metrics and hit-testing utilities. Note: This module is exclude
 import { debugOf } from "bun-app-window/debug";
 
 const d = debugOf(shell);
-d.metrics();   // Returns pos / win / client / work / border / round geometry
-d.dpi();       // Returns DPI awareness level and scaling factor
+d.metrics();   // → "pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1"
+d.dpi();       // → "awareness=-1 dpi=192 scale=200%"
 d.hittest(x, y);
 ```
+
+`metrics()` and `dpi()` return **formatted text**, not objects. Parse it in throwaway tooling if you
+must; do not put a parser in production code, because the layout is not part of any contract.
 
 ### `bun-app-window/native` — The Prebuilt DLL
 
@@ -421,13 +458,10 @@ Note: `F11`, `F12`, and `Ctrl±` zoom shortcuts are handled directly by the nati
 After disabling the default browser menu, render native Win32 popup menus (`TrackPopupMenu`) via `showContextMenu`. The page cannot call it directly — expose it through the IPC service first:
 
 ```ts
-// Host: expose the menu capability on the window service
+// Host: expose the menu capability on the flat service
 createIpcServer({
   service: {
-    window: {
-      showContextMenu: (x: number, y: number, items: string) =>
-        shell.showContextMenu(x, y, items),
-    },
+    showContextMenu: (x: number, y: number, items: string) => shell.showContextMenu(x, y, items),
   },
 });
 ```
@@ -436,7 +470,7 @@ createIpcServer({
 // Page: trigger the native menu
 document.addEventListener("contextmenu", async (e) => {
   e.preventDefault();
-  await api.window.showContextMenu(
+  await api.showContextMenu(
     Math.round(e.screenX),
     Math.round(e.screenY),
     "open|Open\nrefresh|Refresh\n-\nquit|Quit"
@@ -507,6 +541,19 @@ Tips:
 
 - A side-effect import `import "bun-app-window/embedded";` also works automatically.
 - Always pass `--windows-hide-console` for GUI builds; omitting it will spawn a black command prompt window alongside your application.
+
+### 6. Two Traps That Type-Check
+
+Neither of these fails `bun check`; both produce a window that renders and then does nothing.
+
+- **The page bundle is an ES module, so the `<script>` tag needs `type="module"`.** A build with a
+  top-level `await` is a syntax error inside a classic `<script>`, and the **whole script never
+  runs** — while the page still renders, because the markup is static. Nothing on screen points at
+  the cause.
+- **Namespace your own `data-*` selectors.** The title bar renders buttons with
+  `data-act="minimize|maximize|close"` and listens for clicks on `document`. A host that also binds
+  `button[data-act]` receives the same click twice and logs its own "unknown action: maximize".
+  Prefix your attributes (`data-mvp-act`): a generic name is a shared namespace, not yours.
 
 ## Internals & Reference
 

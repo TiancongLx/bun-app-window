@@ -46,7 +46,7 @@ bun add bun-app-window
 
 ### 套件內容包含什麼
 
-發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 19 個檔案（約 0.36 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
+發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 21 個檔案（約 0.4 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
 
 ## 快速開始
 
@@ -150,7 +150,12 @@ shell.setTitle("Doing work…");
 // main.ts
 import { createApp } from "bun-app-window/app";
 import { BROWSER_UI_ALL, FLAG_FRAMELESS } from "bun-app-window";
-import html from "./index.html" with { type: "text" };
+import htmlText from "./index.html" with { type: "text" };
+
+// `with { type: "text" }` 讓 Bun 在封裝期把檔案內嵌進去，所以 `bun build --compile` 後仍然成立。
+// TS 7.0.2 看不到這條宣告——bun-types 把它 gate 在 `typesVersions >= 7.1` 之後，
+// 於是這個 import 被解析成 `HTMLBundle` 而不是 `string`。橋樑就落在這裡。
+const html = htmlText as unknown as string;
 
 const app = await createApp({
   html,
@@ -164,6 +169,7 @@ const app = await createApp({
 });
 
 await app.wait();                  // 視窗關閉時 resolve
+await app.stop();                  // 釋放事件泵與服務；冪等，已關閉時立即回傳
 ```
 
 ```ts
@@ -188,9 +194,15 @@ await api.greet("Ada");
 
 - **預設不帶 `FLAG_FRAMELESS`。** 無邊框視窗沒有系統標題列就拖不動，必須由頁面先掛上
   `mountTitleBar`。預設值選的是「頁面什麼都不做也能用」的那一側。
+- **`wait()` 只負責等。** 它在 `EVENT_CLOSED` 上 resolve，但不會停事件泵、也不會關服務——而
+  事件泵的計時器是 ref 的（`keepAlive: true`），所以停在這一行的行程會在視窗消失後繼續掛著。
+  必須跟一句 `stop()`：它冪等，且關閉已被觀察到時會立即回傳。
 - **靜態資源只吃內嵌字串。** `with { type: "text" }` 得到的是編譯期常數：不碰檔案系統、
-  不產生暫存檔、`bun build --compile` 後仍然成立。要從磁碟讀東西就寫個 `routes` 函式 ——
-  五行，而且路徑解析的問題留在你這邊，不會滲進骨架。
+  不產生暫存檔、`bun build --compile` 後仍然成立。TS 7.0.2 會把這條 import 解析成
+  `HTMLBundle` 而不是 `string`（`bun-types` 把正確的宣告 gate 在 `typesVersions >= 7.1`
+  之後），範例裡的 `as unknown as string` 就是為此而寫。別用 `Bun.file().text()` 去「修」它：
+  那是執行期讀磁碟，HTML 就不在編譯產物裡了。要從磁碟讀東西就寫個 `routes` 函式 —— 五行，
+  而且路徑解析的問題留在你這邊，不會滲進骨架。
 - **不從主入口匯出。** 它和 `./state`、`./ipc` 一樣是子路徑。它從 `./index` 匯入
   `openShell`；若 `index.ts` 反過來匯出它，就成了循環。
 
@@ -240,37 +252,56 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 
 預設情況下，`connect` 會從目前頁面 URL 的查詢參數 `?t=` 中讀取驗證 Token 並連線至 `/ws`。若需自訂連線方式，可明確傳入 `url` 或自訂 `channel` 實例。
 
+#### 用戶端保留名稱
+
+用戶端是一個 `Proxy`：有幾個名稱會解析到用戶端自己身上，永遠到不了遠端方法。服務表裡若有
+同名方法，**那個服務端方法就永遠呼叫不到**——頁面呼叫的是用戶端自己的成員，兩端都不會報錯。
+
+| 名稱 | 頁面實際拿到的東西 |
+| --- | --- |
+| `on` / `off` | 事件訂閱輔助函式 |
+| `close()` | 關閉 WebSocket 通道——之後所有呼叫都會被 reject |
+| `connected` | `boolean`，通道目前是否可用 |
+| `pending` | `number`，尚未收到回覆的呼叫數 |
+| `then` | `undefined`，否則 `await client` 會把這個永不兌現的 thenable 等下去 |
+
+Symbol 鍵同樣保留。給服務方法換個名稱（`winClose` 而不是 `close`），在頁面端映射回去 ——
+見下方的標題列一節。
+
 ### `bun-app-window/titlebar` — Windows 11 風格標題列
 
-用於在無邊框模式下快速掛載符合 Windows 11 視覺規範的自訂標題列：
+用於在無邊框模式下快速掛載符合 Windows 11 視覺規範的自訂標題列。IPC 服務是**扁平的**——
+沒有 `window` 這一層命名空間——而且四個最自然的名稱裡有一個被用戶端自己佔了，所以宿主端
+公開 `winClose`，頁面端再映射回去：
 
 ```ts
-// 頁面端
+// 宿主端 —— 扁平服務；`close` 是 IPC 用戶端的保留名稱
+createIpcServer({
+  service: {
+    minimize: () => shell.minimize(),
+    toggleMaximize: () => shell.toggleMaximize(),
+    winClose: () => shell.close(),
+    drag: () => shell.drag(),
+  },
+});
+```
+
+```ts
+// 頁面端 —— 明確拼出 bridge
 import { mountTitleBar, bridgeFromWindowService } from "bun-app-window/titlebar";
 
 const bar = mountTitleBar({
   title: "我的應用程式",
   icon: "/icon.svg",
-  bridge: bridgeFromWindowService(api.window),
+  bridge: bridgeFromWindowService({
+    minimize: () => api.minimize(),
+    toggleMaximize: () => api.toggleMaximize(),
+    close: () => api.winClose(),          // 橋接時再映射回 close
+    drag: () => api.drag(),
+  }),
 });
 
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
-```
-
-宿主端需在 IPC 服務中公開對應的四個視窗控制方法：
-
-```ts
-// 宿主端
-createIpcServer({
-  service: {
-    window: {
-      minimize: () => shell.minimize(),
-      toggleMaximize: () => shell.toggleMaximize(),
-      close: () => shell.close(),
-      drag: () => shell.drag(),
-    },
-  },
-});
 ```
 
 實作細節：
@@ -359,10 +390,13 @@ pump.onGap((missing) => console.warn(`漏了 ${missing} 條事件`));
 import { debugOf } from "bun-app-window/debug";
 
 const d = debugOf(shell);
-d.metrics();   // 取得 pos / win / client / work / border / round 等幾何度量
-d.dpi();       // 取得目前 DPI 感知層級與縮放係數
+d.metrics();   // → "pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1"
+d.dpi();       // → "awareness=-1 dpi=192 scale=200%"
 d.hittest(x, y);
 ```
+
+`metrics()` 與 `dpi()` 回傳的是**格式化文字**，不是物件。真要解析就寫進一次性指令碼裡，別把
+解析器塞進正式程式碼——這個格式不屬於任何契約。
 
 ### `bun-app-window/native` — 預編譯動態連結程式庫本體
 
@@ -405,13 +439,10 @@ const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 停用預設瀏覽器選單後，可透過 `showContextMenu` 喚起基於 Win32 `TrackPopupMenu` 繪製的原生選單。頁面無法直接呼叫它——需先在 IPC 服務上暴露：
 
 ```ts
-// 宿主端：將選單能力掛載到 window 服務
+// 宿主端：將選單能力掛載到扁平服務上
 createIpcServer({
   service: {
-    window: {
-      showContextMenu: (x: number, y: number, items: string) =>
-        shell.showContextMenu(x, y, items),
-    },
+    showContextMenu: (x: number, y: number, items: string) => shell.showContextMenu(x, y, items),
   },
 });
 ```
@@ -420,7 +451,7 @@ createIpcServer({
 // 頁面端觸發選單
 document.addEventListener("contextmenu", async (e) => {
   e.preventDefault();
-  await api.window.showContextMenu(
+  await api.showContextMenu(
     Math.round(e.screenX),
     Math.round(e.screenY),
     "open|開啟\nrefresh|重新整理\n-\nquit|結束"
@@ -489,6 +520,18 @@ bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 
 - 僅透過副作用匯入 `import "bun-app-window/embedded";` 同樣生效。
 - 封裝桌面端應用程式時請務必加上 `--windows-hide-console` 參數，否則啟動時將伴隨彈出黑色主控台（Console）視窗。
+
+### 6. 兩個型別檢查抓不到的坑
+
+這兩條都不會讓 `bun check` 變紅，但都會得到一個「渲染正常、什麼也不做」的視窗。
+
+- **頁面 bundle 是 ES 模組，`<script>` 標籤必須寫 `type="module"`。** 帶頂層 `await` 的封裝
+  產物塞進傳統 `<script>` 就是語法錯誤，**整個指令碼一行都不執行**——而頁面照樣渲染，因為
+  HTML 是靜態的。螢幕上沒有任何東西指向這個原因。
+- **自己的 `data-*` 選擇器要給命名空間。** 標題列的按鈕用
+  `data-act="minimize|maximize|close"`，並在 `document` 上掛 click 監聽。宿主如果也綁
+  `button[data-act]`，同一次點擊會被接兩遍，然後打出自己那句「未知動作：maximize」。給自己的
+  屬性加前綴（`data-mvp-act`）——泛化屬性名稱是共享命名空間，不是你的地盤。
 
 ## 底層機制與互動參考
 

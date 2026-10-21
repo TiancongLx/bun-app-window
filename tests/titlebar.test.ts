@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 
+import { resolve } from "node:path";
+
 import {
     bridgeFromWindowService,
     glyphFor,
@@ -11,6 +13,25 @@ import {
     type TitleBarDocument,
     type TitleBarElement,
 } from "@/ui/titlebar";
+
+/**
+ * 源码级判据：`resolveDocument` 的全局访问必须是双层断言。
+ *
+ * 这一条只能落在写法上。消费者 tsconfig 的 `lib` 含 `DOM` 时，
+ * `globalThis.document` 是完整的 `Document`，与组件的极简结构不重叠，
+ * 单层 `as` 被判成 TS2352；而本仓 `lib` 只有 `ESNext`，这个错在本仓
+ * 永远复现不出来。`unknown` 一旦被当成冗余清理掉，消费者全炸而门禁全绿。
+ *
+ * 断言跑在剔掉整行注释的源码上（同 `nav-guard.test.ts`：注释掉一行就能绕过 `toContain`）。
+ */
+const TITLEBAR_TS = await Bun.file(resolve(import.meta.dir, "../src/ui/titlebar.ts")).text();
+
+const TITLEBAR_CODE = TITLEBAR_TS.split(/\r?\n/)
+    .filter((line) => {
+        const t = line.trim();
+        return !(t.startsWith("//") || t.startsWith("*") || t.startsWith("/*"));
+    })
+    .join("\n");
 
 /**
  * 组件不依赖 DOM 类型声明（`tsconfig` 的 lib 只有 ESNext），
@@ -398,6 +419,12 @@ test("没有 document 且未注入时抛出可读错误", () => {
     expect(() => mountTitleBar({ bridge: recordingBridge() })).toThrow(
         "mountTitleBar: no document available",
     );
+});
+
+test("resolveDocument 的全局访问是双层断言（单层在带 DOM lib 的消费者里报 TS2352）", () => {
+    // 这条断言守的是「消费者编译得过」，而本仓永远编译不出那个错——
+    // 所以它的判据只能是写法本身，不是运行行为。
+    expect(TITLEBAR_CODE).toContain("globalThis as unknown as { document?: TitleBarDocument }");
 });
 
 // ---------- 与 IPC 的桥接 ----------

@@ -46,7 +46,7 @@ bun add bun-app-window
 
 ### 包内包含什么
 
-发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 19 个文件（约 0.36 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
+发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 21 个文件（约 0.4 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
 
 ## 快速开始
 
@@ -150,7 +150,12 @@ shell.setTitle("Doing work…");
 // main.ts
 import { createApp } from "bun-app-window/app";
 import { BROWSER_UI_ALL, FLAG_FRAMELESS } from "bun-app-window";
-import html from "./index.html" with { type: "text" };
+import htmlText from "./index.html" with { type: "text" };
+
+// `with { type: "text" }` 让 Bun 在打包期把文件内联进去，所以 `bun build --compile` 后仍然成立。
+// TS 7.0.2 看不到这条声明——bun-types 把它 gate 在 `typesVersions >= 7.1` 后面，
+// 于是这个 import 被解析成 `HTMLBundle` 而不是 `string`。桥梁就落在这里。
+const html = htmlText as unknown as string;
 
 const app = await createApp({
   html,
@@ -164,6 +169,7 @@ const app = await createApp({
 });
 
 await app.wait();                  // 窗口关闭时 resolve
+await app.stop();                  // 释放事件泵与服务；幂等，已关闭时立即返回
 ```
 
 ```ts
@@ -188,9 +194,15 @@ await api.greet("Ada");
 
 - **默认不带 `FLAG_FRAMELESS`。** 无边框窗口没有系统标题栏就拖不动，必须由页面先挂上
   `mountTitleBar`。默认值选的是「页面什么都不做也能用」的那一侧。
+- **`wait()` 只负责等。** 它在 `EVENT_CLOSED` 上 resolve，但不会停事件泵、也不会关服务——而
+  事件泵的定时器是 ref 的（`keepAlive: true`），所以停在这一行的进程会在窗口消失后继续挂着。
+  必须跟一句 `stop()`：它幂等，且关闭已被观察到时会立即返回。
 - **静态资源只吃内联字符串。** `with { type: "text" }` 得到的是编译期常量：不碰文件系统、
-  不产生临时文件、`bun build --compile` 后仍然成立。要从磁盘读东西就写个 `routes` 函数 ——
-  五行，而且路径解析的问题留在你这边，不会渗进骨架。
+  不产生临时文件、`bun build --compile` 后仍然成立。TS 7.0.2 会把这条 import 解析成
+  `HTMLBundle` 而不是 `string`（`bun-types` 把正确的声明 gate 在 `typesVersions >= 7.1`
+  后面），示例里的 `as unknown as string` 就是为此而写。别用 `Bun.file().text()` 去「修」它：
+  那是运行期读盘，HTML 就不在编译产物里了。要从磁盘读东西就写个 `routes` 函数 —— 五行，
+  而且路径解析的问题留在你这边，不会渗进骨架。
 - **不从主入口导出。** 它和 `./state`、`./ipc` 一样是子路径。它从 `./index` 导入
   `openShell`；若 `index.ts` 反过来导出它，就成了循环。
 
@@ -240,37 +252,56 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 
 默认情况下，`connect` 会从当前页面 URL 的查询参数 `?t=` 中读取鉴权 Token 并连接至 `/ws`。若需自定义连接方式，可显式传入 `url` 或自定义 `channel` 实例。
 
+#### 客户端保留名
+
+客户端是一个 `Proxy`：有几个名字会解析到客户端自己身上，永远到不了远端方法。服务表里若有
+同名方法，**那个服务端方法就永远调不到**——页面调的是客户端自己的成员，两端都不会报错。
+
+| 名字 | 页面实际拿到的东西 |
+| --- | --- |
+| `on` / `off` | 事件订阅辅助函数 |
+| `close()` | 关闭 WebSocket 通道——之后所有调用都会被 reject |
+| `connected` | `boolean`，通道当前是否可用 |
+| `pending` | `number`，尚未收到回复的调用数 |
+| `then` | `undefined`，否则 `await client` 会把这个永不兑现的 thenable 等下去 |
+
+Symbol 键同样保留。给服务方法换个名字（`winClose` 而不是 `close`），在页面侧映射回去 ——
+见下面的标题栏一节。
+
 ### `bun-app-window/titlebar` — Windows 11 风格标题栏
 
-用于在无边框模式下快速挂载符合 Windows 11 视觉规范的自定义标题栏：
+用于在无边框模式下快速挂载符合 Windows 11 视觉规范的自定义标题栏。IPC 服务是**扁平的**——
+没有 `window` 这一层命名空间——而且四个最自然的名字里有一个被客户端自己占了，所以宿主端
+暴露 `winClose`，页面侧再映射回去：
 
 ```ts
-// 页面端
+// 宿主端 —— 扁平服务；`close` 是 IPC 客户端的保留名
+createIpcServer({
+  service: {
+    minimize: () => shell.minimize(),
+    toggleMaximize: () => shell.toggleMaximize(),
+    winClose: () => shell.close(),
+    drag: () => shell.drag(),
+  },
+});
+```
+
+```ts
+// 页面端 —— 显式拼出 bridge
 import { mountTitleBar, bridgeFromWindowService } from "bun-app-window/titlebar";
 
 const bar = mountTitleBar({
   title: "我的应用",
   icon: "/icon.svg",
-  bridge: bridgeFromWindowService(api.window),
+  bridge: bridgeFromWindowService({
+    minimize: () => api.minimize(),
+    toggleMaximize: () => api.toggleMaximize(),
+    close: () => api.winClose(),          // 桥接时再映射回 close
+    drag: () => api.drag(),
+  }),
 });
 
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
-```
-
-宿主端需在 IPC 服务中暴露对应的四个窗口控制方法：
-
-```ts
-// 宿主端
-createIpcServer({
-  service: {
-    window: {
-      minimize: () => shell.minimize(),
-      toggleMaximize: () => shell.toggleMaximize(),
-      close: () => shell.close(),
-      drag: () => shell.drag(),
-    },
-  },
-});
 ```
 
 实现细节：
@@ -358,10 +389,13 @@ pump.onGap((missing) => console.warn(`漏了 ${missing} 条事件`));
 import { debugOf } from "bun-app-window/debug";
 
 const d = debugOf(shell);
-d.metrics();   // 获取 pos / win / client / work / border / round 等几何度量
-d.dpi();       // 获取当前 DPI 感知级别与缩放因子
+d.metrics();   // → "pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1"
+d.dpi();       // → "awareness=-1 dpi=192 scale=200%"
 d.hittest(x, y);
 ```
+
+`metrics()` 与 `dpi()` 返回的是**格式化文本**，不是对象。真要解析就写进一次性脚本里，别把解析器
+塞进生产代码——这个格式不属于任何契约。
 
 ### `bun-app-window/native` — 预编译动态库本体
 
@@ -404,13 +438,10 @@ const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 禁用默认浏览器菜单后，可通过 `showContextMenu` 唤起基于 Win32 `TrackPopupMenu` 绘制的原生菜单。页面无法直接调用它——需要先在 IPC 服务上暴露：
 
 ```ts
-// 宿主端：把菜单能力挂到 window 服务上
+// 宿主端：把菜单能力挂到扁平服务上
 createIpcServer({
   service: {
-    window: {
-      showContextMenu: (x: number, y: number, items: string) =>
-        shell.showContextMenu(x, y, items),
-    },
+    showContextMenu: (x: number, y: number, items: string) => shell.showContextMenu(x, y, items),
   },
 });
 ```
@@ -419,7 +450,7 @@ createIpcServer({
 // 页面端触发菜单
 document.addEventListener("contextmenu", async (e) => {
   e.preventDefault();
-  await api.window.showContextMenu(
+  await api.showContextMenu(
     Math.round(e.screenX),
     Math.round(e.screenY),
     "open|打开\nrefresh|刷新\n-\nquit|退出"
@@ -488,6 +519,18 @@ bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 
 - 仅通过副作用导入 `import "bun-app-window/embedded";` 同样生效。
 - 打包桌面端应用时请务必添加 `--windows-hide-console` 参数，否则启动时将伴随弹出黑色命令行控制台窗口。
+
+### 6. 两个类型检查抓不到的坑
+
+这两条都不会让 `bun check` 变红，但都会得到一个「渲染正常、什么也不做」的窗口。
+
+- **页面 bundle 是 ES 模块，`<script>` 标签必须写 `type="module"`。** 带顶层 `await` 的构建
+  产物塞进经典 `<script>` 就是语法错，**整个脚本一行都不执行**——而页面照样渲染，因为 HTML
+  是静态的。屏幕上没有任何东西指向这个原因。
+- **自己的 `data-*` 选择器要给命名空间。** 标题栏的按钮用
+  `data-act="minimize|maximize|close"`，并在 `document` 上挂 click 监听。宿主如果也绑
+  `button[data-act]`，同一次点击会被接两遍，然后打出自己那句「未知动作：maximize」。给自己的
+  属性加前缀（`data-mvp-act`）——泛化属性名是共享命名空间，不是你的地盘。
 
 ## 底层机制与交互参考
 

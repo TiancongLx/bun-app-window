@@ -4,6 +4,48 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-10-21
+
+### Fixed
+
+- **`bun-app-window/titlebar` no longer breaks `bun check` in your project.** Every consumer whose `tsconfig.json` includes `DOM` — that is, every project with a real page — was stopped by a `TS2352` error pointing at this package's own source, with no way to work around it:
+
+    ```text
+    node_modules/bun-app-window/src/ui/titlebar.ts(237,27): error TS2352:
+    Conversion of type 'typeof globalThis' to type '{ document?: TitleBarDocument; }'
+    may be a mistake because neither type sufficiently overlaps with the other.
+    If this was intentional, convert the expression to 'unknown' first.
+    ```
+
+    `skipLibCheck: true` does not help, because this package ships `.ts` sources rather than `.d.ts` files, so the error is in compiled source and not in a declaration. The component reached `globalThis.document` through a single-layer type assertion; with `DOM` loaded, `globalThis.document` is a full `Document`, and the component's deliberately minimal `TitleBarDocument` does not overlap with it enough to satisfy the checker. It is now a two-layer assertion (`as unknown as`), which states the intent without making the component depend on DOM types. Runtime behaviour is unchanged. Existing code needs no edits — upgrading is enough.
+
+### Changed
+
+- **The three READMEs are corrected in six places.** Everything below was documentation, not code, but each item could cost a consumer real time by making them follow an example that does not work. The pages are `README.md`, `README.zh-CN.md` and `README.zh-TW.md`, and all six corrections are applied to all three.
+
+    **The `titlebar` example contradicted itself.** One section showed the IPC service flat, another showed it nested under a `window` key — inside the same file. The nested form never worked: `service` is a flat method table. The example now uses the flat form, and because `close` is one of the client's reserved names, it exposes `winClose` and maps it back on the page side.
+
+    **`debug.metrics()` and `debug.dpi()` were described as if they returned objects.** They return formatted text — `pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1` and `awareness=-1 dpi=192 scale=200%`. The example shows the real output now, and says not to build a parser on it: the layout is not part of any contract.
+
+    **`await app.wait()` was shown as the end of a program.** It resolves when the window closes but stops neither the event pump nor the server, and the pump's timer is pinned on purpose — so a program that ends on that line stays alive after the window is gone. The example follows it with `await app.stop()`, which is idempotent and returns immediately once the close has been observed.
+
+    **The IPC client's reserved names were undocumented.** `on`, `off`, `close`, `connected`, `pending` and `then` resolve to the client itself and never reach a remote method. A service that defines one of them is silently unreachable, with no error on either end — and `close` in particular also tears down the channel for every later call. There is a table of them now, and a note that symbol keys are reserved as well.
+
+    **Two traps that pass type checking but do not work** are documented together: the page bundle is an ES module, so a classic `<script>` tag executes nothing while the page still renders; and the title bar listens for `document` clicks on `data-act`, so a host binding `button[data-act]` receives every click twice.
+
+    **The tarball figures were stale** — 19 files / ~0.36 MB against the measured 21 files / ~0.4 MB.
+
+- **The `app` Quick Start no longer reads the HTML at run time.** The old snippet, `import html from "./index.html" with { type: "text" }`, did not compile under TypeScript 7.0.2, because `bun-types` gates the declaration that types this import behind `typesVersions: ">= 7.1"`. The obvious-looking repair, `await Bun.file(...).text()`, would have broken the property that section exists to demonstrate: a compile-time constant travels inside `bun build --compile`, a run-time read does not. The import stays and only the type is bridged, so a single-file executable still carries its HTML:
+
+    ```ts
+    import htmlText from "./index.html" with { type: "text" };
+    const html = htmlText as unknown as string;
+    ```
+
+### Note
+
+- **Nothing to do on upgrade.** No public API changed: the exported surface, the flags, the IPC protocol and `dist/libshell.dll` are byte-for-byte the same as 0.4.0, so `bun update bun-app-window` is the whole procedure. This is a patch because the only code change is the one assertion above, and the rest is documentation.
+
 ## [0.4.0] - 2026-10-21
 
 ### Added
@@ -285,7 +327,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.1...v0.2.2

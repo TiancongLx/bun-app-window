@@ -648,6 +648,75 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
   成立才走自家，其余仍交给它。
 - **证据**：`实测`。
 
+### 3.17 包内 `.ts` 源码的类型，取决于消费者 tsconfig 的 `lib` —— 本仓永远复现不出来
+
+- **症状**：任何把 `lib` 设成 `["ESNext", "DOM"]` 的消费者，`bun check` 都会在
+  `node_modules` 里那份 `titlebar.ts` 上报错，指着**包内源码**，消费者无从修：
+
+    ```text
+    node_modules/bun-app-window/src/ui/titlebar.ts(237,27): error TS2352:
+    Conversion of type 'typeof globalThis' to type '{ document?: TitleBarDocument; }'
+    may be a mistake because neither type sufficiently overlaps with the other.
+    If this was intentional, convert the expression to 'unknown' first.
+      The types of 'document.body.append' are incompatible between these types.
+        Type '(...nodes: (string | Node)[]) => void' is not comparable to
+        type '(...nodes: TitleBarElement[]) => void'.
+          Types of parameters 'nodes' and 'nodes' are incompatible.
+            Type 'TitleBarElement' is not comparable to type 'string | Node'.
+              Type 'TitleBarElement' is missing the following properties from type
+              'Node': baseURI, childNodes, firstChild, isConnected, and 42 more.
+    ```
+
+- **原因**：组件刻意**不依赖 DOM 类型**（它自带一套极简的 `TitleBarElement` /
+  `TitleBarDocument`，好在纯浏览器、Electron、Tauri 里都能用）。它通过
+  `globalThis` 取全局 document。本仓 `tsconfig` 的 `lib` 只有 `ESNext`，所以
+  `globalThis.document` 在类型上**不存在**，与 `TitleBarDocument` 不冲突，单层
+  `as` 断言顺利通过。
+
+    消费者一旦加上 `DOM`，`globalThis.document` 就是完整的 `Document`，而
+    `Document.body.append` 是 `(...nodes: (string | Node)[])`。函数参数是逆变的
+    （参数类型必须能接受更宽的输入），组件的 `(...nodes: TitleBarElement[])` 收得
+    更窄，因此两边「不够重叠」，`as` 被判为可能的笔误。
+
+- **`skipLibCheck: true` 挡不住**：它只跳过 `.d.ts`。本包发布的是 `.ts` 源码，
+  所以这个错误发生在**被编译的源码**里，不在声明文件里。
+
+- **本仓为什么永远抓不到**：`tsconfig.json` 的 `lib` 是 `["ESNext"]`。这个错误
+  需要 `DOM` 才能表达出来，而仓库里没有一份配置带 `DOM`。**绿得毫无破绽**。
+
+- **更糟的是门禁也抓不到**：`scripts/verify-pack.ts` 给临时消费者工程生成的
+  `tsconfig.json` 写的是 `lib: ["ESNext"]` —— 也不带 `DOM`。而任何真实页面都要
+  `DOM`。于是「带 document 的消费者」这一整个形态，从来没被消费方验收覆盖过。
+  这是门禁的**结构性盲区**，不是某个断言漏了。
+
+- **修法**：双层断言，一行。设计不变（组件仍然不依赖 DOM 类型），只是告诉编译器
+  「我知道自己在做什么」：
+
+    ```ts
+    const found = doc ?? (globalThis as unknown as { document?: TitleBarDocument }).document;
+    ```
+
+- **判据只能落在写法上**：这是个「消费者编译得过」的问题，本仓无法用行为测试表达。
+  `tests/titlebar.test.ts` 读 `src/ui/titlebar.ts`，断言存在双层断言的字面串——并且
+  **跑在剔掉整行注释的源码上**（同 `nav-guard.test.ts`：注释掉一行就能绕过裸 `toContain`）。
+  它守的是「别把 `unknown` 当冗余清理掉」，因为清理的人看不到任何红灯。
+
+- **推论（比这个 bug 本身更重要）**：**发布 `.ts` 源码的包，其类型正确性取决于
+  消费者的 `lib` 组合，而不只是取决于自己的 `tsconfig`。** 只要库代码触碰
+  `lib` 里可选的全局（`document`、`window`、`Worker`、`WebSocket`…），就必须在
+  **带那个 lib 的工程里**验证，否则「本仓绿」是零信息。这类缺陷的共同形状是：
+  编译期才暴露、只对消费者暴露、且消费者无解。
+
+- **证据**：`实测`。两份对照工程，均 `lib: ["ESNext", "DOM"]`：
+
+    | 工程 | 内容 | 结果 |
+    | --- | --- | --- |
+    | 对照组 | 裸 `with { type: "text" }` + 单层 `as` | **2 条错**：`TS2322`、`TS2352`（文本与上引逐字一致） |
+    | 修复组 | 双层断言 + 九个公开子路径全部 import | **13 files 零错误** |
+
+    消费者侧同样双向验证：同一份 `tsconfig` + `src` 装 0.4.0 得 1 条 `TS2352`，
+    装修复后的 tarball 得 0 条。
+
 ---
 
 ## 四、打包与分发

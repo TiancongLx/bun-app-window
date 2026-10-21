@@ -234,7 +234,12 @@ export type TitleBarHandle = {
 };
 
 function resolveDocument(doc?: TitleBarDocument): TitleBarDocument {
-    const found = doc ?? (globalThis as { document?: TitleBarDocument }).document;
+    // 双层断言是必需的，不是笔误：消费者 tsconfig 的 `lib` 含 `DOM` 时，
+    // `globalThis.document` 是完整的 `Document`，与本组件的极简结构不重叠，
+    // 单层 `as` 会被判成 TS2352「两侧类型不够重叠」。`skipLibCheck` 挡不住——
+    // 这是包内 `.ts` 源码，不是 `.d.ts`。本仓 tsconfig 的 lib 只有 ESNext，
+    // 这个错在本仓永远复现不出来，判据落在 tests/titlebar.test.ts 的源码断言上。
+    const found = doc ?? (globalThis as unknown as { document?: TitleBarDocument }).document;
     if (!found) {
         throw new Error("mountTitleBar: no document available; pass options.document");
     }
