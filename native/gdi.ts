@@ -1,19 +1,29 @@
 /**
- * gdi.ts — 截图与图标提取用的 GDI 位图操作
+ * gdi.ts — **图标**生成与提取用的 GDI 位图操作
  *
- * 取代 `.ps1` 版里的 `System.Drawing.Bitmap` + `Graphics.CopyFromScreen` +
- * `Icon.ToBitmap()`。核心手法只有一个：**`CreateDIBSection` 拿到自己的像素指针**，
- * 之后所有读写都是普通内存操作，不再经过任何托管图像类型。
+ * 取代 `.ps1` 版里的 `System.Drawing.Bitmap` + `Icon.ToBitmap()`。核心手法只有一个：
+ * **`CreateDIBSection` 拿到自己的像素指针**，之后所有读写都是普通内存操作，
+ * 不再经过任何托管图像类型。
  *
- * 这样做的额外好处：`PrintWindow` 的目标 HDC 直接就是我们能读的那块内存，
+ * 这样做的额外好处：`DrawIconEx` 的目标 HDC 直接就是我们能读的那块内存，
  * 省掉「先画到 Bitmap 再 Save」这一层，也就不需要 PNG 之外的任何编码器。
+ *
+ * ## 能力边界（ADR 0017）
+ *
+ * 这里只留**图标提取的完整闭包**：`makeBitmapInfo` → `createDib` → `readDibPixels`
+ * → `releaseDib`，加上 `extractIcon` / `closeGdi`。它服务的是一次构建链自证：
+ * `scripts/extract-icon.ts` 从编译产物里把图标挖出来，证明 `--windows-icon` 生效。
+ *
+ * **窗口截图（`PrintWindow`）、裁剪、非黑像素占比都不在这里**——那是
+ * `agent-eyes` 的职责（它要观察任意窗口）。历史上有过一份，迁走之后留下了
+ * 142 行只有测试在用的残骸，2026-10-21 按 ADR 0017 清掉了。
  *
  * 所有函数都返回显式结果（`null` / `false` / 抛错），不返回「看起来像成功的空值」。
  */
 
 import { FFIType, dlopen, toArrayBuffer } from "bun:ffi";
 
-import { api, printWindow, readRect, toHandle, type Rect } from "./win32";
+import { api, toHandle } from "./win32";
 
 const gdi32 = dlopen("gdi32.dll", {
     CreateCompatibleDC: { args: [FFIType.u64_fast], returns: FFIType.u64_fast },
@@ -24,10 +34,6 @@ const gdi32 = dlopen("gdi32.dll", {
     SelectObject: { args: [FFIType.u64_fast, FFIType.u64_fast], returns: FFIType.u64_fast },
     DeleteObject: { args: [FFIType.u64_fast], returns: "bool" },
     DeleteDC: { args: [FFIType.u64_fast], returns: "bool" },
-    GetDIBits: {
-        args: [FFIType.u64_fast, FFIType.u64_fast, "u32", "u32", "buffer", "buffer", "u32"],
-        returns: "i32",
-    },
     GetObjectW: { args: [FFIType.u64_fast, "i32", "buffer"], returns: "i32" },
 });
 
@@ -136,148 +142,6 @@ export function readDibPixels(dib: Dib): Uint8Array {
     return new Uint8Array(buf.slice(0));
 }
 
-// ---- 截图 -------------------------------------------------------------------
-
-export type Capture = {
-    width: number;
-    height: number;
-    /** BGRA，top-down */
-    bgra: Uint8Array;
-    /** `PrintWindow` 的返回值：false 表示窗口过程没有响应 WM_PRINT */
-    printWindowOk: boolean;
-};
-
-/**
- * 用 `PrintWindow(PW_RENDERFULLCONTENT)` 抓窗口内容。
- *
- * 这一步**不改变窗口焦点**，所以能抓到被遮挡的 WebView2 内容——这是
- * `pitfalls` 1.3 的结论，也是本工具存在的理由（远程会话期间不能抢前台）。
- *
- * 尺寸取窗口矩形（`GetWindowRect`）而不是客户区：无边框窗口两者相同，
- * 带边框窗口用整窗尺寸才能把标题栏一并抓到。
- */
-export function captureWindow(
-    hwnd: bigint,
-    opts: { width?: number; height?: number } = {},
-): Capture | null {
-    let width = opts.width ?? 0;
-    let height = opts.height ?? 0;
-    if (width <= 0 || height <= 0) {
-        const r = readRectOf(hwnd, new Uint8Array(16));
-        width = r.right - r.left;
-        height = r.bottom - r.top;
-    }
-    if (width <= 0 || height <= 0) return null;
-
-    const dib = createDib(width, height);
-    if (!dib) return null;
-    try {
-        const ok = printWindow(hwnd, dib.hdc);
-        return { width, height, bgra: readDibPixels(dib), printWindowOk: ok };
-    } finally {
-        releaseDib(dib);
-    }
-}
-
-/** 单独问一次窗口矩形（避免为了一个 RECT 走完整枚举） */
-function readRectOf(hwnd: bigint, buf: Uint8Array): Rect {
-    const ok = api.user32.symbols.GetWindowRect(hwnd, buf);
-    if (ok !== true) return { left: 0, top: 0, right: 0, bottom: 0 };
-    return readRect(buf);
-}
-
-// ---- 矩形与裁剪 -------------------------------------------------------------
-
-export type CropRect = { x: number; y: number; width: number; height: number };
-
-/**
- * 从 BGRA 缓冲里裁一块出来。
- *
- * ## 为什么裁剪比缩放重要
- *
- * 把整张 2000×1360 缩到 800 长边，字节确实小了，但**文字跟着糊了**——
- * 缩放丢的是分辨率。而「只看我关心的那一块」既小又 1:1 清晰。
- * 对 Computer Use 这类场景（每次操作后看一眼局部确认状态），
- * 裁剪才是正确形态；缩放只是退而求其次。
- *
- * 纯内存切片，无 FFI 调用，O(像素数) memcpy。
- * `rect` 会被钳制到图像范围内——越界返回 `null` 而不是给一张畸形图。
- */
-export function cropBgra(
-    src: Uint8Array,
-    srcWidth: number,
-    srcHeight: number,
-    rect: CropRect,
-): { bgra: Uint8Array; width: number; height: number } | null {
-    const x = Math.max(0, Math.floor(rect.x));
-    const y = Math.max(0, Math.floor(rect.y));
-    const right = Math.min(srcWidth, Math.floor(rect.x + rect.width));
-    const bottom = Math.min(srcHeight, Math.floor(rect.y + rect.height));
-    const width = right - x;
-    const height = bottom - y;
-    if (width <= 0 || height <= 0) return null;
-    if (src.length < srcWidth * srcHeight * 4) return null;
-
-    const out = new Uint8Array(width * height * 4);
-    const rowBytes = width * 4;
-    for (let row = 0; row < height; row++) {
-        const from = ((y + row) * srcWidth + x) * 4;
-        out.set(src.subarray(from, from + rowBytes), row * rowBytes);
-    }
-    return { bgra: out, width, height };
-}
-
-/**
- * 解析 `--crop x,y,w,h`。负数与零尺寸都抛错——
- * 静默给出「裁了但没裁到」比直接报错更难排查。
- */
-export function parseCrop(spec: string): CropRect {
-    const parts = spec.split(",").map((s) => Number(s.trim()));
-    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) {
-        throw new Error(`--crop 需要 x,y,w,h 四个数字，收到 ${JSON.stringify(spec)}`);
-    }
-    const [x, y, width, height] = parts as [number, number, number, number];
-    if (width <= 0 || height <= 0) throw new Error("--crop 的宽高必须为正");
-    if (x < 0 || y < 0) throw new Error("--crop 的坐标不能为负");
-    return { x, y, width, height };
-}
-
-// ---- 非黑像素占比 -----------------------------------------------------------
-
-/**
- * 采样统计「非黑像素」占比（0–100）。
- *
- * 判定 PrintWindow 是否真的画出了内容的通用手段：带 `PW_RENDERFULLCONTENT`
- * 时 WebView2 内容会完整出现（实测 ~90%+），不带时只有 5.8%
- * （`pitfalls` 1.3）。阈值交给调用方，本函数只负责数。
- *
- * 采样而不是全量：一张 4K 截图有 800 万像素，逐点判断在诊断脚本里没必要。
- */
-export function nonBlackPercent(
-    bgra: Uint8Array,
-    width: number,
-    height: number,
-    stepX = 0,
-    stepY = 0,
-    threshold = 20,
-): number {
-    const sx = Math.max(1, stepX || Math.floor(width / 60));
-    const sy = Math.max(1, stepY || Math.floor(height / 40));
-    let total = 0;
-    let nonBlack = 0;
-    for (let y = 0; y < height; y += sy) {
-        for (let x = 0; x < width; x += sx) {
-            const at = (y * width + x) * 4;
-            const b = bgra[at] ?? 0;
-            const g = bgra[at + 1] ?? 0;
-            const r = bgra[at + 2] ?? 0;
-            total++;
-            if (r > threshold || g > threshold || b > threshold) nonBlack++;
-        }
-    }
-    return total === 0 ? 0 : (nonBlack / total) * 100;
-}
-
 // ---- 图标 -------------------------------------------------------------------
 
 export type ExtractedIcon = {
@@ -378,3 +242,4 @@ export function closeGdi(): void {
         }
     }
 }
+

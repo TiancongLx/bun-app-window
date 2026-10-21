@@ -5,7 +5,6 @@ import { countEvents, describeTarget, findMpCmdRun, queryThreatEvents } from "..
 import { parseExtractArgs } from "../scripts/extract-icon";
 import { parseTrustArgs, KNOWN_STORES } from "../scripts/trust-cert";
 import { fingerprintDll, parseMemArgs } from "../scripts/probe-memory";
-import { cropBgra } from "../native/gdi";
 import { estimateImageTokens } from "../native/model-image";
 import { WINDOWS_METADATA } from "../native/build-pack";
 
@@ -192,66 +191,6 @@ describe("probe-memory", () => {
     });
 });
 
-// ---- cropBgra ---------------------------------------------------------------
-
-describe("cropBgra", () => {
-    /** 造一张 width×height 的 BGRA，每像素的 R 通道编码成唯一值便于验证 */
-    function makeBgra(w: number, h: number): Uint8Array {
-        const buf = new Uint8Array(w * h * 4);
-        for (let y = 0; y < h; y++) {
-            for (let x = 0; x < w; x++) {
-                const at = (y * w + x) * 4;
-                buf[at] = x & 0xff; // B
-                buf[at + 1] = y & 0xff; // G
-                buf[at + 2] = (x * 16 + y) & 0xff; // R —— 用来验证「取对了像素」
-                buf[at + 3] = 255;
-            }
-        }
-        return buf;
-    }
-
-    test("裁出正确的尺寸与像素", () => {
-        const src = makeBgra(10, 8);
-        const out = cropBgra(src, 10, 8, { x: 2, y: 3, width: 4, height: 3 });
-        expect(out).not.toBeNull();
-        expect(out?.width).toBe(4);
-        expect(out?.height).toBe(3);
-        // 原图 (2,3) 的 R = 2*16+3 = 35，应出现在裁剪结果 (0,0)
-        expect(out?.bgra[2]).toBe((2 * 16 + 3) & 0xff);
-        // 原图 (5,5) 的 R = 5*16+5 = 85，应出现在裁剪结果 (3,2)
-        const at = (2 * 4 + 3) * 4;
-        expect(out?.bgra[at + 2]).toBe((5 * 16 + 5) & 0xff);
-    });
-
-    test("越界矩形被钳制到图像内", () => {
-        const src = makeBgra(10, 8);
-        const out = cropBgra(src, 10, 8, { x: 8, y: 6, width: 100, height: 100 });
-        expect(out?.width).toBe(2);
-        expect(out?.height).toBe(2);
-    });
-
-    test("完全在图像外返回 null，不给畸形图", () => {
-        const src = makeBgra(10, 8);
-        expect(cropBgra(src, 10, 8, { x: 20, y: 0, width: 5, height: 5 })).toBeNull();
-    });
-
-    test("零尺寸返回 null", () => {
-        const src = makeBgra(10, 8);
-        expect(cropBgra(src, 10, 8, { x: 0, y: 0, width: 0, height: 5 })).toBeNull();
-    });
-
-    test("源缓冲不足时返回 null", () => {
-        expect(cropBgra(new Uint8Array(10), 10, 8, { x: 0, y: 0, width: 2, height: 2 })).toBeNull();
-    });
-
-    test("负坐标被钳到 0", () => {
-        const src = makeBgra(10, 8);
-        const out = cropBgra(src, 10, 8, { x: -3, y: -2, width: 5, height: 4 });
-        expect(out?.width).toBe(2);
-        expect(out?.height).toBe(2);
-    });
-});
-
 // ---- estimateImageTokens ----------------------------------------------------
 
 describe("estimateImageTokens", () => {
@@ -286,3 +225,4 @@ describe("与 build-pack 的互锁", () => {
         expect(WINDOWS_METADATA.title.length).toBeGreaterThan(0);
     });
 });
+
