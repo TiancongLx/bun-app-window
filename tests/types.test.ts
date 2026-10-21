@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 
 import {
+    CAPTION_BAR_HEIGHT,
+    CAPTION_BUTTONS,
+    CAPTION_BUTTON_WIDTH,
     FLAG_ACCEPT_DROP,
     FLAG_ALLOW_EXTERNAL_NAV,
     FLAG_CENTER,
@@ -19,6 +22,62 @@ import {
     ZOOM_MIN,
     resizeIndex,
 } from "@/shell/types";
+import type { CaptionButton } from "@/shell/types";
+
+/**
+ * 自绘标题栏的几何常量有**三处**副本，这里把它们钉在一起。
+ *
+ * | 处 | 作用 |
+ * | --- | --- |
+ * | `src/shell/types.ts` | 事实源（页面与原生共同消费） |
+ * | `native/shell.cc` | `caption_button_at()` 的命中区（C++ 无法 import TS） |
+ * | `src/ui/titlebar.ts` 的 CSS | 视觉尺寸（页面真正渲染的是 CSS） |
+ *
+ * 三处不一致的后果不是「难看」，而是**Snap Layouts 触发区与视觉按钮错位**：
+ * `HTMAXBUTTON` 是悬停弹面板的唯一条件，算偏几个像素就变成「悬停位置怪」或「不弹」。
+ * 这两种现象都极难反推回常量，所以宁可用断言锁死。
+ */
+const SHELL_CC = await Bun.file(new URL("../native/shell.cc", import.meta.url)).text();
+const TITLEBAR_TS = await Bun.file(new URL("../src/ui/titlebar.ts", import.meta.url)).text();
+
+test("caption 几何常量在 TS 与 C++ 两侧一致", () => {
+    const bar = /const int kCaptionBarHeight = (\d+);/.exec(SHELL_CC);
+    const btn = /const int kCaptionButtonWidth = (\d+);/.exec(SHELL_CC);
+    expect(bar?.[1]).toBe(String(CAPTION_BAR_HEIGHT));
+    expect(btn?.[1]).toBe(String(CAPTION_BUTTON_WIDTH));
+});
+
+test("titlebar.ts 的 CSS 尺寸与 caption 常量一致", () => {
+    // --ws-tb-height: 32px;
+    const h = /--ws-tb-height:\s*(\d+)px/.exec(TITLEBAR_TS);
+    expect(h?.[1]).toBe(String(CAPTION_BAR_HEIGHT));
+    // .ws-titlebar__btn { ... width: 46px; ... }
+    const w = /\.ws-titlebar__btn\s*\{[^}]*width:\s*(\d+)px/s.exec(TITLEBAR_TS);
+    expect(w?.[1]).toBe(String(CAPTION_BUTTON_WIDTH));
+});
+
+/**
+ * 顺序也要一致。
+ *
+ * `caption_button_at()` 从右边缘往左数：`idx 0/1/2` → close / maximize / minimize。
+ * 页面 CSS 用 DOM 顺序排按钮，原生按 `CAPTION_BUTTONS` 的数组顺序算矩形。
+ * 两边顺序不同 → 点「关闭」却触发了「最大化」，而且**视觉上完全看不出来**
+ * （按钮长得一样，只是行为错位）。
+ */
+test("caption 按钮顺序在 TS 与 C++ 命中判定里一致", () => {
+    const pairs = [...SHELL_CC.matchAll(/if \(idx == (\d)\) return (HT[A-Z]+);/g)].map(
+        (m) => [Number(m[1]), m[2] as string] as const,
+    );
+    // 原生只认三个按钮，多一个少一个都说明两侧漂移了
+    expect(pairs.length).toBe(CAPTION_BUTTONS.length);
+    const CPP_ORDER = pairs.sort((a, b) => a[0] - b[0]).map((p) => p[1]);
+    const HT_OF: Record<CaptionButton, string> = {
+        close: "HTCLOSE",
+        maximize: "HTMAXBUTTON",
+        minimize: "HTMINBUTTON",
+    };
+    expect(CPP_ORDER).toEqual(CAPTION_BUTTONS.map((b) => HT_OF[b]));
+});
 
 test("标志位互不重叠，可按位或组合", () => {
     const flags = [

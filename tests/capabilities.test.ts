@@ -270,8 +270,17 @@ test("最大化状态下不做边框命中（Windows 语义：最大化窗口不
     // 理由写在函数**上方**的注释里，所以切片要从定义处往前多取一段
     const hitAt = SHELL_CC.indexOf("LRESULT hit_test_client(HWND hwnd, POINT pt)");
     expect(hitAt).toBeGreaterThan(0);
-    const hitBody = SHELL_CC.slice(hitAt - 900, hitAt + 1200);
-    expect(hitBody).toMatch(/!g_frameless \|\| !g_resizable \|\| IsZoomed\(hwnd\)/);
+    const hitBody = SHELL_CC.slice(hitAt - 900, hitAt + 1600);
+
+    // 判据取「IsZoomed 出现在缩放判定的返回 HTCLIENT 分支里」，**不绑表达式形状**。
+    //
+    // 最初这里匹配的是合并写法 `!g_frameless || !g_resizable || IsZoomed(hwnd)`。
+    // 2026-10-21 引入 caption button 命中后，前置条件被拆成两段
+    // （caption button 先判、且不受 resizable / zoomed 影响；缩放边框仍跳过最大化），
+    // 精确表达式不再存在 —— 但**语义一点没变**。绑定形状的断言在重构面前必然假红，
+    // 而它真正要守的是「最大化不进缩放分支」，所以改成行为意图。
+    expect(hitBody).toMatch(/if \(!g_resizable \|\| IsZoomed\(hwnd\)\) \{\s*return HTCLIENT;/);
+
     // 理由必须在注释里写清楚，否则这条断言就只是形式
     expect(hitBody).toContain("最大化的窗口本来");
 });
