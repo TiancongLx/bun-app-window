@@ -838,6 +838,33 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
 - **合格判据的样子**：`tests/types.test.ts` 数 `if (idx == N) return HT*` 恰好 3 处，这条**自证过**——数值改成 48 只红数值那条，`HTMAXBUTTON` 与 `HTMINBUTTON` 互换只红顺序那条。它能报绿，也能准确地报红，读数才算数。
 - **拿不准就换判据**：需要真实鼠标、真实焦点、真实前台的事（Snap flyout、悬停态、失焦变暗），把窗口摆好、把坐标报出来，**请人按一下**。这不是偷懒——本轮四次自动探针加起来，还不如三秒钟的一次真人悬停。
 
+### 2.22 屏幕坐标探针量到的可能是**别的窗口**：两个最大化窗口矩形完全重叠
+
+- **症状**：验收原生 caption 按钮，`WindowFromPoint` 在三个按钮中心回报 `Chrome_WidgetWin_1`，判据 `0/3`。子窗口存在、`IsWindowVisible` 真、矩形 `276x64 at 2796,0` 精确贴右边缘、`WM_NCHITTEST` 答得也对——一切指向「layered 窗口按 alpha 穿透」（2.21 第一节那个坑）。
+- **真因**：**被量的窗口不在最上面。** 本机 `baw-mvp`（pid 29196，`webview_shell`，`3098x1850 at -13,-13`）与 Open WebUI（pid **26536**，`Chrome_WidgetWin_1`，`3098x1850 at -13,-13`）**都最大化、矩形逐像素相同**。聊天窗口压在上面，`WindowFromPoint` 如实回答了它——那是正确答案，不是缺陷。
+- **怎么在一分钟内定死**：把可疑句柄的 `className` / `windowTitle` / pid / rect 打出来。`0xa04e0 → "Open WebUI" pid 26536` 与目标 `pid 29196` 一比，答案立刻出来。**只打类名永远看不出来**——两个进程的 WebView2 类名一模一样。
+
+    ```text
+    0xa04e0 : Chrome_WidgetWin_1   "Open WebUI"  pid 26536   3098x1850 at -13,-13
+    0x54069c: webview_shell        "baw-mvp"     pid 29196   3098x1850 at -13,-13
+    ```
+
+- **连带被骗的还有「对照点」**：原先拿客户区中心当「尺子没瞎」的对照，那里返回 `Chrome_RenderWidgetHostHWND`，看着像穿透成功了——其实那个 `Chrome_RenderWidgetHostHWND` 的 pid 也是 **26536**，是 Open WebUI 的，且 `IsWindowVisible` 为 `false`。**对照点本身也量错了对象**，于是「自证」通过得毫无破绽。
+- **如何排除「激活态」这个假说**：两组读数把路堵死了。
+    - `SetForegroundWindow(目标)` 之后，同一个点、同一把尺子立刻 `3/3`——但 `SetForegroundWindow` **同时把窗口提到了最前**，所以这只能证明「z 序」，不能证明「激活」。
+    - 人工 `SendMessage(WM_ACTIVATE, WA_INACTIVE)` 之后仍是 `3/3`。**激活态被排除**，变量只剩 z 序。
+- **规矩**：屏幕坐标类探针必须带**三条前置**，任何一条不过就输出「判据不可信」并退出，**绝不把 0 当结论**：
+
+    | 前置 | 判据 |
+    | --- | --- |
+    | A 目标就是前景窗口 | `GetForegroundWindow() === 目标` |
+    | B 目标矩形未被他人占用 | caption 上一个按钮外的点，其句柄的 **pid** 必须等于目标 pid |
+    | C 尺子没瞎 | 对照点必须**穿透到 child**（非 null、非顶层本身） |
+
+    注意 B 和 C 都要看 **pid**，不是看类名、也不只看「非 null」。
+- **判据落地**：`%TEMP%\baw-caption-verify.ts` 已按上面三条实现，前置不过时打印「**判据不可信，本轮不作结论**」并以退出码 3 结束。真机读数：三条前置 PASS，三个按钮 `★ webview_shell_caption` 且 `HT=20/9/8`，标题空白仍回 `Chrome_RenderWidgetHostHWND`，`3/3` + `空白区未被 caption 吞`。
+- **证据**：`实测结果`（2026-10-22，`baw-mvp` pid 29196 / `bun-app-window@0.6.1` / @192dpi 最大化 / 确认 DLL `E807B058`）。
+
 ---
 
 ## 三、原生边界
