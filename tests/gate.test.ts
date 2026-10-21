@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import {
     LABELS,
@@ -490,3 +492,38 @@ describe("main 的帮助路径", () => {
         expect(await main(["-Help"], "/nonexistent")).toBe(0);
     });
 });
+
+// ---- 仓库里没有 .ps1 ---------------------------------------------------------
+
+const REPO = resolve(import.meta.dir, "..");
+const SKIPPED_DIRS = new Set(["node_modules", "vendor", ".git", ".build", "dist"]);
+
+function findPs1(dir: string, found: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+            if (SKIPPED_DIRS.has(entry.name)) continue;
+            findPs1(join(dir, entry.name), found);
+        } else if (entry.name.toLowerCase().endsWith(".ps1")) {
+            found.push(join(dir, entry.name));
+        }
+    }
+    return found;
+}
+
+describe("仓库里没有 .ps1（第二段退役的前提）", () => {
+    /**
+     * 2026-10-21 两个签名脚本退役后，`.ps1` 语法校验从门禁里删掉了。
+     * 删它的前提是「仓库里真的没有 `.ps1`」——而那段代码一删，就没有任何东西
+     * 再检查这个前提了：新增一个 `.ps1` 会静静地无人校验，表现和「已经全部
+     * 迁完」一模一样。
+     *
+     * 这条断言守的就是那个前提，写法与 `build.test.ts` 里「build.ps1 已不存在」
+     * 同源。它变红时要做的决定是二选一：恢复语法校验阶段，或把那个文件改成
+     * `.ts`。删掉这条断言不是选项——那等于把「没有 .ps1」从事实降级成记忆。
+     */
+    test("全仓 .ps1 数量为 0", () => {
+        const relative = findPs1(REPO).map((p) => p.slice(REPO.length + 1).replaceAll("\\", "/"));
+        expect(relative).toEqual([]);
+    });
+});
+

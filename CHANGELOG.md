@@ -20,7 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- `tests/gate.test.ts` shrank with the stage: `parsePs1Summary` and the `.ps1`-failure short-circuit assertions are gone, and `planStages` now asserts three stages (`552 pass` → `550 pass`).
+- `tests/gate.test.ts` shrank with the stage: `parsePs1Summary` and the `.ps1`-failure short-circuit assertions are gone, and `planStages` now asserts three stages.
+- **A new assertion keeps the deletion honest.** `tests/gate.test.ts` now fails if a `.ps1` appears anywhere in the repository. Deleting a stage and leaving nothing behind would mean the next `.ps1` arrives ungoverned and looks exactly like "the migration is complete". Verified in both directions: creating `scripts/__probe.ps1` turns it red naming that path, removing it returns green. Net test count `552` → `551` (two lost with the stage, one gained).
 - `docs/pitfalls.md` 3.18 keeps all five traps and is re-headed as *retired* rather than *paused* — the values and consequences were measured, so the record outlives the script. 5.2 and 5.6 no longer describe a `.ps1` that might come back.
 - Two ghost instructions surfaced while deleting: `scripts/trust-cert.ts` told the user to run `scripts/test-sign.ts`, a path that never existed, and `native/build-pack.ts` told them to run `scripts/make-icon.ps1`, which was migrated to TypeScript long ago. Both now point at something that exists.
 
