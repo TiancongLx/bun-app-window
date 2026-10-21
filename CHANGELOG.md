@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Caption buttons on a frameless window now answer `HTMAXBUTTON`, so Windows 11 Snap Layouts works.** The only documented trigger is `WM_NCHITTEST` returning `HTMAXBUTTON` for the maximize/restore button (*Support snap layouts for desktop apps on Windows 11*). Previously `hit_test_client` returned only the eight resize codes and `HTCLIENT`, so hovering maximize never opened the layout picker — the last piece of "looks like a Win 11 app" that CSS cannot buy.
+
+    Three constants became a single source of truth in `types.ts` — `CAPTION_BAR_HEIGHT` (32), `CAPTION_BUTTON_WIDTH` (46), `CAPTION_BUTTONS` (`close` / `maximize` / `minimize`, right to left). Two copies follow it: `kCaptionBarHeight` / `kCaptionButtonWidth` plus the `caption_button_at()` order in `native/shell.cc` (C++ cannot import TS), and the `32px` / `46px` in `titlebar.css`.
+
+    **Order matters more than the numbers.** If the hit-test order and the DOM order disagree, clicking "close" maximizes the window — and the buttons look identical, so nothing about the symptom points at a constant.
+
+    **`HTMAXBUTTON` cannot ship alone.** Once `WM_NCHITTEST` answers that code, the point is non-client: a press delivers `WM_NCLBUTTONDOWN` instead of `WM_LBUTTONDOWN`, so the page receives no pointer or click event at all. Changing only the hit test turns the button into a black hole that eats clicks — the symptom reads as "clicking maximize does nothing", which is exactly backwards from the intent. `shell_wnd_proc` therefore handles `WM_NCLBUTTONDOWN` for the three button codes and performs the action itself; every other code still falls through to `DefWindowProc` so caption dragging and edge resizing keep working.
+
+    The caption check is deliberately placed **before** the resize-border check and is **not** gated on `g_resizable` / `IsZoomed`. The old guard opened with `!g_frameless || !g_resizable || IsZoomed(hwnd) → HTCLIENT`; reusing it would make the maximize button unhittable precisely when the window is maximized — which is when the user needs it to restore.
+
+    Measured with a one-off FFI probe against `dist/libshell.dll` and `user32.dll` (7/7):
+
+    ```text
+    A. scan from the right edge (physical px, 200% scale)
+      x=1799 → HTCLOSE
+      x=1708 → HTMAXBUTTON
+      x=1616 → HTMINBUTTON
+      x=1524 → HTTOP          ← inside the resize border
+      button width 91/92, expected 92 (= CSS 46px × scale)
+
+    B. WM_NCLBUTTONDOWN
+      HTMAXBUTTON → maximized   state=1
+      again       → restored    state=0
+      HTMINBUTTON → minimized   state=2, win=314x50 (sentinel — really minimized)
+    ```
+
+    **Still manual**: whether the Snap flyout actually *appears* on hover. It is a DWM-owned popup, so `PrintWindow` cannot capture it and no readout exposes it. Automating the hover was attempted and blocked — the Windows MCP refused the cursor move (`USER_CONTROL`, `state: user`), and `SetCursorPos` landed 216 px away, i.e. the pointer was in use. What is verified is the precondition the documentation names; what is not verified is the flyout itself.
+
+    One measurement worth keeping: the outer 13 physical pixels of the window are the resize border, so the title bar's top ~6.5 logical pixels answer `HTTOP` rather than the button code. Caption buttons win where they overlap (they are checked first), but a probe that samples `y=1` will read `HTTOP` and should not be read as "the button is missing".
+
 ### Fixed
 
 - **`getBounds()` returned the Win32 minimised sentinel rectangle, and `attachPlacementStore` wrote it straight to disk.** `format_bounds()` only took `WINDOWPLACEMENT.rcNormalPosition` when `IsZoomed()` was true. A minimised window is not zoomed, so it fell through to `GetWindowRect()` — which for a minimised window reports `-32000,-32000` plus an icon-sized box (measured: `314x50`). `IsIconic()` was never consulted.

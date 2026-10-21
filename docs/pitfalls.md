@@ -623,6 +623,141 @@ if (width <= 0 || height <= 0 || dpi <= 0) return null;   // 拦不住
 
 ---
 
+### 2.19 `HTMAXBUTTON` 是 Snap Layouts 的唯一钥匙，也是页面点击的黑洞
+
+想让自绘标题栏的最大化按钮在悬停时弹 Win 11 的分屏面板，条件只有一个，且是
+微软文档明文写着的（*Support snap layouts for desktop apps on Windows 11*）：
+
+```text
+For Win32 apps, make sure you are responding appropriately to WM_NCHITTEST
+(with a return value of HTMAXBUTTON for the maximize/restore button).
+```
+
+这条**不能用 CSS 补**，也不能靠 `AppWindowTitleBar` 之类的 WinRT API（那要 App SDK）。
+它就是 `WM_NCHITTEST` 的一个返回值。所以看起来是个十行改动。
+
+它不是。三个层次各自能单独把人绊住：
+
+#### 一、返回了它，点击就不再到达页面
+
+`WM_NCHITTEST` 一旦对某个点返回 `HTMAXBUTTON`（或 `HTMINBUTTON` / `HTCLOSE`），
+系统就把那个点当成**非客户区**：按下时派发 `WM_NCLBUTTONDOWN` 而**不是**
+`WM_LBUTTONDOWN`。页面收不到 `pointerdown`、收不到 `mousedown`、收不到 `click`。
+
+于是「只改 hit test」的后果是：按钮变成一个吃掉点击的黑洞。症状是
+**「点最大化没反应」**——与改动意图正好相反，而且改动看上去只加了一行 `return`。
+
+修法必须同批：在窗口过程里接 `WM_NCLBUTTONDOWN`，对这三个码自己执行动作。
+其余码（`HTCAPTION` 拖动、八个边框码）必须继续 `break` 交给 `DefWindowProc`——
+那是系统自己的模态循环，抢过来就没法拖窗口了。
+
+```cpp
+case WM_NCLBUTTONDOWN: {
+  const WPARAM hit = wp;
+  if (hit == HTCLOSE)     { DestroyWindow(hwnd); return 0; }
+  if (hit == HTMINBUTTON) { ShowWindow(hwnd, SW_MINIMIZE); return 0; }
+  if (hit == HTMAXBUTTON) {
+    ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+    return 0;
+  }
+  break;   // 拖动与缩放交给系统
+}
+```
+
+#### 二、caption button 必须先判，而且不能受 `IsZoomed` 影响
+
+原实现的入口条件是一行合并写法：
+
+```cpp
+if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
+```
+
+`IsZoomed` 在那里是**刻意的**（最大化的窗口不能拖边缘缩放，资源管理器也一样）。
+但把它沿用给 caption button 就错了：**最大化之后，最大化按钮正好是用户还原的入口**。
+沿用那行等于「一旦最大化，按钮就点不到」。
+
+所以必须拆成两段：caption button 先判（且不看 `resizable` / `zoomed`），
+缩放边框仍保留原来的跳过逻辑。
+
+拆完之后那条既有断言会假红——见下面第四小节。
+
+#### 三、三处副本，其中「顺序」比「数值」更要紧
+
+几何常量 `32` / `46` 有**三份**，缺一不可：
+
+| 处 | 用途 |
+| --- | --- |
+| `src/shell/types.ts` | 事实源，页面与原生共同消费 |
+| `native/shell.cc` | `caption_button_at()` 的命中区（C++ 无法 import TS） |
+| `src/ui/titlebar.ts` 的 CSS | 视觉尺寸（页面真正渲染的是 CSS） |
+
+数值算偏几个像素，表现是「悬停位置怪」或「不弹」——两种都极难反推回常量。
+
+但**顺序**更凶：原生从右往左按 `close / maximize / minimize` 算矩形，
+页面按 DOM 顺序排按钮。顺序不一致时点「关闭」会触发「最大化」，
+而三个按钮长得一样，**视觉上完全看不出错位**。
+
+`tests/types.test.ts` 用三条断言把三处钉住，含顺序；反向验证：
+数值改成 48 → 只红数值那条；`HTMAXBUTTON` 与 `HTMINBUTTON` 互换 → 只红顺序那条
+并精确指出换位。
+
+#### 四、顶部缩放区会吃掉标题栏的一小条，探针容易误判
+
+窗口最外 13 物理像素（192dpi）是缩放边框，而标题栏是 64 物理像素高。
+所以在标题栏的**最上 13 像素**、且不在按钮上的位置，命中返回 `HTTOP` 而不是 `HTCLIENT`。
+
+这是对的——用户需要能从窗口顶端边缘缩放。但它会让探针误判：
+第一版探针在 `(clientW-5, y)` 取「标题栏之下」的样本，读到 `HTRIGHT`，
+在 `y=1` 取「按钮左侧」，读到 `HTTOP`，两条都报 FAIL，而实现完全正确。
+**换样本点，不是改实现。**
+
+#### 五、探针不能依赖被测参数
+
+同一轮里还有第二个探针错误，更值得记：为了算按钮位置，探针先「推断 DPI」——
+从 96 开始逐个试，取第一个让右边缘中心返回 `HTCLOSE` 的候选值。
+
+这个推断**恒等于第一个候选值**：右边缘中心无论按钮多宽、DPI 多少，都在 close 里。
+于是整段坐标按 96 算，而真实是 192，五个样本点全错位，报 1/5。
+
+修法不是修 DPI 推断，而是**不推断**：从右边缘往左逐像素扫，记录命中码变化点。
+这不依赖任何假设，还顺手量出按钮宽度（实测 91/92 物理像素，期望 `46 × 2`）。
+
+**判据不能把被测参数当输入。**
+
+#### 第六条：一条既有断言被这次重构打破了
+
+`tests/capabilities.test.ts` 的「最大化状态下不做边框命中」原本匹配合并写法
+`!g_frameless || !g_resizable || IsZoomed(hwnd)`。拆成两段后那个精确表达式不存在了，
+断言变红——而**语义一点没变**。
+
+绑定表达式形状的断言在重构面前必然假红。改成守意图：`IsZoomed` 出现在
+「返回 HTCLIENT」的分支里，且理由注释还在。这不是放宽——真把 `IsZoomed` 删掉，
+新判据同样会红。
+
+- **证据**：`实测结果`（2026-10-21）。真机探针 7/7：
+
+    ```text
+    A. 从右边缘往左扫（物理像素 @200%）
+      x=1799 → HTCLOSE
+      x=1708 → HTMAXBUTTON
+      x=1616 → HTMINBUTTON
+      x=1524 → HTTOP            ← 进入缩放边框
+      按钮宽度 91/92，期望 92（= CSS 46px × scale）
+
+    B. WM_NCLBUTTONDOWN
+      HTMAXBUTTON → 最大化  state=1
+      再发 → 还原          state=0
+      HTMINBUTTON → 最小化 state=2，win=314x50（哨兵，确系最小化）
+    ```
+
+- **仍然只能人工验的一条**：悬停时 Snap 面板**是否真的弹出**。它是 DWM 拥有的
+  弹出窗口，`PrintWindow` 抓不到、也没有任何读数能暴露它。本轮试过自动悬停，
+  被 Windows MCP 的 `USER_CONTROL` 策略拒绝（`state: user`），改用 `SetCursorPos`
+  后指针落在 216 像素之外（说明用户正在用鼠标）。**已验证的是文档写明的那个前置
+  条件，未验证的是面板本身。**
+
+---
+
 ## 三、原生边界
 
 ### 3.1 `bun:ffi` 的 `dlopen` 路径必须归一化
