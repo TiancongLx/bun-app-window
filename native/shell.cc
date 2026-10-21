@@ -1931,16 +1931,35 @@ void center_on_work_area(HWND hwnd) {
 // 最大化时必须取「还原后」的矩形（WINDOWPLACEMENT.rcNormalPosition）：
 // 直接 GetWindowRect 拿到的是整屏尺寸，下次启动就会先铺满再最大化，
 // 用户点「还原」时看到的仍是全屏——这是同类实现最常见的错。
+//
+// **最小化时同理，而且更隐蔽**：`IsZoomed` 在最小化时返回 false，早先的写法于是
+// 落进 `GetWindowRect` 分支，拿到 Win32 的哨兵坐标（实测 `-32000,-32000` 加图标尺寸，
+// 典型 `314x50`）。这对值形状完全合法——整数坐标、正尺寸——下游只判「尺寸 ≤ 0」的
+// 形状校验拦不住，会把它当真实位置存进 `window.json`，下次启动恢复成一个畸形小窗。
+// 实测现场：无边框窗口变成 666×471，页面被挤到换行并出现滚动条。
+//
+// 所以判据不是「是否最大化」而是「是否处于有意义的显示状态」：只要最小化或最大化，
+// 就用 `rcNormalPosition`（它天然是「还原后该用的矩形」）。
 int format_bounds(char *buf, int cap) {
   if (!buf || cap <= 0) return 0;
   buf[0] = 0;
   if (!g_hwnd) return 0;
 
-  const bool maxed = IsZoomed(g_hwnd) != 0;
-  RECT rc{};
   WINDOWPLACEMENT wp{};
   wp.length = sizeof(wp);
-  if (maxed && GetWindowPlacement(g_hwnd, &wp)) {
+  const bool haveWp = GetWindowPlacement(g_hwnd, &wp) != 0;
+  const bool minned = IsIconic(g_hwnd) != 0;
+
+  // 最大化位：最小化时 `IsZoomed` 恒为 false，得从 `wp.flags` 取
+  // 「还原后会不会变成最大化」——否则「最大化 → 最小化 → 关窗」这条路径
+  // 会把状态记成「未最大化」，下次启动就丢了最大化。
+  bool maxed = IsZoomed(g_hwnd) != 0;
+  if (minned && haveWp && (wp.flags & WPF_RESTORETOMAXIMIZED) != 0) {
+    maxed = true;
+  }
+
+  RECT rc{};
+  if ((maxed || minned) && haveWp) {
     rc = wp.rcNormalPosition;
   } else if (!GetWindowRect(g_hwnd, &rc)) {
     return 0;
