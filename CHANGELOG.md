@@ -4,6 +4,73 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-21
+
+**Upgrading is enough for the first two items — no code changes on your side.** The third changes how you build a single-file executable, and it fixes something that never worked.
+
+### Fixed
+
+- **Keyboard shortcuts work again.** `F11`, `F12`, `F5`, `Ctrl+R`, `Ctrl+0` and `Ctrl±` were all dead, while `Ctrl+wheel` zoom kept working. The cause was message routing, not the handling logic: `WM_KEYDOWN` is delivered to the **focused** window, and focus sits on WebView2's render child window (`Chrome_RenderWidgetHostHWND`), which does not forward unhandled keys to its parent. Every `handle_input_message` call site on the two window procedures was unreachable by real keystrokes. `Ctrl+wheel` survived only because `WM_MOUSEWHEEL` *is* forwarded to the parent by the focused window's `DefWindowProc`.
+
+    The bug is easy to misdiagnose, because `PostMessage(hwnd, WM_KEYDOWN, VK_F11, 0)` toggles fullscreen correctly — that experiment simply bypasses what broke.
+
+    The shell now subscribes to `ICoreWebView2Controller::add_AcceleratorKeyPressed`, which fires before the key reaches the page and does not depend on the focus chain. Key semantics live in one place (`handle_accelerator_key`), shared by the callback and the surviving `WM_KEYDOWN` path; only `KEY_DOWN` / `SYSTEM_KEY_DOWN` are handled (handling `KEY_UP` would toggle twice and look like "nothing installed"), and handled keys call `put_Handled(TRUE)`.
+
+- **`FLAG_ACCEPT_DROP` now delivers full paths.** With the flag on, pages received a DOM `drop` carrying only `name` and `size`; the promised `shell-msg { t: "drop", paths: [...] }` never arrived. `DragAcceptFiles` only sets `WS_EX_ACCEPTFILES` on the **top-level** window, but OLE hit-testing walks to the deepest window under the cursor (`webview_widget` → `Chrome_WidgetWin_1` → `Chrome_RenderWidgetHostHWND` → `Intermediate D3D Window`, all measured `ACCEPTFILES=False`). WebView2 registers its own `IDropTarget` on the render child, takes the drop, and turns it into a DOM event — the top-level default drop target never sees it. The three `ChangeWindowMessageFilterEx` calls only allow messages *in*; they do not decide where a message *goes*.
+
+    The fix is upstream: `ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)` steps aside from that internal target, so the OLE chain continues to the parent and `WM_DROPFILES` reaches `handle_drop`. No hand-written `IDropTarget` — that would fight WebView2's internals, and the layering can change between releases (which is exactly how this was hit). On an older runtime the `QueryInterface` fails and the shell keeps WebView2's default behaviour rather than blocking startup.
+
+- **Closing the window no longer keeps the process alive for five more seconds.** `App.stop()` used `Promise.race([closed.promise, Bun.sleep(CLOSE_TIMEOUT_MS)])`. A race takes the first settled promise and **does not cancel the loser**, so on the normal path the 5-second `Bun.sleep` became an un-awaited, un-unref'd timer that held Bun's event loop open. Measured: `race returned @ 9 ms`, process exit `@ 5010 ms`; a real window close took 5043 ms. Now a cancellable `setTimeout` with `finally { clearTimeout(timer) }`, and no `AbortSignal` on `Bun.sleep` (unsupported).
+
+    One measurement note worth keeping: the criterion has to be **when the process exits**, not how long `stop()` takes. With `clearTimeout` removed, `stop()` still returned in 42 ms while the process took 5.9 s to exit.
+
+- **The single-file executable actually embeds the native library.** `libInfo.source === "embedded"` was the documented acceptance criterion for shape B, and it had never been achievable: `src/host.ts` did not import `bun-app-window/embedded`, so the bundler recorded no `type: "file"` dependency, `resolveNativeLib` could not find embedded bytes, and the only surviving fallback was "put `libshell.dll` next to the exe" — which reports `source: "package"`, not `embedded`. Builds succeeded and the window came up, so nobody looked further.
+
+    Adding the side-effect import fixes it. Measured in an empty directory with only the `.exe`, after deleting `%LOCALAPPDATA%\BunAppWindow\runtime\`:
+
+    ```text
+    ExitCode 0
+    [lib] source=embedded path=...\BunAppWindow\runtime\libshell-15ef6452e3fcc26f.dll
+    ```
+
+    A second run reports `source=embedded` again and leaves the extracted file's mtime untouched (`reused === true`). The bundle grew from 96,158,208 to 97,165,824 bytes — the difference is exactly `dist/libshell.dll`. This is also the first time `ADR 0003`'s self-managed extraction had been exercised by a real executable.
+
+### Changed
+
+- **WebView2 C/C++ SDK upgraded from `1.0.1150.38` to `1.0.4258.31`.** `AllowExternalDrop` needs SDK `1.0.1185.39` or newer and did not exist in the previous vendored copy, which is why the drag-and-drop fix above was impossible before. `AdditionalObjects` and `ICoreWebView2File` arrived with it; they are not used, because they are reachable only through `postMessage`, and this shell keeps page communication on WebSocket. The old nupkg is removed and the new one is committed, so offline rebuilds behave exactly as before.
+
+    `CORE_WEBVIEW_TARGET_PRODUCT_VERSION` moves from `99.0.1150.38` to `154.0.4258.31`. This project already requires Bun ≥ 1.4.3, TypeScript ≥ 7.0.2, Windows x64 and a working WebView2 Runtime, and **does not aim for compatibility with older runtimes** — that is a decision, not an oversight.
+
+- **`timeoutMs: 0` is now documented and guarded.** `pickFolder()` blocks the host thread for however long a person browses, so `connect({ timeoutMs: 0 })` is required when exposing it over IPC — otherwise the client rejects after 30 seconds while the host is still working, and a missing `.catch` makes that entirely silent. Both halves are now in the docs, and two assertions keep the contract: one behavioural (`timeoutMs: 0` still pending after 50 ms) and one static (no `||` fallback, which would turn `0` back into `30000`).
+
+    Worth knowing beyond the timeout: `pickFolder()` blocks the **Bun main thread**, so timers in that process do not fire and other IPC calls queue up while the dialog is open. Lowering the timeout surfaces the symptom earlier; it does not fix the blocking. Real concurrency means running it in a Worker.
+
+### Documentation
+
+- `docs/pitfalls.md` gains 2.13 (shortcuts: `WM_KEYDOWN` goes to the focused window) and 2.14 (drag and drop: the deepest window wins the OLE hit test), plus 4.9 for the `embedded` criterion that nothing satisfied. Each records the double-sided verification, including the probe mistakes made along the way — a probe that called `SetFocus` on the top-level window measured the old code path and reported success with the fix removed.
+- `AGENTS.md` records both routing mechanisms as implementation rules and replaces the open question about minimum runtime with the compatibility decision above.
+- Three READMEs gain the `timeoutMs` section and cross-reference it from the `pickFolder` row.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `bun check` | 68 files |
+| `bun test` | 556 pass / 0 fail |
+| `bun run scripts/gate.ts` | 4 stages, PASSED |
+| `bun run scripts/gate.ts --clean` | PASSED (clean) |
+| `bun run scripts/verify-dll.ts` | PASSED, `dist/libshell.dll` matches `native/shell.cc` |
+| `scripts/probe-window-events.ts` | 21 checks |
+| `scripts/probe-accelerator-keys.ts` | 6 checks |
+| `scripts/probe-drop.ts` | 6 checks |
+| shape B in an empty directory | exit 0, `source=embedded`, `reused=true` |
+
+Each of the two new probes was verified in both directions: removing `install_accelerator_handler()` makes a real `F11` do nothing (1826 px → 1826 px), and removing `handle_drop(...)` leaves the `HDROP` handle alive. With the fix in place both pass.
+
+### Still manual
+
+Dragging a real file into a window to confirm the page sees the **full path**. A synthetic `HDROP` proves the message reaches `handle_drop`; it cannot prove that OLE hit-testing now resolves to the parent window, because that requires an actual cross-process drag.
+
 ## [0.4.1] - 2026-10-21
 
 ### Fixed
@@ -327,7 +394,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.2.2...v0.3.0

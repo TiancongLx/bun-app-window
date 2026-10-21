@@ -120,7 +120,7 @@ export function packArgs(opts: PackOptions): PackPlan {
         WINDOWS_METADATA.publisher,
         // 下面这一行的版本号必须保持「字面量 + 与 --windows-version 同行」的形状：
         // bump-version.ts 原地改写它，version.test.ts 静态读取它。
-        "--windows-version", "0.4.1.0",
+        "--windows-version", "0.5.0.0",
     ];
 
     let warning: string | null = null;
