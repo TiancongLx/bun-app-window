@@ -919,6 +919,97 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
     消费者侧同样双向验证：同一份 `tsconfig` + `src` 装 0.4.0 得 1 条 `TS2352`，
     装修复后的 tarball 得 0 条。
 
+### 3.18 Authenticode 验签：五个实测撞到的常量与结构陷阱
+
+> **状态：未迁移，仅记录。** `scripts/verify-sign-crypto.ps1` 仍然保留在第 3 章
+> 的「不迁」档里（`ADR 0014`）。2026-10-21 试过一次完整 TS 化，五个坑都趟平了，
+> 但**最后一步卡住**——详见本节末尾。记录在这里是为了下一次不必重走。
+
+#### 一、`notepad.exe` 没有内嵌签名
+
+`Get-AuthenticodeSignature` 对 `%SystemRoot%\System32\notepad.exe` 返回 `Valid`，
+但 PE 的安全目录是 `rva=0 size=0`、文件尾 64 字节全零——**它没有内嵌签名**。
+
+那个 `Valid` 来自 **catalog 签名**（`Windows\System32\CatRoot\*.cat`）。
+所以「读 PE 安全目录拿到 null」与「文件已签名」可以同时成立，两者不是矛盾。
+
+**找内嵌签名的测试样本**：扫 `System32\*.exe`，`readCertificateDir` 返回非 null
+的那些。实测 `aitstatic.exe`（10,680 B 的 cert dir）、`ApplicationFrameHost.exe` 等 8 个。
+
+#### 二、`dwLength - 8` 不是 blob 长度
+
+`WIN_CERTIFICATE` 的 `dwLength` 字段有两份互相矛盾的官方文档：微软的 Authenticode
+PE 页面说「bCertificate 的长度，不含 padding」，PE/COFF 规范说「含 8 字节头」。
+
+**实测站 PE/COFF**：`certDir.offset + dwLength` 正好等于文件大小，按「不含头」解释
+会超出文件 8 字节。
+
+但 `dwLength - 8` **仍然不是 blob 的长度**——整条记录会被补齐到 8 字节边界，填充
+落在 `dwLength` 之内。实测：
+
+```text
+dwLength = 10680 → dwLength - 8 = 10672
+DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
+```
+
+差的那 1 字节就是填充。把填充一起喂给 `CryptMsgControl`，得到的是
+**`CRYPT_E_ASN1_BADTAG (0x8009100E)`**——外部表现「签名不匹配」，与真正的篡改
+无法区分。**必须按 DER 自己的长度字段截断。**
+
+#### 三、`CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED` 是 0x100，不是 0x400
+
+写错会让 `CryptQueryObject` 返回 `CRYPT_E_NO_MATCH (0x80092009)`，看起来像
+「blob 内容不对」，实际是常量错。`0x400` 是 `..._PKCS10`。
+
+#### 四、`CryptMsgOpenToDecode` 恒返回 `E_INVALIDARG`
+
+作为「解 PKCS#7」的最直接入口，它对合法 Authenticode blob 一律返回
+`E_INVALIDARG (0x80070057)`：4/5/6 参数、`u64_fast`/`ptr` 两种指针类型、
+三种 `dwEncodingType` 全部一样。`bun:ffi` 没有签名反射，查不出是哪个参数。
+
+**换 `CryptQueryObject`**（`CERT_QUERY_OBJECT_BLOB` + `PKCS7_SIGNED_EMBED` +
+`CERT_QUERY_FORMAT_FLAG_BINARY`）——一次调用拿到 `hMsg` + `hStore`，且能读出
+`CMSG_TYPE_PARAM = 2 (CMSG_SIGNED)` 与 `CMSG_SIGNER_COUNT_PARAM = 1`。
+
+#### 五、两个枚举值都差一位
+
+| 常量 | 我写错的 | 正确 | 写错的后果 |
+| --- | --- | --- | --- |
+| `CMSG_VERIFY_SIGNER_NULL` | 2（那是 `..._PK`） | **4** | `CRYPT_E_INVALID_MSG_TYPE` |
+| `CMSG_CTRL_VERIFY_SIGNATURE_EX` | 1（那是非 EX 版） | **2** | `CRYPT_E_ASN1_BADTAG`，把 EX 结构体当 `PCCERT_CONTEXT` 解 |
+
+#### 六、`WTD_REVOKE_WHOLECHAIN` 会联网，直接卡住
+
+试 `WinVerifyTrust` 的 `fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN` 时进程挂死——
+它在查 CRL/OCSP。诊断脚本里**只能**用 `WTD_REVOKE_NONE (0)`，否则一个失败实验
+会变成一次几十秒的网络等待（实测卡到外层工具 499）。
+
+#### 卡在哪：`CryptMsgControl` 需要证书上下文
+
+`CryptQueryObject` 成功后，`CryptMsgGetParam(hMsg, CMSG_CERT_COUNT_PARAM)` 返回
+**0**——证书不在消息里，在它返回的 `hStore` 里。而
+`CertFindCertificateInStore(..., CERT_FIND_SUBJECT_CERT, CERT_INFO)` 也返回 `0`。
+
+`CMSG_CTRL_VERIFY_SIGNATURE_EX` + `CMSG_VERIFY_SIGNER_NULL` 说「用消息里嵌入的
+证书」，但消息里没有，于是失败。要拿下这一步，得补
+`CryptMsgGetParam(CMSG_SIGNER_CERT_INFO_PARAM)` → 在 store 里按另一种 find 类型
+找 → `CryptCreateCertificateContext`，然后用非 EX 版 `CMSG_CTRL_VERIFY_SIGNATURE`
+传 `PCCERT_CONTEXT`。**这条路没走完。**
+
+#### 附：`WINTRUST_DATA` 的篡改判定也有差异
+
+`WinVerifyTrust` 对「原始签名 exe」正确返回 `0 (trusted)`、对「未签名 exe」正确返回
+`TRUST_E_NOSIGNATURE`。但对**翻转了一个字节的签名 exe**，它返回的是
+`TRUST_E_NOSIGNATURE`，而 PowerShell 的 `Get-AuthenticodeSignature` 对同一文件报
+`HashMismatch`。
+
+同一 API、同一文件、不同结果——差异只在 `WINTRUST_DATA` 的字段配置（`dwUIChoice` /
+`dwProvFlags` / `fdwRevocationChecks`）。**这一点没定位**，所以「篡改检测」这条判据
+也没能迁移。
+
+**结论**：`verify-sign-crypto.ps1` 那 113 行保留。它不是「结构体太复杂」，而是
+**证书上下文那一段的 API 组合没趟平**——下次做的时候从本节第六小节的提示开始。
+
 ---
 
 ## 四、打包与分发
