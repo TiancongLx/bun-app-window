@@ -127,7 +127,7 @@ export function packArgs(opts: PackOptions): PackPlan {
     if (opts.iconPath) {
         argv.push("--windows-icon", opts.iconPath);
     } else {
-        warning = "icon not found (run scripts/make-icon.ps1 first)";
+        warning = "icon not found (run scripts/make-icon.ts first)";
     }
 
     if (!opts.keepConsole) {

@@ -290,7 +290,7 @@ export function main(argv: readonly string[]): number {
     const source = findCertificate("My", plan.subject);
     if (!source) {
         console.error(`cert not found in CurrentUser\\My: ${plan.subject}`);
-        console.error("（先用 scripts/test-sign.ts 创建自签证书，或确认 Subject 拼写）");
+        console.error("（自签证书请用 signtool 或 PowerShell 的 New-SelfSignedCertificate，本仓不再提供该脚本）");
         return 2;
     }
     console.log(`cert: ${source.name}`);

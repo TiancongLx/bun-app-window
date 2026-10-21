@@ -6,10 +6,9 @@
  * Windows x64 单平台、单人开发、零外部服务依赖，远端 CI 的边际价值低于维护成本。
  * 门禁在本地执行。
  *
- * 四个阶段：
+ * 三个阶段：
  *
  *     bun check                        类型检查
- *     .ps1 syntax                      剩余 PowerShell 脚本的语法校验
  *     bun test                         行为测试
  *     bun run scripts/verify-pack.ts   消费方验收（打包 → 白名单 → 装临时工程 → 类型 + 运行时）
  *
@@ -17,9 +16,9 @@
  * 而「作为 tarball 被第三方安装」这条链路整段缺席。`exports` 拼错、`files` 漏项、
  * 类型声明缺位，这三种故障在仓库内全绿，装起来就炸。
  *
- * 第 2 段是迁移期的临时护栏：仓库里剩下的 `.ps1` 依赖 Win32 API，它们没有
- * 类型检查也没有测试（ADR 0012）。语法级校验挡不住语义错误，但比零覆盖强。
- * 等这些脚本全部迁走或明确留用，这一段就可以删掉。
+ * **曾有第四个阶段（`.ps1` 语法校验）**，作为迁移期护栏存在（ADR 0012）。2026-10-21
+ * 仓库里最后两个 `.ps1` 退役后它失去了对象，按 `ADR 0014` §4 的约定删掉了——
+ * 「降到一个都不剩时，评估是否还值得付那 0.5 秒」，答案是连评估的对象都没了。
  *
  * `--clean` 在 %TEMP% 里 clone 一份干净副本再跑，消除 `.build/` / `node_modules/` /
  * `vendor/webview2/` 等本地残留掩盖问题的可能；未提交改动会被提示并排除在外。
@@ -81,7 +80,7 @@ import { isEntrypoint } from "./lib/entrypoint";
 
 export type RunResult = { code: number; out: string; err: string };
 
-export type Stage = "check" | "ps1" | "test" | "pack";
+export type Stage = "check" | "test" | "pack";
 
 export type StageResult = {
     stage: Stage;
@@ -123,7 +122,6 @@ export type GateDeps = {
 
 export const LABELS: Record<Stage, string> = {
     check: "bun check",
-    ps1: ".ps1 syntax",
     test: "bun test",
     pack: "pack verification",
 };
@@ -194,17 +192,6 @@ export function parsePackSummary(res: RunResult): string {
             .split(/\r?\n|\r/)
             .map((l) => l.trim())
             .filter((l) => l.startsWith("VERIFY-PACK") || l.startsWith("verify-pack:"))
-            .pop() ?? ""
-    );
-}
-
-/** 从 .ps1 语法检查的输出里取结论行 */
-export function parsePs1Summary(res: RunResult): string {
-    return (
-        `${res.out}`
-            .split(/\r?\n|\r/)
-            .map((l) => l.trim())
-            .filter((l) => l.startsWith("PS1 SYNTAX"))
             .pop() ?? ""
     );
 }
@@ -288,7 +275,7 @@ export function replayOutput(raw: RawOutput, io: GateIO): void {
  * 单独留下的价值很低，且原版就是这个语义，不在这里改。
  */
 export function planStages(opts: GateOptions): Stage[] {
-    const stages: Stage[] = ["check", "ps1"];
+    const stages: Stage[] = ["check"];
     if (!opts.skipTest) {
         stages.push("test");
         if (!opts.skipPack) {
@@ -435,67 +422,6 @@ async function runCheck(cwd: string): Promise<StageResult> {
     return { ...base, ok: true, detail: `${files} files` };
 }
 
-/**
- * 剩余 `.ps1` 的语法校验。
- *
- * 依赖 pwsh 存在：本仓剩余依赖 Win32 API 的 `.ps1`（`test-sign`、
- * `make-icon`、签名脚本等），它们不打算迁——用 `bun:ffi` 重写要另起一套 FFI 声明。
- * 但门禁不该因为缺一个可选的检查工具而整体失败——缺 pwsh 时判为跳过并说明。
- * 一旦这些脚本全部迁走，这一段就该删掉，而不是留着当永久负担。
- */
-async function runPs1Syntax(cwd: string): Promise<StageResult> {
-    const started = performance.now();
-    const pwsh = Bun.which("pwsh");
-    if (!pwsh) {
-        const ms = performance.now() - started;
-        return {
-            stage: "ps1",
-            ok: true,
-            rc: 0,
-            ms,
-            detail: "pwsh not found — skipped",
-            out: "",
-            err: "",
-        };
-    }
-
-    // 路径里的单引号在 PowerShell 单引号字符串里要成对转义
-    const rootLiteral = cwd.replace(/'/g, "''");
-    const script = `
-$ErrorActionPreference = 'Stop'
-$files = @(Get-ChildItem -LiteralPath '${rootLiteral}' -Filter *.ps1 -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '[\\\\/](node_modules|vendor)[\\\\/]' })
-$bad = @()
-foreach ($f in $files) {
-    $err = $null
-    [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$err)
-    foreach ($e in $err) {
-        $bad += ('{0}:{1}: {2}' -f $f.FullName, $e.Extent.StartLineNumber, $e.Message)
-    }
-}
-if ($files.Count -eq 0) { Write-Output 'PS1 SYNTAX OK (0 files)'; exit 0 }
-if ($bad.Count -gt 0) {
-    $bad | ForEach-Object { Write-Output $_ }
-    Write-Output ('PS1 SYNTAX FAILED ({0} errors in {1} files)' -f $bad.Count, $files.Count)
-    exit 1
-}
-Write-Output ('PS1 SYNTAX OK ({0} files)' -f $files.Count)
-`;
-
-    const res = await spawn([pwsh, "-NoProfile", "-NonInteractive", "-Command", script], cwd);
-    const ms = performance.now() - started;
-
-    return {
-        stage: "ps1",
-        ok: res.code === 0,
-        rc: res.code,
-        ms,
-        detail: parsePs1Summary(res),
-        out: res.out,
-        err: res.err,
-    };
-}
-
 async function runTest(cwd: string): Promise<StageResult> {
     const started = performance.now();
     const res = await spawn([BUN, "test"], cwd);
@@ -544,7 +470,6 @@ async function runPack(cwd: string): Promise<StageResult> {
 
 const REAL_RUNNER: StageRunner = {
     check: runCheck,
-    ps1: runPs1Syntax,
     test: runTest,
     pack: runPack,
 };
@@ -685,7 +610,7 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
                    干净副本没有它们，tests/agents-doc.test.ts 的整组断言会 skip，
                    连带 docs/pitfalls.md 的路径引用检查也不跑。每次运行都会提示。
   --keep-clone   与 --clean 同用，保留副本供排查
-  --skip-test    只跑类型检查与 .ps1 语法，跳过行为测试与消费方验收
+  --skip-test    只跑类型检查，跳过行为测试与消费方验收
   --skip-pack    跳过消费方验收（只在改门禁自身时用）
   --verbose      回放每个阶段的完整输出（默认只报结论，失败时才回放）
   -h, --help     显示本帮助`);

@@ -16,7 +16,6 @@ import {
     normalizeArg,
     parseGateArgs,
     parsePackSummary,
-    parsePs1Summary,
     parseTestCounts,
     parseTestFileCount,
     planStages,
@@ -231,17 +230,6 @@ describe("parsePackSummary", () => {
     });
 });
 
-describe("parsePs1Summary", () => {
-    test("取 PS1 SYNTAX 行", () => {
-        expect(
-            parsePs1Summary({ code: 0, out: "PS1 SYNTAX OK (18 files)", err: "" }),
-        ).toBe("PS1 SYNTAX OK (18 files)");
-        expect(
-            parsePs1Summary({ code: 1, out: "x.ps1:3: missing }\nPS1 SYNTAX FAILED (1 errors in 1 files)", err: "" }),
-        ).toBe("PS1 SYNTAX FAILED (1 errors in 1 files)");
-    });
-});
-
 // ---- 阶段编排 ---------------------------------------------------------------
 
 describe("planStages", () => {
@@ -253,20 +241,20 @@ describe("planStages", () => {
         verbose: false,
     };
 
-    test("默认四个阶段，顺序固定", () => {
-        expect(planStages(base)).toEqual(["check", "ps1", "test", "pack"]);
+    test("默认三个阶段，顺序固定", () => {
+        expect(planStages(base)).toEqual(["check", "test", "pack"]);
     });
 
     test("--skip-test 连带跳过 pack（行为层的两段一起走）", () => {
-        expect(planStages({ ...base, skipTest: true })).toEqual(["check", "ps1"]);
+        expect(planStages({ ...base, skipTest: true })).toEqual(["check"]);
     });
 
     test("--skip-pack 只砍掉最后一段", () => {
-        expect(planStages({ ...base, skipPack: true })).toEqual(["check", "ps1", "test"]);
+        expect(planStages({ ...base, skipPack: true })).toEqual(["check", "test"]);
     });
 
     test("--clean 不影响阶段组成（它改的是运行位置）", () => {
-        expect(planStages({ ...base, clean: true })).toEqual(["check", "ps1", "test", "pack"]);
+        expect(planStages({ ...base, clean: true })).toEqual(["check", "test", "pack"]);
     });
 });
 
@@ -361,7 +349,6 @@ function fakeDeps(
             hasPackageJson: async () => packageJsonExists,
             runner: {
                 check: make("check"),
-                ps1: make("ps1"),
                 test: make("test"),
                 pack: make("pack"),
             },
@@ -378,46 +365,40 @@ const ALL_ON: GateOptions = {
 };
 
 describe("runGate 的短路", () => {
-    test("全绿时四个阶段都跑到，返回 true", async () => {
+    test("全绿时三个阶段都跑到，返回 true", async () => {
         const { deps, calls } = fakeDeps({});
         expect(await runGate("/x", ALL_ON, deps)).toBe(true);
-        expect(calls).toEqual(["check", "ps1", "test", "pack"]);
+        expect(calls).toEqual(["check", "test", "pack"]);
     });
 
-    test("check 失败 → 后面三个阶段一个都不跑", async () => {
+    test("check 失败 → 后面两个阶段一个都不跑", async () => {
         const { deps, calls } = fakeDeps({ check: stageFail("check") });
         expect(await runGate("/x", ALL_ON, deps)).toBe(false);
         expect(calls).toEqual(["check"]);
     });
 
-    test(".ps1 语法失败 → 停在第二段", async () => {
-        const { deps, calls } = fakeDeps({ ps1: stageFail("ps1") });
-        expect(await runGate("/x", ALL_ON, deps)).toBe(false);
-        expect(calls).toEqual(["check", "ps1"]);
-    });
-
     test("test 失败 → pack 不跑", async () => {
         const { deps, calls } = fakeDeps({ test: stageFail("test") });
         expect(await runGate("/x", ALL_ON, deps)).toBe(false);
-        expect(calls).toEqual(["check", "ps1", "test"]);
+        expect(calls).toEqual(["check", "test"]);
     });
 
     test("pack 失败 → 返回 false", async () => {
         const { deps, calls } = fakeDeps({ pack: stageFail("pack") });
         expect(await runGate("/x", ALL_ON, deps)).toBe(false);
-        expect(calls).toEqual(["check", "ps1", "test", "pack"]);
+        expect(calls).toEqual(["check", "test", "pack"]);
     });
 
     test("--skip-pack 时 pack 根本不被调用", async () => {
         const { deps, calls } = fakeDeps({});
         expect(await runGate("/x", { ...ALL_ON, skipPack: true }, deps)).toBe(true);
-        expect(calls).toEqual(["check", "ps1", "test"]);
+        expect(calls).toEqual(["check", "test"]);
     });
 
     test("--skip-test 时 test 与 pack 都不被调用", async () => {
         const { deps, calls } = fakeDeps({});
         expect(await runGate("/x", { ...ALL_ON, skipTest: true }, deps)).toBe(true);
-        expect(calls).toEqual(["check", "ps1"]);
+        expect(calls).toEqual(["check"]);
     });
 
     test("不是包根目录时直接判失败，一个阶段都不跑", async () => {

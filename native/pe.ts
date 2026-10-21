@@ -133,7 +133,7 @@ export type CertificateDir = { offset: number; size: number };
  * 读 Certificate Table（安全目录）的条目。
  *
  * 注意 PE 规范里这一项的特殊之处：它的「RVA」字段实际存的是**文件偏移**，
- * 不是 RVA。`verify-sign-crypto.ps1` 里也记了这一点。
+ * 不是 RVA。`pitfalls` 3.18 记着这一点与其余四个验签陷阱。
  *
  * 返回 null 表示没有签名（或不是合法 PE）。
  */
