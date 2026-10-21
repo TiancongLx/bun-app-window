@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**The last two PowerShell scripts are deleted rather than migrated, and the gate's `.ps1` stage went with them. The public API is unchanged.**
+
+### Removed
+
+- **`scripts/test-sign.ps1` and `scripts/verify-sign-crypto.ps1` are gone — 195 lines that will not be replaced.** The standing decision (`ADR 0014`) was "these two stay PowerShell forever". Both premises failed in the same direction, so the third outcome applies: the capability itself is no longer wanted.
+
+    - `verify-sign-crypto` was ported far enough to prove the port feasible: five constant/structure traps were each resolved against a real sample (`pitfalls` 3.18 has all five, including `CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED` being `0x100` and `CMSG_VERIFY_SIGNER_NULL` being `4`). It stopped at the last step — `CryptMsgControl` wants the signer's certificate context, the message does not embed one, and reconstructing a `PCCERT_CONTEXT` from the store never resolved. That path buys exactly one thing: the three facts in `pitfalls` 4.7 (valid maths is not trust; a tampered file keeps a `VALID` PKCS#7; `HashMismatch` is the only reliable verdict) could be asserted in `bun test`. They are already written down, and re-pinning them changes no behaviour.
+    - `test-sign` needs `SignerSign` / `SignerSignEx2` from `mssign32.dll`, which Microsoft documents nowhere. A `bun:ffi` declaration is validated by writing it from the documentation against a minimal input — there is no documentation to write it from.
+    - Neither was in the release flow: `AGENTS.md` §7.4 records that no commercial code-signing certificate is connected yet. When one is, the tool is `signtool`, not a hand-rolled verifier.
+
+- **The gate's second stage (`.ps1` syntax check) is deleted.** It existed as a migration-period fence for scripts that had neither type checking nor tests. With zero `.ps1` left it scans nothing, and a stage that can only ever report green is dead weight. Stages are now `bun check` → `bun test` → consumer acceptance: 1.3 s versus 1.8 s for four, and **the gate no longer needs `pwsh`** — only `bun` and `git`.
+
+### Changed
+
+- `tests/gate.test.ts` shrank with the stage: `parsePs1Summary` and the `.ps1`-failure short-circuit assertions are gone, and `planStages` now asserts three stages (`552 pass` → `550 pass`).
+- `docs/pitfalls.md` 3.18 keeps all five traps and is re-headed as *retired* rather than *paused* — the values and consequences were measured, so the record outlives the script. 5.2 and 5.6 no longer describe a `.ps1` that might come back.
+- Two ghost instructions surfaced while deleting: `scripts/trust-cert.ts` told the user to run `scripts/test-sign.ts`, a path that never existed, and `native/build-pack.ts` told them to run `scripts/make-icon.ps1`, which was migrated to TypeScript long ago. Both now point at something that exists.
+
 ## [0.5.1] - 2026-10-21
 
 **0.5.0's drag-and-drop fix was wrong and made dropped files be refused outright. This release replaces it, and adds folder support. The public API is unchanged.**
