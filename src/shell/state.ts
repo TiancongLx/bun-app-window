@@ -50,6 +50,30 @@ const DEFAULTS = {
     pumpMs: 16,
 } as const;
 
+/**
+ * Win32 的「窗口已最小化」哨兵坐标。
+ *
+ * 窗口最小化时 `GetWindowRect` 返回的不是真实位置，而是一对哨兵值——实测
+ * `-32000,-32000` 加一个图标尺寸（典型 `314x50`）。它们**看起来完全合法**：
+ * 坐标是整数，尺寸也大于 0，所以只判「非有限 / 尺寸 ≤ 0」的形状校验拦不住。
+ *
+ * 成因在原生 `format_bounds`：它只在 `IsZoomed` 为真时走
+ * `WINDOWPLACEMENT.rcNormalPosition`，最小化时 `IsZoomed` 返回 false，于是落进
+ * `GetWindowRect` 分支——**`IsIconic` 从未被判断**。于是这对哨兵值会一路写成
+ * `{"x":-32000,"y":-32000,"width":314,"height":50}`，下次启动恢复成一个畸形小窗
+ * （实测：666×471，页面被挤到换行并出现滚动条）。
+ *
+ * 阈值取 -30000 而不是精确 -32000：不同 DPI / 主题下这对值会带几个像素偏移。
+ * 真实坐标到不了这个量级——8K 屏横向也只有 7680，多屏横排也远不到 30000，
+ * 所以用阈值不会误伤合法的负坐标（主屏在右、副屏在左时 x 确实是负数）。
+ */
+const MINIMIZED_SENTINEL = -30000;
+
+/** 是不是 Win32 的最小化哨兵坐标。任一维命中即判否——两维是同时写的 */
+function isMinimizedSentinel(x: number, y: number): boolean {
+    return x <= MINIMIZED_SENTINEL || y <= MINIMIZED_SENTINEL;
+}
+
 /** 把原生返回的一行文本解析成 WindowPlacement；格式不对返回 null。 */
 export function parseBounds(text: string): WindowPlacement | null {
     const parts = text.trim().split(",");
@@ -70,6 +94,10 @@ export function parseBounds(text: string): WindowPlacement | null {
     ];
     // 尺寸为 0 或负数说明窗口还没建好（原生在无窗口时返回 0 长度文本，这里再兜一层）
     if (width <= 0 || height <= 0 || dpi <= 0) {
+        return null;
+    }
+    // 最小化时原生给的是哨兵坐标，不是真实位置——宁可返回 null 让调用方保留上一次的值
+    if (isMinimizedSentinel(x, y)) {
         return null;
     }
     return { x, y, width, height, maximized: maximized !== 0, dpi };
@@ -106,6 +134,10 @@ export function parsePlacement(raw: unknown): WindowPlacement | null {
         return null;
     }
     if (Math.abs(x) > 200000 || Math.abs(y) > 200000) {
+        return null;
+    }
+    // 已写进磁盘的哨兵坐标同样不可用：旧版本写过这种文件，读的时候要判否而不是恢复它
+    if (isMinimizedSentinel(x, y)) {
         return null;
     }
     return { x, y, width, height, maximized: o.maximized === true, dpi };

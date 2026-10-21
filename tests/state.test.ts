@@ -123,6 +123,28 @@ test("parseBounds 拒绝残缺与非法输入", () => {
     expect(parseBounds("0,0,800,600,0,0")).toBeNull();
 });
 
+/**
+ * 最小化时 `GetWindowRect` 给的是 Win32 哨兵坐标，不是真实位置。
+ *
+ * 这对值形状完全合法（整数坐标、正尺寸），所以只有专门的判据能拦住它。
+ * 原生 `format_bounds` 只在 `IsZoomed` 为真时走 `WINDOWPLACEMENT`，最小化会
+ * 落进 `GetWindowRect` 分支——`IsIconic` 从未被判断，于是 `-32000,-32000 314x50`
+ * 会被原样写成 `{"x":-32000,...}`，下次启动恢复成一个畸形小窗。
+ *
+ * 实测现场：无边框窗口变成 666×471，页面被挤到换行并出现滚动条。
+ */
+test("parseBounds 拒绝最小化哨兵坐标", () => {
+    // 实测读到的原值
+    expect(parseBounds("-32000,-32000,314,50,0,192")).toBeNull();
+    // 带几个像素偏移的变体（不同 DPI / 主题下会出现）
+    expect(parseBounds("-31996,-31996,160,28,0,96")).toBeNull();
+    // 只有一维是哨兵也要拒——两维本来同时写，出现单边说明数据已经坏了
+    expect(parseBounds("-32000,100,800,600,0,96")).toBeNull();
+    // 但合法的负坐标必须继续通过：主屏在右、副屏在左时 x 真的是负数
+    expect(parseBounds("-1920,0,1600,900,1,96")?.x).toBe(-1920);
+    expect(parseBounds("-3840,120,1920,1080,0,96")?.x).toBe(-3840);
+});
+
 // ---- parsePlacement：磁盘 JSON → 结构 ----
 
 test("parsePlacement 接受合法对象", () => {
@@ -147,6 +169,20 @@ test("parsePlacement 把非 true 的 maximized 一律视为 false", () => {
     expect(parsePlacement({ ...base, maximized: "yes" })?.maximized).toBe(false);
     expect(parsePlacement({ ...base, maximized: 1 })?.maximized).toBe(false);
     expect(parsePlacement({ ...base, maximized: true })?.maximized).toBe(true);
+});
+
+/**
+ * 已写进磁盘的哨兵坐标同样要判否。
+ *
+ * 修好抓取端只解决「以后不再写坏值」，磁盘上那些旧文件还是会存在——不判否的话，
+ * 用户升级后第一次启动仍会恢复成畸形小窗，看起来像「根本没修」。
+ */
+test("parsePlacement 拒绝磁盘上的最小化哨兵坐标", () => {
+    expect(parsePlacement({ x: -32000, y: -32000, width: 314, height: 50, dpi: 192 })).toBeNull();
+    expect(parsePlacement({ x: -32000, y: 0, width: 800, height: 600, dpi: 96 })).toBeNull();
+    // 合法负坐标不受影响
+    const left = { x: -1920, y: 0, width: 1600, height: 900, dpi: 96 };
+    expect(parsePlacement(left)).toEqual({ ...left, maximized: false });
 });
 
 // ---- 读写盘 ----
@@ -243,6 +279,41 @@ test("attachPlacementStore 忽略解析不出意义的读数（窗口建好前�
     store.dispose();
     await store.flush();
     expect(await Bun.file(file).exists()).toBe(false);
+});
+
+/**
+ * 最小化读数到达时，必须保留上一次的**真实**位置。
+ *
+ * 这是那个 bug 的完整现场：拖好窗口 → 最小化 → 位置变化事件到达 →
+ * `window.json` 变成 `{"x":-32000,"width":314,"height":50}` → 下次启动一个畸形小窗。
+ *
+ * 判据取「文件里仍是旧值」而不是「文件没被写」：`flush()` 会重写一次，
+ * 要求「完全不写」会把实现细节焊死；要求「值没被污染」才是我们要的性质。
+ */
+test("attachPlacementStore 在最小化读数到达时保留上一次真实位置", async () => {
+    const file = join(tmpDir(), "minimized.json");
+    const text = { value: "300,400,900,700,0,96" };
+    const { pump, emit } = fakePump();
+
+    const store = attachPlacementStore(fakeShell(() => text.value), file, {
+        debounceMs: 10,
+        events: pump,
+    });
+    await store.flush();
+    expect((JSON.parse(readFileSync(file, "utf8")) as WindowPlacement).x).toBe(300);
+
+    // 窗口被最小化：原生 format_bounds 落进 GetWindowRect 分支，给出哨兵坐标
+    text.value = "-32000,-32000,314,50,0,96";
+    emit(stateEvent(2));
+    await Bun.sleep(40);
+    await store.flush();
+    store.dispose();
+
+    const saved = JSON.parse(readFileSync(file, "utf8")) as WindowPlacement;
+    expect(saved.x).toBe(300);
+    expect(saved.y).toBe(400);
+    expect(saved.width).toBe(900);
+    expect(saved.height).toBe(700);
 });
 
 /**

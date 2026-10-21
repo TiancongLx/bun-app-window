@@ -6,7 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-_(nothing yet)_
+### Fixed
+
+- **`getBounds()` returned the Win32 minimised sentinel rectangle, and `attachPlacementStore` wrote it straight to disk.** `format_bounds()` only took `WINDOWPLACEMENT.rcNormalPosition` when `IsZoomed()` was true. A minimised window is not zoomed, so it fell through to `GetWindowRect()` — which for a minimised window reports `-32000,-32000` plus an icon-sized box (measured: `314x50`). `IsIconic()` was never consulted.
+
+    Those values look entirely valid: integer coordinates, positive dimensions. The existing shape checks (finite numbers, size > 0) cannot distinguish them from a real rectangle. So `window.json` became `{"x":-32000,"y":-32000,"width":314,"height":50,"dpi":192}`, and the next launch restored a 314×50 window — observed on `baw-mvp` as a 666×471 window with the page wrapped and scrolling.
+
+    Fixed at two layers:
+
+    - **Native.** The condition is now "minimised **or** maximised" instead of "maximised", and `IsIconic()` is explicit. The `maximized` bit comes from `WPF_RESTORETOMAXIMIZED` while minimised, because `IsZoomed()` is always false there — without it, "maximise → minimise → close" silently dropped the maximised state.
+    - **`state.ts`.** `parseBounds()` and `parsePlacement()` reject any coordinate at or below `-30000`. The first stops new bad values being recorded; the second invalidates files already written by earlier versions, so upgrading repairs the existing bad state rather than only preventing new ones. The threshold is a range, not an exact `-32000`, because the sentinel carries a few pixels of offset depending on DPI and theme. It cannot collide with real coordinates: an 8K display is 7680 wide, and even a long multi-monitor row stays far below 30000.
+
+    Three tests added, and verified by removing the guard — exactly those three go red, including the `-31996` offset variant. The companion cases that must keep passing are pinned too: a legitimate negative `x` (secondary monitor to the left) still parses.
+
+    Verified on a real window with a one-off FFI probe against `dist/libshell.dll` (bypassing every TS wrapper):
+
+    ```text
+    normal              → 147,147,1826,1271,0,192
+    minimised           → 147,147,1826,1271,0,192   ← no sentinel, restore rect
+    maximised           → 147,147,1826,1271,1,192
+    maximised → minimise → 147,147,1826,1271,1,192   ← maxed bit preserved
+    ```
 
 ## [0.6.0] - 2026-10-21
 
