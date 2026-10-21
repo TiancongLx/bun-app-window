@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-22
+
 ### Added
 
 - **The caption buttons now draw Win 11's actual glyphs at Win 11's actual size, and the component has all five states instead of two.** The previous defaults were two independent misses that compounded.
@@ -628,7 +630,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.1...v0.5.0
