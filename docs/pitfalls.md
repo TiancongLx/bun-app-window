@@ -1051,7 +1051,29 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
 
 - **症状**：GUI 应用启动时背后跟一个黑色控制台窗口。
 - **修法**：`bun build --compile --windows-hide-console`，之后 `llvm-objdump -p` 应显示 `Subsystem 00000002 (Windows GUI)`。
-- **代价（容易漏）**：改成 GUI 子系统后，**同进程的 CLI 输出也一起失效**。实测：从 `cmd` 启动时继承的 stdout 句柄 `GetFileType` 仍是 2（控制台），但 `console.log` / `process.stdout.write` 既不抛错也不落地，事后 `OpenFileMapping`/`SetStdHandle` 也改不回来。双入口程序需要自己桥接——`AttachConsole(ATTACH_PARENT_PROCESS)`（无父控制台时 `AllocConsole()`）+ `WriteConsoleW(CONOUT$)`；重定向到文件或管道时不要接管，Bun 的流本来就好用。
+- **代价（容易漏）**：改成 GUI 子系统后，**无重定向的 CLI 输出会一起失效**。实测：从 `cmd` 启动时继承的 stdout 句柄 `GetFileType` 仍是 2（控制台），但 `console.log` / `process.stdout.write` 既不抛错也不落地，事后 `OpenFileMapping`/`SetStdHandle` 也改不回来。双入口程序需要自己桥接——`AttachConsole(ATTACH_PARENT_PROCESS)`（无父控制台时 `AllocConsole()`）+ `WriteConsoleW(CONOUT$)`。
+
+    **但这条有个容易读漏的边界：失效的前提不是「GUI 子系统」，而是「既无控制台、又无重定向句柄」。** 只要父进程提供一个有效句柄，GUI 产物的 stdout 就完全正常：
+
+    ```powershell
+    Start-Process -FilePath app.exe -PassThru -RedirectStandardOutput out.txt
+    ```
+
+    2026-10-21 实测（`dist/bun-app-window.exe` 单独放在空目录里）：重定向后拿到完整逐行输出，与开发态一致——
+
+    ```text
+    [serve] http://127.0.0.1:48066/?t=86853651-…
+    [lib] source=embedded path=…\BunAppWindow\runtime\libshell-778ba4d326bf4f10.dll
+    [debug] awareness=-1 dpi=192 scale=200%
+    [ws] open
+    [metrics] initial: pos=536,232 win=2000x1360 client=2000x1360 work=3072x1824 border=13x13 round=1
+    === exit 0 events=[…] ===
+    ```
+
+    `exit 0 events=[…]` 那一行是自检程序自己汇总的，这样连 `host.log` 都不必去翻。**所以「GUI 子系统」不等于「一定没有输出」**，写判据或写验收步骤时别把它当同义词——重定向是把 stdout 收进证据的正当手段，不需要 `AttachConsole` 那套桥接。
+
+    「重定向到文件或管道时不要接管，Bun 的流本来就好用」这句仍然成立：桥接代码只在**无句柄**的场景下才需要，两者不要混用。
+
 - **证据**：`实测`。用 `ReadConsoleOutputCharacterW` 回读控制台缓冲区判定，别用截图（GUI 子系统进程的控制台画面抓不到）。
 
 ### 4.6 `type: "file"` 的路径必须严格正确
@@ -1516,7 +1538,7 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
 | 还原 | 回到 `pos=536,232 win=client=2000×1360` |
 | 边缘命中 | 九点分别为 13/12/14/10/1/11/16/15/17 |
 | `FLAG_CENTER`（请求 900×820，带边框） | `pos=623,56 win=1826×1711`，四边留白 623/623/56/57 |
-| 单文件 exe 体积 | 约 92.7 MiB（97,165,824 B，含内嵌 DLL；0.5.0 实测，0.5.1 未重建 host.exe） |
+| 单文件 exe 体积 | 约 92.7 MiB（97,176,576 B，含内嵌 DLL；0.6.0 实测） |
 | DLL 体积 | 约 993 KB（1,016,832 B，含外部导航守卫、窗口事件环与拖放处理器） |
 | 内嵌释放 | `%LOCALAPPDATA%\BunAppWindow\runtime\libshell-<sha 前 16 位>.dll`，二次运行复用（mtime 不变） |
 | 签名开销 | 约 7.2 KB |
