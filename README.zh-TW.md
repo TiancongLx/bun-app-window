@@ -592,7 +592,7 @@ bun run demo       # 啟動互動式自我檢測範例程式（需於桌面工�
 ## 致謝
 
 - 底層跨平台視窗抽象源自 [webview/webview](https://github.com/webview/webview) `0.12.0`（MIT 授權，作者 Serge Zaitsev · Steffen André Langnes）。儲存庫內 `vendor/webview/` 目錄為其原始碼原樣拷貝，未作任何侵入式修改。
-- WebView2 C/C++ SDK 源自 [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) `1.0.1150.38`（NuGet 套件隨儲存庫發佈以支援離線建構），執行環境由作業系統提供。
+- WebView2 C/C++ SDK 源自 [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) `1.0.4258.31`（NuGet 套件隨儲存庫發佈以支援離線建構），執行環境由作業系統提供。
 - Co-authored-by DeepSeek
 
 ## 授權條款

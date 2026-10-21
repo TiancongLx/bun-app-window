@@ -44,8 +44,8 @@ import { isEntrypoint } from "../scripts/lib/entrypoint";
 
 // ---- 常量 -------------------------------------------------------------------
 
-const PKG_NAME = "Microsoft.Web.WebView2.1.0.1150.38.nupkg";
-const PKG_VERSION = "1.0.1150.38";
+const PKG_NAME = "Microsoft.Web.WebView2.1.0.4258.31.nupkg";
+const PKG_VERSION = "1.0.4258.31";
 const PKG_URL = `https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/${PKG_VERSION}`;
 const WEBVIEW_REPO = "https://github.com/webview/webview.git";
 

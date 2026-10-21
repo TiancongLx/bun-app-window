@@ -41,6 +41,45 @@ test("拖放需要在提权场景下放行 UIPI", () => {
     expect(SHELL_CC).toContain("WM_DROPFILES, MSGFLT_ALLOW");
 });
 
+/**
+ * 光放行 UIPI 还不够：**drop 会被 WebView2 抢走**。
+ *
+ * `DragAcceptFiles` 只给顶层窗口加 `WS_EX_ACCEPTFILES`，而 OLE 拖放的命中测试走
+ * 光标下最深那层窗口。WebView2 在 `Chrome_RenderWidgetHostHWND` 上注册了自己的
+ * `IDropTarget`，drop 于是被它接走转成 DOM 事件——页面拿到只有 name/size 的
+ * `DataTransfer`，壳层承诺的 `shell-msg{t:"drop",paths:[...]}` 一次都不来。
+ *
+ * 修法只能是 `ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)`：把那条内部
+ * target 让开，OLE 链继续往父窗口找，落到 `DragAcceptFiles` 的窗口上。
+ * **不许自己写 `IDropTarget`**——那会与 WebView2 内部行为打架，而层级关系随时
+ * 可能被上游调整（本次就是这么踩到的）。
+ *
+ * 静态断言抓不到「拖放真的通了」（那是 `scripts/probe-drop.ts` + 真人验收的事），
+ * 但能抓「有人把这行删了」和「有人换回了手写 IDropTarget」。
+ */
+test("拖放要让开 WebView2 自己的 IDropTarget，且走上游接口", () => {
+    // 上游接口，不是手写实现
+    expect(SHELL_CODE).toContain("put_AllowExternalDrop(FALSE)");
+    expect(SHELL_CODE).toContain("IID_ICoreWebView2Controller4");
+    // MinGW 无 IID 符号库：必须走 IID_* 常量 + QueryInterface（pitfalls 3.2）
+    expect(SHELL_CODE).not.toContain("__uuidof");
+
+    // 必须在 enable_drop 里被调到——否则开关打开也白搭
+    const enableAt = SHELL_CODE.indexOf("void enable_drop(HWND hwnd)");
+    expect(enableAt).toBeGreaterThan(0);
+    const enableEnd = SHELL_CODE.indexOf("\n}", enableAt);
+    const enableBody = SHELL_CODE.slice(enableAt, enableEnd);
+    expect(enableBody).toContain("disable_webview_external_drop()");
+
+    // 老运行时（Runtime < 100）没有 Controller4：QueryInterface 失败时必须静默返回，
+    // 不能因为一个可选能力缺失就让整个窗口起不来
+    const fnAt = SHELL_CODE.indexOf("void disable_webview_external_drop()");
+    expect(fnAt).toBeGreaterThan(0);
+    const fnBody = SHELL_CODE.slice(fnAt, fnAt + 700);
+    expect(fnBody).toContain("FAILED(");
+    expect(fnBody).toMatch(/return;/);
+});
+
 test("键盘处理挂在两个窗口过程的共用前置，不各写一份", () => {
     // 两份会漂移：无边框模式能用、带边框模式不能用（或反之）
     const calls = SHELL_CC.split("handle_input_message(hwnd, msg, wp, lp, &handled)").length - 1;
@@ -48,6 +87,66 @@ test("键盘处理挂在两个窗口过程的共用前置，不各写一份", ()
     expect(SHELL_CC).toContain("case VK_F11:");
     expect(SHELL_CC).toContain("case VK_F12:");
     expect(SHELL_CC).toContain("MK_CONTROL");
+});
+
+/**
+ * 真实按键必须走 WebView2 的 AcceleratorKeyPressed。
+ *
+ * `WM_KEYDOWN` 只投递给**焦点窗口**，而焦点在 WebView2 的渲染子窗口上——它不把
+ * 未处理的按键转发给父窗口。于是挂在两个 WndProc 上的处理对真实按键永远不触发，
+ * 而 `PostMessage(WM_KEYDOWN)` 又能正常全屏：判定逻辑完全正确，断的是消息路由。
+ *
+ * 只断言「调用点 === 2」抓不到这个 bug，因为那两条调用点一直都在、也都能被
+ * PostMessage 走到。这条断言守的是「订阅点存在且在消息循环之前」。
+ */
+test("快捷键订阅走 AcceleratorKeyPressed，且订阅点早于消息循环", () => {
+    // 上游接口真的被用上了（vendor SDK 1.0.4258.31 里就有，不需要升级）
+    expect(SHELL_CC).toContain("add_AcceleratorKeyPressed");
+    expect(SHELL_CC).toContain("COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN");
+    expect(SHELL_CC).toContain("COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN");
+    // 处理过的必须吃掉，否则页面同时也会收到这个按键
+    expect(SHELL_CC).toContain("put_Handled(TRUE)");
+
+    // 订阅点必须在 webview_run **之前**：消息循环一起来，键盘就已经可能落在页面上
+    const installAt = SHELL_CODE.indexOf("install_accelerator_handler();");
+    const runAt = SHELL_CODE.indexOf("webview_run(g_webview)");
+    expect(installAt).toBeGreaterThan(0);
+    expect(runAt).toBeGreaterThan(0);
+    expect(installAt).toBeLessThan(runAt);
+
+    // 反注册必须在 destroy 之前：destroy 之后拿不到 controller
+    const uninstallAt = SHELL_CODE.indexOf("uninstall_accelerator_handler();");
+    const destroyAt = SHELL_CODE.indexOf("webview_destroy(g_webview)");
+    expect(uninstallAt).toBeGreaterThan(0);
+    expect(uninstallAt).toBeLessThan(destroyAt);
+
+    // 判定只有一处：定义 1 次 + 两个调用点（accelerator 回调 / WM_KEYDOWN 残余）
+    const calls = SHELL_CODE.split("handle_accelerator_key(").length - 1;
+    expect(calls).toBe(3);
+});
+
+/**
+ * 首次显示的宿主事件：**兜底**，不是唯一来源。
+ *
+ * 2026-10-21 对照实验（摘掉 `show_now()` 末尾的 `emit_state_event()` 重编译后跑
+ * `scripts/probe-window-events.ts`）：21 条检查**全部仍然通过**，带边框与无边框
+ * 都还是有「启动后收到 STATE 事件」。也就是说首帧事件本来就有别的来源——
+ * 带边框模式的 `WM_SIZE` / `WM_ACTIVATE` 经 `toplevel_proc` 已经入队。
+ *
+ * 所以这条断言守的只是「兜底那一次调用还在」，**不要**把它当成
+ * 「启动后没有事件」这个 bug 的判据；那个判据是探针里的行为断言。
+ * 同时这也说明：判断某行代码是不是根因，必须做单变量对照，不能看到绿就归因。
+ */
+test("首次显示路径仍保留一条宿主 STATE 兜底", () => {
+    const showAt = SHELL_CODE.indexOf("void show_now()");
+    expect(showAt).toBeGreaterThan(0);
+    const showEnd = SHELL_CODE.indexOf("\n}", showAt);
+    expect(showEnd).toBeGreaterThan(showAt);
+    const body = SHELL_CODE.slice(showAt, showEnd);
+
+    // 推给页面的是 shell-msg，推给宿主的是事件环，两条通道不能互相顶替
+    expect(body).toContain("push_state(");
+    expect(body).toContain("emit_state_event()");
 });
 
 test("缩放走 COM，且钳制在阶梯范围内", () => {

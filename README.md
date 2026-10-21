@@ -614,7 +614,7 @@ For window enumeration (`EnumWindows`) or automated screenshot scripts, filter b
 ## Acknowledgments
 
 - Platform windowing layer based on [webview/webview](https://github.com/webview/webview) `0.12.0` (MIT License, Serge Zaitsev & Steffen André Langnes). `vendor/webview/` contains an unmodified upstream copy.
-- WebView2 SDK provided by [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) `1.0.1150.38` (NuGet package vendored for offline builds). The WebView2 Runtime is provided by the OS.
+- WebView2 SDK provided by [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) `1.0.4258.31` (NuGet package vendored for offline builds). The WebView2 Runtime is provided by the OS.
 - Co-authored-by DeepSeek
 
 ## License

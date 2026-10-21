@@ -591,7 +591,7 @@ bun run demo       # 启动交互式自检示例程序（需在桌面会话下�
 ## 致谢
 
 - 底层跨平台窗口抽象源自 [webview/webview](https://github.com/webview/webview) `0.12.0`（MIT 许可，作者 Serge Zaitsev · Steffen André Langnes）。仓库内 `vendor/webview/` 目录为其源码原样拷贝，未作任何侵入式修改。
-- WebView2 C/C++ SDK 源自 [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) `1.0.1150.38`（NuGet 包随仓库分发以支持离线构建），运行时由操作系统提供。
+- WebView2 C/C++ SDK 源自 [Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2) `1.0.4258.31`（NuGet 包随仓库分发以支持离线构建），运行时由操作系统提供。
 - Co-authored-by DeepSeek
 
 ## 开源许可

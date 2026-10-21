@@ -326,7 +326,24 @@ export async function createApp(opts: AppOptions): Promise<App> {
             // 等 `EVENT_CLOSED` 而不是轮询 `isAlive()`：CLOSED 由原生侧在 teardown
             // 全部做完、g_webview 已置空之后写进队列，它出现的时刻就等于「单例已释放」。
             // 超时上限保留，且超时后也 resolve 一次——否则 `wait()` 会永远挂着。
-            await Promise.race([closed.promise, Bun.sleep(CLOSE_TIMEOUT_MS)]);
+            //
+            // 定时器必须可取消：`Promise.race` 只取先兑现的，**不取消输掉的那个**。
+            // 早先这里写的是 `Bun.sleep(CLOSE_TIMEOUT_MS)`，正常关窗路径下它就变成一个
+            // 没人等的、未 unref 的 5 秒定时器，把 Bun 的事件循环撑满——实测
+            // `race returned @ 9ms` 之后进程到 5010 ms 才退出，真实关窗 5043 ms。
+            // 不用 `Bun.sleep` + `AbortSignal`：Bun 当前版本不支持。
+            let cancelTimeout: () => void = () => {};
+            const timeout = new Promise<void>((resolve) => {
+                const timer = setTimeout(resolve, CLOSE_TIMEOUT_MS);
+                cancelTimeout = () => clearTimeout(timer);
+            });
+            try {
+                await Promise.race([closed.promise, timeout]);
+            } finally {
+                // 判据要落在「进程何时退出」，不是「stop() 何时返回」：
+                // 摘掉这一行时 stop() 仍然 42 ms 就返回了，但进程要 5.9 s 才退。
+                cancelTimeout();
+            }
             closed.resolve();
             events.stop();
             server.stop(true);

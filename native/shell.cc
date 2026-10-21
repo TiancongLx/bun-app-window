@@ -143,6 +143,10 @@ ICoreWebView2NavigationStartingEventHandler *g_nav_guard = nullptr;
 EventRegistrationToken g_nav_token{};
 ICoreWebView2NewWindowRequestedEventHandler *g_new_window_guard = nullptr;
 EventRegistrationToken g_new_window_token{};
+// 键盘快捷键的事件处理器与注册令牌。与 nav guard 同一套持有方式：
+// add_ 之后我们持一份引用，teardown 时 remove_ + Release。
+ICoreWebView2AcceleratorKeyPressedEventHandler *g_accel_handler = nullptr;
+EventRegistrationToken g_accel_token{};
 
 // 错误槽。跨线程写：启动期由 UI 线程写（CoInitializeEx / webview_create 失败等），
 // 运行期任何线程都可能写。放在 mutex 后面，避免两条错误互相覆盖成半截字符串。
@@ -802,6 +806,13 @@ void show_now() {
   // BypassThrottle 的语义正好：万一上面那次被 16 ms 节流吃掉了，
   // 这一发会补上；若已经推过，变化检测会拦住。
   push_state(PushMode::BypassThrottle);
+  // 兜底再发一条**宿主**事件。上面那发推的是页面（shell-msg），事件环是另一条通道。
+  //
+  // 注意这不是首帧事件的**唯一**来源：带边框模式的 `WM_SIZE` / `WM_ACTIVATE` 经
+  // `toplevel_proc` 已经会入队（`probe-window-events.ts` 摘掉本行仍然通过）。
+  // 留着是为了覆盖「显示时既没有 WM_SIZE 也没有 WM_ACTIVATE」的窄窗口——事件侧有
+  // `g_ev_last` 变化检测，重复调用会被吃掉，成本为零。
+  emit_state_event();
 }
 
 // 兜住「第一次 ShowWindow 被 STARTUPINFO 覆盖」这一情形。
@@ -1333,6 +1344,47 @@ void append_json_string(std::string &out, const std::wstring &w) {
   out.push_back('"');
 }
 
+// 关掉 WebView2 自己注册的 `IDropTarget`，让拖放落回 `WM_DROPFILES`。
+//
+// 为什么非这一步不可：`DragAcceptFiles` 只给**顶层**窗口加 `WS_EX_ACCEPTFILES`。
+// 而 OLE 拖放的命中测试走光标下**最深**那层窗口：
+//
+//     webview_widget → Chrome_WidgetWin_1 → Chrome_RenderWidgetHostHWND
+//     → Intermediate D3D Window    （实测全部 ACCEPTFILES=False）
+//
+// WebView2 在渲染子窗口上注册了自己的 `IDropTarget`，drop 于是被它接走、转成
+// DOM 事件——顶层的默认 drop target 永远等不到。表现就是「页面能收到只有
+// name/size 的 DOM drop，而壳层承诺的 shell-msg{paths:[...]} 一次都不来」。
+//
+// `AllowExternalDrop(FALSE)` 关掉的就是那个内部 target。关掉之后 OLE 拖放链
+// 继续往父窗口找，落到 `DragAcceptFiles` 的那个窗口上，`WM_DROPFILES` 生效，
+// `handle_drop()` 里的 `DragQueryFileW` 就能取到完整路径。
+//
+// 上游接口，不自己写 `IDropTarget`：手写一套会与 WebView2 内部行为打架，而
+// 命中测试的层级关系随时可能被上游调整（那正是本次踩到的机理）。
+//
+// `ICoreWebView2Controller4` 要 Runtime 100+（SDK 1.0.1185.39 起）。老运行时上
+// QueryInterface 会失败，此时保持 WebView2 默认行为（DOM drop 仍可用，只是拿不到
+// 完整路径），**不阻断启动**——与 `apply_browser_ui` 逐项判 SUCCEEDED 同一取向。
+void disable_webview_external_drop() {
+  if (!g_webview) {
+    return;
+  }
+  auto *ctrl = static_cast<ICoreWebView2Controller *>(
+      webview_get_native_handle(g_webview, WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER));
+  if (!ctrl) {
+    return;
+  }
+  ICoreWebView2Controller4 *ctrl4 = nullptr;
+  if (FAILED(ctrl->QueryInterface(IID_ICoreWebView2Controller4,
+                                  reinterpret_cast<void **>(&ctrl4))) ||
+      !ctrl4) {
+    return;
+  }
+  ctrl4->put_AllowExternalDrop(FALSE);
+  ctrl4->Release();
+}
+
 // 拖放：把落进来的路径推给页面。
 //
 // 注意提权场景：本进程若是 High 完整性，资源管理器（Medium）
@@ -1347,6 +1399,9 @@ void enable_drop(HWND hwnd) {
   ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
   // 0x0049 = WM_COPYGLOBALDATA，Win7 起改名后未再公开常量
   ChangeWindowMessageFilterEx(hwnd, 0x0049, MSGFLT_ALLOW, nullptr);
+  // 上面三条只是「允许消息进来」。能不能**收到**还取决于 WebView2 有没有把
+  // drop 抢走——那一步在这里让开。
+  disable_webview_external_drop();
 }
 
 void handle_drop(HDROP hd) {
@@ -1377,58 +1432,171 @@ void handle_drop(HDROP hd) {
   }
 }
 
+// ---- 键盘快捷键：订阅 WebView2 的 AcceleratorKeyPressed ----
+//
+// 为什么不能只靠 WM_KEYDOWN：WM_KEYDOWN 只投递给**焦点窗口**，而焦点在 WebView2
+// 的渲染子窗口（`Chrome_RenderWidgetHostHWND`）上。它不把未处理的按键转发给父窗口，
+// 于是挂在 shell_wnd_proc / toplevel_proc 上的键盘处理对真实按键永远不触发。
+// 实测：直接 PostMessage(hwnd, WM_KEYDOWN, VK_F11) 能正常全屏、再发一次能还原，
+// 真实按 F11 毫无反应——判定逻辑完全正确，断的是消息路由。
+// WM_MOUSEWHEEL 之所以没事，是因为它会被焦点窗口的 DefWindowProc 转给父窗口。
+//
+// 上游早有现成接口：ICoreWebView2Controller::add_AcceleratorKeyPressed。它在按键
+// 送进页面**之前**回调，不依赖焦点窗口的消息链。本仓 vendor 的 SDK 1.0.4258.31
+// 里早有（`WebView2.h` 里 `add_AcceleratorKeyPressed` 与两个 IID 都是 selectany）。
+
+// 快捷键语义的**唯一**判定处。
+//
+// AcceleratorKeyPressed 与 WM_KEYDOWN 两条路共用它。分两份写必然漂移：
+// 改一处忘一处，然后就变成「只有某种窗口模式命中」。
+bool handle_accelerator_key(UINT vkey, bool ctrl) {
+  switch (vkey) {
+  case VK_F11:
+    toggle_fullscreen();
+    return true;
+  case VK_F12:
+    open_dev_tools();
+    return true;
+  case VK_F5:
+    reload_page();
+    return true;
+  case 'R':
+    if (ctrl) {
+      reload_page();
+      return true;
+    }
+    break;
+  case VK_OEM_PLUS:  // 主键盘 =/+（Shift 不改变虚拟键码）
+  case VK_ADD:       // 小键盘 +
+    if (ctrl) {
+      zoom_step(+1);
+      return true;
+    }
+    break;
+  case VK_OEM_MINUS:
+  case VK_SUBTRACT:
+    if (ctrl) {
+      zoom_step(-1);
+      return true;
+    }
+    break;
+  case '0':
+  case VK_NUMPAD0:
+    if (ctrl) {
+      apply_zoom(1.0);
+      return true;
+    }
+    break;
+  default:
+    break;
+  }
+  return false;
+}
+
+// 事件处理器。只认按下：KEY_UP 再来一遍会让 F11 的全屏 toggle 走两次，
+// 表现恰好是「按了没反应」——一个很容易被当成「没装上」的假象。
+class AcceleratorKeyHandler final : public ICoreWebView2AcceleratorKeyPressedEventHandler {
+ public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
+    if (!out) {
+      return E_POINTER;
+    }
+    if (IsEqualIID(riid, IID_IUnknown) ||
+        IsEqualIID(riid, IID_ICoreWebView2AcceleratorKeyPressedEventHandler)) {
+      *out = static_cast<ICoreWebView2AcceleratorKeyPressedEventHandler *>(this);
+      AddRef();
+      return S_OK;
+    }
+    *out = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++m_refs; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG left = --m_refs;
+    if (left == 0) {
+      delete this;
+    }
+    return left;
+  }
+
+  HRESULT STDMETHODCALLTYPE Invoke(
+      ICoreWebView2Controller * /*sender*/,
+      ICoreWebView2AcceleratorKeyPressedEventArgs *args) override {
+    if (!args) {
+      return S_OK;
+    }
+    COREWEBVIEW2_KEY_EVENT_KIND kind{};
+    if (FAILED(args->get_KeyEventKind(&kind))) {
+      return S_OK;
+    }
+    if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN &&
+        kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) {
+      return S_OK;
+    }
+    UINT vkey = 0;
+    if (FAILED(args->get_VirtualKey(&vkey))) {
+      return S_OK;
+    }
+    // 事件参数里没有 Ctrl 位，只有 PhysicalKeyStatus；修饰键状态从 GetKeyState 读，
+    // 在 accelerator 回调里它仍然反映真实的按键状态。
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (handle_accelerator_key(vkey, ctrl)) {
+      // 处理过的要吃掉，否则页面同时也会收到这个按键
+      args->put_Handled(TRUE);
+    }
+    return S_OK;
+  }
+
+ private:
+  std::atomic<ULONG> m_refs{1};
+};
+
+// 必须在 webview_run **之前**订阅：消息循环一旦起来，键盘就已经可能落在页面上。
+void install_accelerator_handler() {
+  if (g_accel_handler || !g_webview) {
+    return;
+  }
+  auto *ctrl = static_cast<ICoreWebView2Controller *>(
+      webview_get_native_handle(g_webview, WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER));
+  if (!ctrl) {
+    return;
+  }
+  auto *handler = new AcceleratorKeyHandler();
+  if (SUCCEEDED(ctrl->add_AcceleratorKeyPressed(handler, &g_accel_token))) {
+    g_accel_handler = handler;  // 我们持一份引用，teardown 时 remove + Release
+  } else {
+    handler->Release();
+  }
+}
+
+// 反注册。必须在 webview_destroy **之前**：destroy 之后拿不到 controller。
+void uninstall_accelerator_handler() {
+  if (!g_accel_handler) {
+    return;
+  }
+  auto *ctrl = g_webview ? static_cast<ICoreWebView2Controller *>(
+                               webview_get_native_handle(
+                                   g_webview, WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER))
+                         : nullptr;
+  if (ctrl) {
+    ctrl->remove_AcceleratorKeyPressed(g_accel_token);
+  }
+  g_accel_handler->Release();
+  g_accel_handler = nullptr;
+  g_accel_token = EventRegistrationToken{};
+}
+
 // 键盘 / 滚轮 / 拖放的共用前置处理。两种窗口模式都要，抽出来避免两份漂移。
 // 返回 true 表示已处理并回填 *out。
 bool handle_input_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT *out) {
   switch (msg) {
   case WM_KEYDOWN: {
     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    switch (wp) {
-    case VK_F11:
-      toggle_fullscreen();
+    // 判定与 AcceleratorKeyPressed 共用同一份实现（handle_accelerator_key）：
+    // 真实按键走那条路，这条只覆盖「焦点确实落在自有窗口上」的残余场景。
+    if (handle_accelerator_key(static_cast<UINT>(wp), ctrl)) {
       *out = 0;
       return true;
-    case VK_F12:
-      open_dev_tools();
-      *out = 0;
-      return true;
-    case VK_F5:
-      reload_page();
-      *out = 0;
-      return true;
-    case 'R':
-      if (ctrl) {
-        reload_page();
-        *out = 0;
-        return true;
-      }
-      break;
-    case VK_OEM_PLUS:   // 主键盘 =/+（Shift 不改变虚拟键码）
-    case VK_ADD:        // 小键盘 +
-      if (ctrl) {
-        zoom_step(+1);
-        *out = 0;
-        return true;
-      }
-      break;
-    case VK_OEM_MINUS:
-    case VK_SUBTRACT:
-      if (ctrl) {
-        zoom_step(-1);
-        *out = 0;
-        return true;
-      }
-      break;
-    case '0':
-    case VK_NUMPAD0:
-      if (ctrl) {
-        apply_zoom(1.0);
-        *out = 0;
-        return true;
-      }
-      break;
-    default:
-      break;
     }
     break;
   }
@@ -2165,6 +2333,9 @@ DWORD WINAPI ui_thread(LPVOID param) {
   // 必须在 navigate **之前**安装：`NavigationStarting` 只对注册之后发起的导航生效，
   // 晚一步的话首次加载（也就是最可能被一个 `file://` 入口带偏的那一次）完全不受保护。
   install_nav_guard();
+  // 键盘快捷键的订阅点。必须早于 webview_run（消息循环）——真实按键不走
+  // 顶层窗口的 WM_KEYDOWN，只走 WebView2 的 AcceleratorKeyPressed。
+  install_accelerator_handler();
   if (webview_navigate(g_webview, g_url.c_str()) != WEBVIEW_ERROR_OK) {
     set_err("webview_navigate failed");
   }
@@ -2194,6 +2365,7 @@ DWORD WINAPI ui_thread(LPVOID param) {
     std::lock_guard<std::mutex> life(g_life_mu);
     // 反注册必须在 destroy **之前**：destroy 之后 core_webview() 返回 nullptr，
     // remove_ 就无从谈起，守卫对象会一直挂在已死的 core 上（释放时崩）。
+    uninstall_accelerator_handler();
     uninstall_nav_guard();
     webview_destroy(g_webview);
     g_webview = nullptr;

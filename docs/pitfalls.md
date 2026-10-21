@@ -362,6 +362,60 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 - **证据**：`实测`。双向验证：基线 PASS → 注释掉 `install_nav_guard();` → FAIL
   且 `after-external` 缺失 → 还原 → PASS 且 `bun test` 全绿。
 
+### 2.13 快捷键「声明了但路由不到」：`WM_KEYDOWN` 只投给焦点窗口
+
+- **症状**：`F11` / `F12` / `F5` / `Ctrl+R` / `Ctrl+0` / `Ctrl+±` 全部无反应，
+  而 `Ctrl+滚轮` 缩放正常。
+- **假象**：直接 `PostMessage(hwnd, WM_KEYDOWN, VK_F11, 0)` 能正常进出全屏。
+  于是很容易判断成「逻辑没问题」，转头去查别的地方——**而这个实验本身已经
+  把要查的东西绕过去了**：`PostMessage` 直接投给你指定的窗口，真实按键不是。
+- **真机理**：`WM_KEYDOWN` 只投递给**焦点窗口**。焦点在 WebView2 的渲染子窗口
+  （`Chrome_RenderWidgetHostHWND` / `Chrome_WidgetWin_0`）上，它不把未处理的
+  按键转发给父窗口。所以挂在 `shell_wnd_proc` / `toplevel_proc` 上的
+  `handle_input_message` 对真实按键永远不触发。`WM_MOUSEWHEEL` 之所以没事，
+  是因为它**会**被焦点窗口的 `DefWindowProc` 转给父窗口。
+- **修法**：订阅 `ICoreWebView2Controller::add_AcceleratorKeyPressed`。它在按键
+  送进页面之前回调，不依赖焦点窗口的消息链。把判定抽成
+  `handle_accelerator_key(vkey, ctrl)` 单一实现，`WM_KEYDOWN` 与回调共用
+  （两份必然漂移），只处理 `KEY_DOWN` / `SYSTEM_KEY_DOWN`（`KEY_UP` 再来一遍会
+  让 toggle 走两次，表现得像「没装上」），处理过的 `put_Handled(TRUE)`。
+- **判据写法的陷阱**：`SetFocus` 必须落在**渲染子窗口**上，不能落在顶层窗口。
+  第一次写探针时 `SetFocus(hwnd)` 给了顶层，`WM_KEYDOWN` 于是直接命中旧路径,
+  摘掉订阅仍然「全屏成功」——测的根本不是新代码。真实用户是「点一下页面」，
+  焦点在子窗口上。见 `scripts/probe-accelerator-keys.ts` 的 `focusPage()`。
+- **证据**：`实测`。焦点在 `Chrome_WidgetWin_0` 时双向验证：
+  有订阅 1826px → 3072px → 1826px；摘掉 `install_accelerator_handler();`
+  重编译 → 1826px → 1826px（完全不动）。
+
+### 2.14 下层窗口抢走 OLE 拖放：`WS_EX_ACCEPTFILES` 加在顶层不管用
+
+- **症状**：`FLAG_ACCEPT_DROP` 打开后，页面收到的是 DOM `drop`（有 `name` /
+  `size`），而壳层承诺的 `shell-msg { t: "drop", paths: [...] }` **一次都不来**。
+- **为什么 `DragAcceptFiles` 无效**：它只给**顶层**窗口加 `WS_EX_ACCEPTFILES`。
+  但 OLE 拖放的命中测试走光标下**最深**那层窗口：
+  `webview_widget` → `Chrome_WidgetWin_1` → `Chrome_RenderWidgetHostHWND`
+  → `Intermediate D3D Window`（实测这一串全部 `ACCEPTFILES=False`）。WebView2 在
+  渲染子窗口上注册了自己的 `IDropTarget`，drop 被它接走转成 DOM 事件，顶层的
+  默认 drop target 永远等不到。三条 `ChangeWindowMessageFilterEx` 只是「允许消息
+  进来」，管不了「消息往哪去」。
+- **修法**：`ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)` 把那条内部
+  target 让开，OLE 链继续往父窗口找，落到 `DragAcceptFiles` 的窗口上。这是**上游
+  接口**；自己写一套 `IDropTarget` 会与 WebView2 内部行为打架，而层级关系随时
+  可能被上游调整。
+- **SDK 门槛**：`AllowExternalDrop` 自 SDK `1.0.1185.39`（Runtime 100）起可用。
+  本仓原 vendor 的 `1.0.1150.38` 里三个相关接口全无（`AllowExternalDrop` /
+  `AdditionalObjects` / `ICoreWebView2File` 零命中，`工具核实`）。升级走
+  `native/fetch.ts --sdk`，改版本常量而不是手改 `vendor/`。
+- **必须容错**：老运行时上 `QueryInterface(IID_ICoreWebView2Controller4)` 会失败，
+  此时静默返回、保持 WebView2 默认行为，**不阻断启动**（同 `apply_browser_ui`
+  逐项判 `SUCCEEDED` 的取向）。
+- **可用但没选的路**：`get_AdditionalObjects` + `ICoreWebView2File::get_Path` 也能
+  从 DOM drop 里取真实路径，但它在 `ICoreWebView2WebMessageReceivedEventArgs2` 上，
+  要走 `postMessage` 通道——与本仓「页面通信走 WebSocket」的架构不搭，故不用。
+- **证据**：`实测` + `源码核实`（子窗口链与 exstyle 实测；接口存在性扫头文件）。
+  行为判据见 `scripts/probe-drop.ts`（构造真 HDROP + `PostMessage`，断「原生层
+  消费了它」）：摘掉 `handle_drop(...)` 调用 → FAIL（句柄仍有效）→ 恢复 → PASS。
+
 ---
 
 ## 三、原生边界

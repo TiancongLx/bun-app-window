@@ -134,11 +134,36 @@ test("stop 里 shell.stop 早于 server.stop，中间等 EVENT_CLOSED", () => {
  */
 test("等 CLOSED 与超时赛跑，且超时后也 resolve 一次", () => {
     const stopAt = APP_CODE.indexOf("async stop()");
-    const body = APP_CODE.slice(stopAt, stopAt + 900);
+    const waitAt = APP_CODE.indexOf("async wait()");
+    expect(stopAt).toBeGreaterThan(0);
+    expect(waitAt).toBeGreaterThan(stopAt);
+    const body = APP_CODE.slice(stopAt, waitAt);
     expect(body).toContain("Promise.race(");
-    expect(body).toContain("Bun.sleep(CLOSE_TIMEOUT_MS)");
     // 超时分支若不 resolve，wait() 会永远挂着
     expect(body.indexOf("closed.resolve()")).toBeGreaterThan(body.indexOf("Promise.race("));
+});
+
+/**
+ * 超时定时器必须可取消。
+ *
+ * `Promise.race` 只取先兑现的，**不取消输掉的那个**。早先用 `Bun.sleep(CLOSE_TIMEOUT_MS)`，
+ * 正常关窗路径下它变成一个没人等的、未 unref 的 5 秒定时器，把 Bun 的事件循环撑满：
+ * 实测 `race returned @ 9ms`，进程到 5010 ms 才退出，真实关窗 5043 ms。
+ */
+test("关窗超时用可取消定时器，且清理在 finally 里", () => {
+    const stopAt = APP_CODE.indexOf("async stop()");
+    const waitAt = APP_CODE.indexOf("async wait()");
+    const body = APP_CODE.slice(stopAt, waitAt);
+
+    // Bun.sleep 不可取消，正是本 bug 的成因
+    expect(body).not.toContain("Bun.sleep");
+    expect(body).toContain("clearTimeout");
+
+    // 清理必须落在 finally：超时/异常路径同样不能留悬挂定时器
+    const finallyAt = body.indexOf("} finally {");
+    expect(finallyAt).toBeGreaterThan(0);
+    const cleanup = body.slice(finallyAt, finallyAt + 200);
+    expect(cleanup).toContain("cancelTimeout()");
 });
 
 /**
