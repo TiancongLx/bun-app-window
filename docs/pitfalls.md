@@ -398,23 +398,117 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
   渲染子窗口上注册了自己的 `IDropTarget`，drop 被它接走转成 DOM 事件，顶层的
   默认 drop target 永远等不到。三条 `ChangeWindowMessageFilterEx` 只是「允许消息
   进来」，管不了「消息往哪去」。
-- **修法**：`ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)` 把那条内部
-  target 让开，OLE 链继续往父窗口找，落到 `DragAcceptFiles` 的窗口上。这是**上游
-  接口**；自己写一套 `IDropTarget` 会与 WebView2 内部行为打架，而层级关系随时
-  可能被上游调整。
-- **SDK 门槛**：`AllowExternalDrop` 自 SDK `1.0.1185.39`（Runtime 100）起可用。
-  本仓原 vendor 的 `1.0.1150.38` 里三个相关接口全无（`AllowExternalDrop` /
-  `AdditionalObjects` / `ICoreWebView2File` 零命中，`工具核实`）。升级走
-  `native/fetch.ts --sdk`，改版本常量而不是手改 `vendor/`。
-- **必须容错**：老运行时上 `QueryInterface(IID_ICoreWebView2Controller4)` 会失败，
-  此时静默返回、保持 WebView2 默认行为，**不阻断启动**（同 `apply_browser_ui`
-  逐项判 `SUCCEEDED` 的取向）。
-- **可用但没选的路**：`get_AdditionalObjects` + `ICoreWebView2File::get_Path` 也能
-  从 DOM drop 里取真实路径，但它在 `ICoreWebView2WebMessageReceivedEventArgs2` 上，
-  要走 `postMessage` 通道——与本仓「页面通信走 WebSocket」的架构不搭，故不用。
+- **第一步的错判**（0.5.0 踩的，见 2.15）：当时推的是「关掉 WebView2 的 target，
+  OLE 链会继续往父窗口找，落到 `DragAcceptFiles` 的窗口上」，于是用了
+  `put_AllowExternalDrop(FALSE)`。这条推理**是错的**——那个开关的语义是「禁止外部
+  拖放」，关掉之后用户看到的是红色拒绝图标。
+- **正确方向**：让 WebView2 继续接管拖放（它已经注册好 `IDropTarget`），从 DOM
+  drop 里取真实路径。**不要自己写 `IDropTarget`**——那要解析 `IDataObject` 的
+  `CF_HDROP`，还要与 WebView2 的命中测试打架。
 - **证据**：`实测` + `源码核实`（子窗口链与 exstyle 实测；接口存在性扫头文件）。
   行为判据见 `scripts/probe-drop.ts`（构造真 HDROP + `PostMessage`，断「原生层
   消费了它」）：摘掉 `handle_drop(...)` 调用 → FAIL（句柄仍有效）→ 恢复 → PASS。
+  主路（真实拖放）的判据见 `scripts/probe-drop-live.ts`，以及 2.15。
+
+### 2.15 `AllowExternalDrop(FALSE)` 是「禁止外部拖放」，不是「让给父窗口」
+
+- **症状**：0.5.0 发布后，从资源管理器拖文件进窗口，光标显示**红色拒绝图标**，
+  drop 根本不发生。`WM_DROPFILES` 一次也不来。
+- **两个实测事实**：
+  1. `DragAcceptFiles` 只设 `WS_EX_ACCEPTFILES`，**不注册** `IDropTarget`。查
+     `OleDropTargetInterface` property：整条窗口链（顶层 `webview` /
+     `webview_widget` / `Chrome_WidgetWin_0` / `Chrome_WidgetWin_1` /
+     `Chrome_RenderWidgetHostHWND` / `Intermediate D3D Window`）**全为 false**。
+     现代 Windows 的 OLE 命中测试**不会** fallback 到那条 legacy 路径——
+     `DragAcceptFiles` 只对「别人主动发 `WM_DROPFILES` 给你」有意义。
+  2. `AllowExternalDrop` 是 `CoreWebView2AllowExternalDrop`：「是否允许外部拖放」。
+     设 `FALSE` = 拒绝，不是「转交」。它把 WebView2 的 target 变成「什么都不接受」，
+     于是整条链上没有承接者。
+- **正确修法**：`get_AdditionalObjects` + `ICoreWebView2File::get_Path`。
+  让 WebView2 接管拖放，页面在 **capture 阶段**把 `DataTransfer.files` 转给宿主：
+
+  ```text
+  DOM drop → chrome.webview.postMessage({ files: [...] })
+           → ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects
+           → 每项 QueryInterface 到 ICoreWebView2File，get_Path 拿绝对路径
+           → 壳层 post_json({ t: "drop", paths: [...] })
+  ```
+
+  - 注入脚本由 `kInit` 追加（**仅** `FLAG_ACCEPT_DROP` 时），页面不需要写任何代码。
+  - `dragover` 必须 `preventDefault()`，否则浏览器不认这个落点、`drop` 不会来。
+  - `FileList` 是 live 集合，跨进程 structured clone 前要先转成真数组。
+  - 老运行时没有 `EventArgs2`：`QueryInterface` 失败就静默放过，不影响其它消息。
+- **这条路的代价**：`AdditionalObjects` 只能从**页面发起的**投递里取，
+  所以注入脚本是必需的一环——它不是「页面代码」，而是初始化脚本，与
+  `window.__shell.recv` 同一条注入路径。投递用的是
+  `postMessageWithAdditionalObjects`，**不是** `postMessage`，见 2.16。
+- **判据**：`scripts/probe-drop.ts` 守兜底链（合成 `WM_DROPFILES`）；
+  `scripts/probe-drop-live.ts` 守主路（真实拖放，人手拖一次，判据全自动）；
+  `tests/capabilities.test.ts` 静态守「不许再出现 `AllowExternalDrop`」。
+- **证据**：`工具核实`（`OleDropTargetInterface` property 链全 false +
+  恢复默认后 `Chrome_WidgetWin_1 dropTarget=true`）+ `实测结果`（0.5.0 上拖放
+  显示拒绝图标）。
+
+### 2.16 拖放要过四道关，每道关失败都是「毫无反应」
+
+- **症状**：`FLAG_ACCEPT_DROP` 打开，拖文件进窗口，什么都不发生。没有报错、
+  没有日志、没有 `drop`、没有 `shell-msg`。四次排查踩了四个**完全独立**的
+  关卡，每一关单独修都不够，而且每一关的外部表现都一样。
+
+- **四道关，按触发顺序**：
+
+    | # | 关卡 | 失败时的现象 | 判据 |
+    | --- | --- | --- | --- |
+    | 1 | 宿主**完整性级别** ≤ 拖放源 | 一条 `dragenter` 都没有，光标禁止 | 计划任务 `RunLevel Limited` 跑，非提权 |
+    | 2 | 注入脚本跑到页面 | `window.__shellDropReady` 为空 | 页面读该标记 |
+    | 3 | `dropEffect` 显式设 `'copy'` | `dragenter`/`dragover` 照常，`dropEffect=none`，`drop` 不来 | 页面读 `e.dataTransfer.dropEffect` |
+    | 4 | 投递用 `postMessageWithAdditionalObjects` | `drop` 到了、`files=1`，但 `get_AdditionalObjects` 的 `get_Count` 是 0 | `__shellDropPosted` + 宿主侧 count |
+
+- **第 1 关：UIPI 会连 `dragenter` 一起拦掉。** 本机 OTT 承载在
+  `RunLevel Highest` 的登录任务里，所有子进程都是 High 完整性，而资源管理器是
+  Medium。UIPI 在源的 `DoDragDrop` 里就拒绝投递，目标进程**连一条拖拽消息都收不到**。
+  这与「窗口没在前台」的外部表现完全相同，只能靠「有没有 `dragenter`」区分。
+  用计划任务 + `RunLevel Limited` 拿「完整但非提权」令牌——`runas /trustlevel:`
+  给的是受限令牌，会把 WebView2 一起弄坏，不可用。
+
+- **第 2 关：注入标记是必需的，不是装饰。** `kDropInit` 末尾写
+  `window.__shellDropReady = 1`。没有它，「拖放没反应」永远分不清是脚本没注入
+  还是 OS 挡了——而这两件事的修法完全相反。
+
+- **第 3 关：`preventDefault()` 只表态「可能接受」，`dropEffect` 才是结论。**
+  只挂 `dragover` + `preventDefault()` 时实测 `dragenter=1 dragover=72 drop=0`，
+  光标一直是禁止图标；补上 `e.dataTransfer.dropEffect = 'copy'` 才有 `drop`。
+  `dragenter` 也要一起 `preventDefault()`，别只挂 `dragover`。
+
+- **第 4 关（最隐蔽）：`postMessage` 与 `get_AdditionalObjects` 不是一对。**
+  `postMessage` 会对 payload 做 JSON 序列化，`File` 对象被序列化成 `{}`，
+  于是投递**成功**、`WebMessageReceived` **照常触发**、`__shellDropPosted === 1`，
+  而 `get_AdditionalObjects` 返回空集合、`get_Count === 0` —— 壳层什么都不推。
+  微软文档原话（`ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects`）：
+
+       To pass additionalObjects via WebMessage to the app, use the
+       chrome.webview.postMessageWithAdditionalObjects content API.
+
+  所以第一个参数只放自己的标记，`File` 一律走第二个参数：
+
+  ```js
+  wv.postMessageWithAdditionalObjects({ __shellDrop: 1 }, files);
+  ```
+
+  这一关的教训比前三条都普遍：**「调用没抛错」不等于「效果发生了」**。
+  当时 `postMessage` 是 `try` 块里的，只要它不抛就置 `__shellDropPosted = 1`，
+  于是诊断标记本身在说谎。现在的写法把「投递被接受」与「宿主真的拿到了对象」
+  分成两个独立观测点。
+
+- **实验纪律（这一轮又犯了一次）**：第一版探针把监听同时挂在 capture 和冒泡上，
+  计数翻倍——读数里 `dragenter=2` 其实是 1 次。**探针自己会制造假数据**，
+  这已经是 `pitfalls` 里第三次同族事故（2.13 的 `SetFocus`、2.12 的伪判据）。
+
+- **证据**：`实测`（2026-10-21）。四关的三次失败读数：
+  提权下 `dragenter=0`；非提权但只有 `preventDefault` 时
+  `inject=on dragenter=1 dragover=72 drop=0 dropEffect=none`；
+  补 `dropEffect` 后 `drop=1 files=1` 而宿主 `count=0`；换
+  `postMessageWithAdditionalObjects` 后整条链通。
 
 ---
 

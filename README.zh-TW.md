@@ -504,6 +504,8 @@ window.addEventListener("shell-msg", (e) => {
 });
 ```
 
+落進視窗的檔案由殼層注入的腳本自動轉發，頁面**不需要**自己監聽 `drop` —— `paths` 裡是**絕對路徑**（來源 `ICoreWebView2File::get_Path`）。
+
 針對管理員提權場景（High 完整性層級行程接收來自 Medium 層級檔案總管的訊息），底層已透過 `ChangeWindowMessageFilterEx` 自動放行 UIPI 訊息過濾。
 
 ### 4. 前端頁面桌面化樣式建議

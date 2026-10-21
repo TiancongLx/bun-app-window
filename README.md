@@ -522,6 +522,8 @@ window.addEventListener("shell-msg", (e) => {
 });
 ```
 
+Files are forwarded by a script the shell injects, so the page does **not** need its own `drop` handler — `paths` holds **absolute** paths (from `ICoreWebView2File::get_Path`).
+
 When running in an elevated administrator process (High Integrity Level) while Explorer runs at Medium Integrity Level, the shell automatically whitelists drop messages across UIPI via `ChangeWindowMessageFilterEx`.
 
 ### 4. Recommended Desktop CSS Reset

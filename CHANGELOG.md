@@ -4,6 +4,62 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-10-21
+
+**0.5.0's drag-and-drop fix was wrong and made dropped files be refused outright. This release replaces it. The public API is unchanged.**
+
+### Fixed
+
+- **Dropped files are accepted again, and the page receives absolute paths.** 0.5.0 set `ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)` on the belief that it stepped aside from WebView2's internal `IDropTarget` and let the OLE chain fall through to the parent window's `DragAcceptFiles` handler. **Both halves of that reasoning were wrong**:
+
+    1. `DragAcceptFiles` only sets `WS_EX_ACCEPTFILES`; it does **not** register an `IDropTarget`. Reading the `OleDropTargetInterface` window property across the whole chain (`webview` → `webview_widget` → `Chrome_WidgetWin_0` → `Chrome_WidgetWin_1` → `Chrome_RenderWidgetHostHWND` → `Intermediate D3D Window`) returns false for every window. Modern Windows does not fall back to that legacy path during OLE hit-testing.
+    2. `AllowExternalDrop` means *allow external drop*. `FALSE` refuses drops; it does not forward them.
+
+    The user-visible symptom was a red "not allowed" cursor over the window on every drag, with no drop and no `WM_DROPFILES`.
+
+    The fix uses the upstream API built for this case. With `FLAG_ACCEPT_DROP` on, the shell injects a script into the page that forwards `DataTransfer.files` to the host; the host reads them back with `ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects` and converts each `ICoreWebView2File` to an absolute path via `get_Path`. **Pages still need no code of their own** — the listener is injected, like `window.__shell.recv`. On a runtime without `EventArgs2` the `QueryInterface` fails and every other web message keeps working.
+
+    The `WM_DROPFILES` path (`handle_drop`) stays as a fallback and keeps its own probe.
+
+### Note
+
+- **This release went through four rounds of "nothing happens".** Each round was a genuinely different cause with an identical symptom, and only the last one was in the code this release changed. They are recorded as `docs/pitfalls.md` 2.16, and the injected script now carries a marker for each so the next failure names its own stage:
+
+    | Round | Cause | What made it visible |
+    | --- | --- | --- |
+    | 1 | The host ran elevated (High integrity) while Explorer runs at Medium; UIPI refuses the drag before any message is sent | Not a single `dragenter` |
+    | 2 | `preventDefault()` alone does not accept a drop — `dataTransfer.dropEffect` stayed `none` | `dragover=72` with `drop=0` |
+    | 3 | `chrome.webview.postMessage` is *not* the pair of `get_AdditionalObjects`; `File` serialises to `{}`, so the collection was empty while the call succeeded | `drop=1 files=1`, `count=0` |
+    | 4 | The probe reported its own post as failed — it fetched the marker 250 ms later, after the host had already closed the window | the only red check in an otherwise green run |
+
+    Item 3 is the one worth remembering: **a call that does not throw is not a call that worked.** The script now records `__shellDropReady` / `__shellDropPosted` / `__shellDropError` so "did the injection run", "was the drop delivered" and "did the host receive an object" are three separate observations instead of one silent guess.
+
+### Added
+
+- **`scripts/probe-drop-live.ts`** — an interactive probe for the half that cannot be synthesised. `AdditionalObjects` only ever contains `File` objects produced by a real drag; page JavaScript cannot fabricate one with a path, and `keybd_event` cannot hold a mouse button across processes. The probe opens a window, waits for one manual drop, and does the judging automatically: the page reports the received `paths` back over `fetch`, and the probe asserts they are non-empty, absolute, existing, and equal to `--file`. Twelve checks, and the first eleven need no human at all — so a failure says *which* of the four gates closed. Not part of the gate.
+
+    It must run **non-elevated**; the file comment says why and how.
+
+### Documentation
+
+- `docs/pitfalls.md` gains 2.15 (`AllowExternalDrop(FALSE)` refuses drops rather than forwarding them) and 2.16 (the four gates, with the measured reading at each one); 2.14 now points forward at them instead of recommending the wrong fix.
+- `AGENTS.md` replaces the "step aside from WebView2's `IDropTarget`" rule with the `AdditionalObjects` route, lists the four must-dos, and registers the new probe.
+- Three READMEs state that the page needs no `drop` handler of its own and that `paths` holds absolute paths.
+- `tests/capabilities.test.ts` pins all four gates statically, including that `chrome.webview.postMessage(` must not reappear.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `bun check` | 69 files |
+| `bun test` | 557 pass / 0 fail |
+| `bun run scripts/gate.ts` | PASSED |
+| `bun run scripts/verify-dll.ts` | PASSED, same source as `native/shell.cc` |
+| `scripts/probe-window-events.ts` | PASSED (21 checks) |
+| `scripts/probe-accelerator-keys.ts` | PASSED (6 checks) |
+| `scripts/probe-drop.ts` | PASSED (6 checks) |
+| `scripts/probe-drop-live.ts` | **PASSED (12 checks)** — one real drag, path `C:\Users\root\Desktop\鲸鱼拖放测试.txt` |
+
 ## [0.5.0] - 2026-10-21
 
 **Upgrading is enough for the first two items — no code changes on your side.** The third changes how you build a single-file executable, and it fixes something that never worked.
@@ -394,7 +450,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.3.0...v0.4.0

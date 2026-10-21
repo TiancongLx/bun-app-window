@@ -42,42 +42,83 @@ test("拖放需要在提权场景下放行 UIPI", () => {
 });
 
 /**
- * 光放行 UIPI 还不够：**drop 会被 WebView2 抢走**。
+ * 光放行 UIPI 还不够：**OLE 拖放会被 WebView2 内部接走**。
  *
- * `DragAcceptFiles` 只给顶层窗口加 `WS_EX_ACCEPTFILES`，而 OLE 拖放的命中测试走
- * 光标下最深那层窗口。WebView2 在 `Chrome_RenderWidgetHostHWND` 上注册了自己的
- * `IDropTarget`，drop 于是被它接走转成 DOM 事件——页面拿到只有 name/size 的
- * `DataTransfer`，壳层承诺的 `shell-msg{t:"drop",paths:[...]}` 一次都不来。
+ * 两条实测事实（`pitfalls` 2.14 / 2.15）：
  *
- * 修法只能是 `ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)`：把那条内部
- * target 让开，OLE 链继续往父窗口找，落到 `DragAcceptFiles` 的窗口上。
- * **不许自己写 `IDropTarget`**——那会与 WebView2 内部行为打架，而层级关系随时
- * 可能被上游调整（本次就是这么踩到的）。
+ * 1. `DragAcceptFiles` 只设 `WS_EX_ACCEPTFILES`，**不注册** `OleDropTargetInterface`
+ *    ——查整条窗口链的 `DropTarget` property 全为 false，现代 Windows 的 OLE 命中
+ *    测试不会 fallback 到那条 legacy 路径。
+ * 2. `put_AllowExternalDrop(FALSE)` 的语义是「**禁止**外部拖放」，不是「让给父窗口」。
+ *    0.5.0 用它换来的结果是用户拖文件进来看到红色拒绝图标。
  *
- * 静态断言抓不到「拖放真的通了」（那是 `scripts/probe-drop.ts` + 真人验收的事），
- * 但能抓「有人把这行删了」和「有人换回了手写 IDropTarget」。
+ * 所以只能走上游给的正路：让 WebView2 接管拖放（它自己已经注册好 `IDropTarget`），
+ * 用 `ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects` 从页面
+ * `postMessage` 里取出 `ICoreWebView2File`，`get_Path` 拿绝对路径。
+ * **不许自己写 `IDropTarget`**——那要解析 `IDataObject` 的 `CF_HDROP`，还要与
+ * WebView2 的命中测试打架。
+ *
+ * 静态断言抓不到「拖放真的通了」（那是 `scripts/probe-drop.ts` 与真实拖放的事），
+ * 但能抓「有人换回 AllowExternalDrop」「有人换回手写 IDropTarget」「注入脚本被删」。
  */
-test("拖放要让开 WebView2 自己的 IDropTarget，且走上游接口", () => {
-    // 上游接口，不是手写实现
-    expect(SHELL_CODE).toContain("put_AllowExternalDrop(FALSE)");
-    expect(SHELL_CODE).toContain("IID_ICoreWebView2Controller4");
+test("拖放走 AdditionalObjects 取真实路径，且禁止再关 WebView2 的 drop target", () => {
+    // 上游接口真的被用上：AdditionalObjects → ICoreWebView2File::get_Path
+    expect(SHELL_CODE).toContain("get_AdditionalObjects");
+    expect(SHELL_CODE).toContain("QueryInterface(IID_ICoreWebView2File");
+    expect(SHELL_CODE).toContain("get_Path");
+    // 0.5.0 的回归点：这一行会让用户看到红色拒绝图标
+    expect(SHELL_CODE).not.toContain("AllowExternalDrop");
     // MinGW 无 IID 符号库：必须走 IID_* 常量 + QueryInterface（pitfalls 3.2）
     expect(SHELL_CODE).not.toContain("__uuidof");
 
-    // 必须在 enable_drop 里被调到——否则开关打开也白搭
+    // 订阅必须在 enable_drop 里发生——否则开关打开也白搭
     const enableAt = SHELL_CODE.indexOf("void enable_drop(HWND hwnd)");
     expect(enableAt).toBeGreaterThan(0);
     const enableEnd = SHELL_CODE.indexOf("\n}", enableAt);
     const enableBody = SHELL_CODE.slice(enableAt, enableEnd);
-    expect(enableBody).toContain("disable_webview_external_drop()");
+    expect(enableBody).toContain("install_drop_handler()");
 
-    // 老运行时（Runtime < 100）没有 Controller4：QueryInterface 失败时必须静默返回，
-    // 不能因为一个可选能力缺失就让整个窗口起不来
-    const fnAt = SHELL_CODE.indexOf("void disable_webview_external_drop()");
-    expect(fnAt).toBeGreaterThan(0);
-    const fnBody = SHELL_CODE.slice(fnAt, fnAt + 700);
-    expect(fnBody).toContain("FAILED(");
-    expect(fnBody).toMatch(/return;/);
+    // 老运行时没有 EventArgs2：QueryInterface 失败时必须静默放过，不能阻断其它消息
+    expect(SHELL_CODE).toContain(
+        "FAILED(args->QueryInterface(IID_ICoreWebView2WebMessageReceivedEventArgs2,",
+    );
+
+    // 反注册必须在 destroy 之前，否则处理器挂在已死的 core 上
+    const runAt = SHELL_CODE.indexOf("webview_run(g_webview)");
+    const uninstallAt = SHELL_CODE.indexOf("uninstall_drop_handler();");
+    expect(runAt).toBeGreaterThan(0);
+    expect(uninstallAt).toBeGreaterThan(runAt);
+});
+
+/**
+ * 注入脚本是主路的前半段：页面 drop 不转发到宿主，`AdditionalObjects` 永远是空的。
+ *
+ * 四条都是「缺了就完全没反应」，且四条的现象一模一样。逐条钉住：
+ *
+ * 1. `dragenter` / `dragover` 都要 `preventDefault()` —— 落点不被接受时 `drop` 不来。
+ * 2. `dataTransfer.dropEffect = 'copy'` —— `preventDefault()` 只表态「可能接受」，
+ *    `dropEffect` 才是给用户看的结论。默认 `none` 时实测 `dragenter=1 dragover=72
+ *    drop=0`（`pitfalls` 2.16）。
+ * 3. 投递必须是 `postMessageWithAdditionalObjects`，**不是 `postMessage`** ——
+ *    后者把 `File` 序列化成 `{}`，`get_Count` 恒 0，而调用照样成功返回。
+ * 4. `__shellDropReady` 标记 —— 没有它，「没反应」分不清是脚本没注入还是 OS 挡了。
+ */
+test("拖放注入脚本覆盖四道关，且只在开关打开时注入", () => {
+    expect(SHELL_CC).toContain("kDropInit");
+    expect(SHELL_CC).toContain("'dragenter', allow, true");
+    expect(SHELL_CC).toContain("'dragover', allow, true");
+    expect(SHELL_CC).toContain("dropEffect = 'copy'");
+    expect(SHELL_CC).toContain("postMessageWithAdditionalObjects");
+    expect(SHELL_CC).toContain("window.__shellDropReady = 1");
+
+    // 只有会序列化失败的那个 API 不该再出现（注释里保留说明是允许的，
+    // 所以判据跑在剔掉整行注释的 SHELL_CODE 上）
+    expect(SHELL_CODE).not.toContain("webview.postMessage(");
+
+    // 注入是条件性的：没开 FLAG_ACCEPT_DROP 的窗口不该背这段脚本
+    const appendAt = SHELL_CC.indexOf("initScript += kDropInit");
+    expect(appendAt).toBeGreaterThan(0);
+    expect(SHELL_CC.slice(appendAt - 120, appendAt)).toContain("g_accept_drop");
 });
 
 test("键盘处理挂在两个窗口过程的共用前置，不各写一份", () => {

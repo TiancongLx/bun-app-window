@@ -147,6 +147,9 @@ EventRegistrationToken g_new_window_token{};
 // add_ 之后我们持一份引用，teardown 时 remove_ + Release。
 ICoreWebView2AcceleratorKeyPressedEventHandler *g_accel_handler = nullptr;
 EventRegistrationToken g_accel_token{};
+// 拖放：WebMessageReceived 的处理器与令牌（从 DOM drop 里取真实路径）。
+ICoreWebView2WebMessageReceivedEventHandler *g_drop_handler = nullptr;
+EventRegistrationToken g_drop_token{};
 
 // 错误槽。跨线程写：启动期由 UI 线程写（CoInitializeEx / webview_create 失败等），
 // 运行期任何线程都可能写。放在 mutex 后面，避免两条错误互相覆盖成半截字符串。
@@ -1344,48 +1347,161 @@ void append_json_string(std::string &out, const std::wstring &w) {
   out.push_back('"');
 }
 
-// 关掉 WebView2 自己注册的 `IDropTarget`，让拖放落回 `WM_DROPFILES`。
+// ---- 拖放：从 DOM drop 里取真实路径（AdditionalObjects）----
 //
-// 为什么非这一步不可：`DragAcceptFiles` 只给**顶层**窗口加 `WS_EX_ACCEPTFILES`。
-// 而 OLE 拖放的命中测试走光标下**最深**那层窗口：
+// ## 为什么不是 `AllowExternalDrop(FALSE)`
 //
-//     webview_widget → Chrome_WidgetWin_1 → Chrome_RenderWidgetHostHWND
-//     → Intermediate D3D Window    （实测全部 ACCEPTFILES=False）
+// `0.5.0` 曾用 `ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)`，假设
+// 「关掉 WebView2 的 drop target，OLE 链会继续往父窗口找，落到 `DragAcceptFiles`
+// 上」。**这个假设是错的**，实测两条：
 //
-// WebView2 在渲染子窗口上注册了自己的 `IDropTarget`，drop 于是被它接走、转成
-// DOM 事件——顶层的默认 drop target 永远等不到。表现就是「页面能收到只有
-// name/size 的 DOM drop，而壳层承诺的 shell-msg{paths:[...]} 一次都不来」。
+//   1. `AllowExternalDrop` 的语义是「**禁止**外部拖放」，不是「让给父窗口」。
+//      关掉之后用户拖文件进来看到的是红色拒绝图标。
+//   2. `DragAcceptFiles` 只设 `WS_EX_ACCEPTFILES`，**不注册** `IDropTarget`
+//      （查 `OleDropTargetInterface` property：整条窗口链全为 false）。
+//      现代 Windows 的 OLE 命中测试不会 fallback 到那条 legacy 路径。
 //
-// `AllowExternalDrop(FALSE)` 关掉的就是那个内部 target。关掉之后 OLE 拖放链
-// 继续往父窗口找，落到 `DragAcceptFiles` 的那个窗口上，`WM_DROPFILES` 生效，
-// `handle_drop()` 里的 `DragQueryFileW` 就能取到完整路径。
+// ## 现在的路
 //
-// 上游接口，不自己写 `IDropTarget`：手写一套会与 WebView2 内部行为打架，而
-// 命中测试的层级关系随时可能被上游调整（那正是本次踩到的机理）。
+// 恢复 WebView2 的默认行为（它接管拖放、转成 DOM 事件），然后从 DOM drop 的
+// `DataTransfer.files` 里取真实路径——这是微软专门为这个场景提供的上游接口：
 //
-// `ICoreWebView2Controller4` 要 Runtime 100+（SDK 1.0.1185.39 起）。老运行时上
-// QueryInterface 会失败，此时保持 WebView2 默认行为（DOM drop 仍可用，只是拿不到
-// 完整路径），**不阻断启动**——与 `apply_browser_ui` 逐项判 SUCCEEDED 同一取向。
-void disable_webview_external_drop() {
-  if (!g_webview) {
+//   页面 drop  → chrome.webview.postMessage({ files: [...] })
+//             → ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects
+//             → 每项 QueryInterface 到 ICoreWebView2File，get_Path 拿绝对路径
+//
+// 页面侧那一行由 `kInit` 注入（见 ui_thread），所以**页面不需要写任何代码**。
+//
+// ## 为什么保留 `WM_DROPFILES` 那条老路
+//
+// 它是兜底：老 runtime 没有 `AdditionalObjects` 时，至少 `DragAcceptFiles` 还在，
+// 某些场景（比如未来 WebView2 行为变化）也可能重新用上。两条路互不干扰——
+// 只是同一时刻通常只有一条会触发。
+//
+// ## 与「不造轮子」的关系
+//
+// 不自己写 `IDropTarget`：那要解析 `IDataObject` 的 `CF_HDROP`，还要与 WebView2
+// 的命中测试打架。`AdditionalObjects` 是上游的等价能力，且路径由 WebView2 给出，
+// 不依赖我们自己猜文件系统。
+
+// 事件处理器：从 WebMessageReceived 里挑出「带 File 对象」的那些。
+//
+// 不解析 JSON，也不看消息内容——直接问 `AdditionalObjects` 里有没有文件。
+// 这样页面自己的 `postMessage`（如果有）不会被误伤：它们没有 File，集合为空。
+class DropMessageHandler final : public ICoreWebView2WebMessageReceivedEventHandler {
+ public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
+    if (!out) {
+      return E_POINTER;
+    }
+    if (IsEqualIID(riid, IID_IUnknown) ||
+        IsEqualIID(riid, IID_ICoreWebView2WebMessageReceivedEventHandler)) {
+      *out = static_cast<ICoreWebView2WebMessageReceivedEventHandler *>(this);
+      AddRef();
+      return S_OK;
+    }
+    *out = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++m_refs; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG left = --m_refs;
+    if (left == 0) {
+      delete this;
+    }
+    return left;
+  }
+
+  HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2 * /*sender*/,
+                                   ICoreWebView2WebMessageReceivedEventArgs *args) override {
+    if (!args) {
+      return S_OK;
+    }
+    // 老 runtime 上没有 EventArgs2：静默放过，不影响其它消息
+    ICoreWebView2WebMessageReceivedEventArgs2 *args2 = nullptr;
+    if (FAILED(args->QueryInterface(IID_ICoreWebView2WebMessageReceivedEventArgs2,
+                                    reinterpret_cast<void **>(&args2))) ||
+        !args2) {
+      return S_OK;
+    }
+
+    ICoreWebView2ObjectCollectionView *objects = nullptr;
+    if (SUCCEEDED(args2->get_AdditionalObjects(&objects)) && objects) {
+      UINT count = 0;
+      if (SUCCEEDED(objects->get_Count(&count)) && count > 0) {
+        std::string json = "{\"t\":\"drop\",\"paths\":[";
+        bool any = false;
+        for (UINT i = 0; i < count; ++i) {
+          IUnknown *item = nullptr;
+          if (FAILED(objects->GetValueAtIndex(i, &item)) || !item) {
+            continue;
+          }
+          ICoreWebView2File *file = nullptr;
+          if (SUCCEEDED(item->QueryInterface(IID_ICoreWebView2File,
+                                             reinterpret_cast<void **>(&file))) &&
+              file) {
+            LPWSTR raw = nullptr;
+            if (SUCCEEDED(file->get_Path(&raw)) && raw) {
+              if (any) {
+                json.push_back(',');
+              }
+              append_json_string(json, std::wstring(raw));
+              any = true;
+              CoTaskMemFree(raw);
+            }
+            file->Release();
+          }
+          item->Release();
+        }
+        objects->Release();
+        if (any) {
+          json += "]}";
+          post_json(json);
+        }
+      } else {
+        objects->Release();
+      }
+    }
+    args2->Release();
+    return S_OK;
+  }
+
+ private:
+  std::atomic<ULONG> m_refs{1};
+};
+
+void install_drop_handler() {
+  if (g_drop_handler || !g_webview) {
     return;
   }
-  auto *ctrl = static_cast<ICoreWebView2Controller *>(
-      webview_get_native_handle(g_webview, WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER));
-  if (!ctrl) {
+  ICoreWebView2 *core = core_webview();
+  if (!core) {
     return;
   }
-  ICoreWebView2Controller4 *ctrl4 = nullptr;
-  if (FAILED(ctrl->QueryInterface(IID_ICoreWebView2Controller4,
-                                  reinterpret_cast<void **>(&ctrl4))) ||
-      !ctrl4) {
-    return;
+  auto *handler = new DropMessageHandler();
+  if (SUCCEEDED(core->add_WebMessageReceived(handler, &g_drop_token))) {
+    g_drop_handler = handler;
+  } else {
+    handler->Release();
   }
-  ctrl4->put_AllowExternalDrop(FALSE);
-  ctrl4->Release();
+  core->Release();
 }
 
-// 拖放：把落进来的路径推给页面。
+void uninstall_drop_handler() {
+  if (!g_drop_handler) {
+    return;
+  }
+  ICoreWebView2 *core = core_webview();
+  if (core) {
+    core->remove_WebMessageReceived(g_drop_token);
+    core->Release();
+  }
+  g_drop_handler->Release();
+  g_drop_handler = nullptr;
+  g_drop_token = EventRegistrationToken{};
+}
+
+// 拖放：`DragAcceptFiles` 那条老路（兜底）。主路见上面的 `DropMessageHandler`。
 //
 // 注意提权场景：本进程若是 High 完整性，资源管理器（Medium）
 // 发来的 WM_DROPFILES 会被 UIPI 拦掉。所以窗口建好后要显式放行这三条消息，
@@ -1399,9 +1515,8 @@ void enable_drop(HWND hwnd) {
   ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
   // 0x0049 = WM_COPYGLOBALDATA，Win7 起改名后未再公开常量
   ChangeWindowMessageFilterEx(hwnd, 0x0049, MSGFLT_ALLOW, nullptr);
-  // 上面三条只是「允许消息进来」。能不能**收到**还取决于 WebView2 有没有把
-  // drop 抢走——那一步在这里让开。
-  disable_webview_external_drop();
+  // 主路：订阅 DOM drop 转出来的 WebMessage
+  install_drop_handler();
 }
 
 void handle_drop(HDROP hd) {
@@ -2327,7 +2442,91 @@ DWORD WINAPI ui_thread(LPVOID param) {
       "  window.dispatchEvent(new CustomEvent('shell-msg', { detail: o }));"
       "};";
 
-  if (webview_init(g_webview, kInit) != WEBVIEW_ERROR_OK) {
+  // `FLAG_ACCEPT_DROP` 时追加：把 DOM drop 里的 File 对象转发给宿主。
+  //
+  // 为什么必须在**初始化脚本**里做，而不是让页面自己写：`FLAG_ACCEPT_DROP` 的
+  // 承诺是「壳层把路径交给你」，页面不该为它写任何代码。这里注入一次，对
+  // 所有页面生效，且与 `window.__shell.recv` 同一条注入路径。
+  //
+  // 四个必须点（前三个是「drop 根本不触发」的直接原因，缺一个就毫无反应）：
+  //
+  //   1. `dragenter` 与 `dragover` 都要 `preventDefault()`。只挂 `dragover`
+  //      在多数浏览器上够用，但 WebView2 里从 `dragenter` 起就必须表态。
+  //   2. **`dataTransfer.dropEffect` 必须显式设成 `'copy'`**。这一条最隐蔽：
+  //      `preventDefault()` 只表示「这里可能接受」，而 `dropEffect` 才是**给用户
+  //      看的那一个结论**。它默认是 `'none'`，于是光标一直是禁止图标、`drop`
+  //      一次都不来——而 `dragenter` / `dragover` 照常触发。实测（2026-10-21）：
+  //      只有 `preventDefault()` 时 `dragenter=1 dragover=72 drop=0`；补上
+  //      `dropEffect` 才有 `drop`。本条与 `pitfalls` 2.15 配套。
+  //   3. capture 阶段挂监听（第三个参数 `true`），先于页面自己的处理跑；页面若也
+  //      `preventDefault` 不影响我们。
+  //   4. `files` 要转成真数组再 `postMessage`——`FileList` 是 live 集合，跨进程
+  //      structured clone 未必能带过去。
+  //
+  // `window.__shellDropReady` / `__shellDropPosted` / `__shellDropError` 是给探针与
+  // 消费者自检用的三个标记：
+  //
+  //   `__shellDropReady`   注入跑没跑
+  //   `__shellDropPosted`  `postMessageWithAdditionalObjects` 是否调用成功
+  //   `__shellDropError`   抛错时的 message（空串 = 没抛）
+  //
+  // 没有这三个，「拖放没反应」永远分不清是「脚本没注入」「drop 没触发」
+  // 还是「投递时抛错被 catch 吞了」。
+  //
+  // `chrome.webview` 不存在时（理论上不该发生，我们在 WebView2 里）直接跳过，
+  // 不让一段注入脚本的失败影响页面。
+  //
+  // ## 为什么是 `postMessageWithAdditionalObjects` 而不是 `postMessage`
+  //
+  // 这一条是**整条主路能否成立的唯一分水岭**，而且失败时完全没有症状：
+  // `postMessage` 会对 payload 做 JSON 序列化，`File` 对象被序列化成 `{}`，
+  // 投递**成功**、`WebMessageReceived` **照常触发**，但 `get_AdditionalObjects`
+  // 返回空集合、`get_Count` 是 0 —— 于是壳层什么都不推，页面永远等不到路径。
+  //
+  // 微软文档（`ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects`）：
+  // 「To pass additionalObjects via WebMessage to the app, use the
+  // `chrome.webview.postMessageWithAdditionalObjects` content API.」两者是配对的，
+  // `AdditionalObjects` 只承载第二个参数里的 DOM 对象。
+  //
+  // 所以第一个参数只放自己的标记，`File` 一律走第二个参数。见 `pitfalls` 2.16。
+  static const char *kDropInit =
+      "(function(){"
+      "  if (!window.chrome || !window.chrome.webview) { return; }"
+      "  window.__shellDropReady = 1;"
+      "  window.__shellDropPosted = 0;"
+      "  window.__shellDropError = '';"
+      "  function allow(e) {"
+      "    e.preventDefault();"
+      "    if (e.dataTransfer) { e.dataTransfer.dropEffect = 'copy'; }"
+      "  }"
+      "  window.addEventListener('dragenter', allow, true);"
+      "  window.addEventListener('dragover', allow, true);"
+      "  window.addEventListener('drop', function (e) {"
+      "    var dt = e.dataTransfer;"
+      "    if (!dt || !dt.files || dt.files.length === 0) { return; }"
+      "    e.preventDefault();"
+      "    var files = [];"
+      "    for (var i = 0; i < dt.files.length; i++) { files.push(dt.files[i]); }"
+      "    var wv = window.chrome.webview;"
+      "    if (!wv.postMessageWithAdditionalObjects) {"
+      "      window.__shellDropError = 'postMessageWithAdditionalObjects unavailable';"
+      "      return;"
+      "    }"
+      "    try {"
+      "      wv.postMessageWithAdditionalObjects({ __shellDrop: 1 }, files);"
+      "      window.__shellDropPosted = 1;"
+      "    } catch (err) {"
+      "      window.__shellDropError = String(err && err.message ? err.message : err);"
+      "    }"
+      "  }, true);"
+      "})();";
+
+  std::string initScript = kInit;
+  if (g_accept_drop) {
+    initScript += kDropInit;
+  }
+
+  if (webview_init(g_webview, initScript.c_str()) != WEBVIEW_ERROR_OK) {
     set_err("webview_init failed");
   }
   // 必须在 navigate **之前**安装：`NavigationStarting` 只对注册之后发起的导航生效，
@@ -2366,6 +2565,7 @@ DWORD WINAPI ui_thread(LPVOID param) {
     // 反注册必须在 destroy **之前**：destroy 之后 core_webview() 返回 nullptr，
     // remove_ 就无从谈起，守卫对象会一直挂在已死的 core 上（释放时崩）。
     uninstall_accelerator_handler();
+    uninstall_drop_handler();
     uninstall_nav_guard();
     webview_destroy(g_webview);
     g_webview = nullptr;
