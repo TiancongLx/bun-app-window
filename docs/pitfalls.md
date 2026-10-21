@@ -1357,12 +1357,26 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
   它问的是常量自己，没有一条判据去问原生侧面收什么。这是「门禁绿但行为错」的标本：
   断言测的是声明，不是契约。
 
-- **当前处置**：常量不动（改它会破坏已在用 `HT*` 语义的调用方，且 `HT*` 确实是
-  Win32 的真值），文档与消费者各自映射。`baw-mvp` 仓的 `api.ts` 里维护 `NATIVE_EDGE`，
-  并把「传 10 会被拒」写成一条自检判据（`传 HT 值 10 → rc=-1`），反过来钉住这件事。
+- **已修复（0.6.0，`源码核实`）**：在 `Shell.beginResize()` 里查表转换，
+  原生 DLL 不需要重编。映射表 `RESIZE_INDEX` 落在 `src/shell/types.ts` 并导出，
+  `resizeIndex(edge)` 对不认识的值返回 -1（交给原生 `edge < 0` 当场拒掉，
+  与「窗口已销毁」同一个外部表现）。
 
-- **待办（未做）**：给 `shell_begin_resize` 接受 `HT*` 值，或在 `Shell.beginResize`
-  里做一次映射，让两套编号合一。任一种都是**行为改变**，需要按语义化版本对待。
+    三条新判据把这次误判钉死（`tests/types.test.ts`）：
+
+    | 判据 | 防的是 |
+    | --- | --- |
+    | `RESIZE_INDEX` 8 项逐项对齐 `codes[]` 顺序 | 表本身抄错 |
+    | 下标恰是 `0..7` 的一个排列 | 漏项 / 重号 |
+    | `RESIZE_INDEX[BOTTOM] !== BOTTOM - 10` 等三条 | 有人把它「简化」成减常数 |
+
+    最后一条是这次事故的关键：**减 10 在前三项都对**（LEFT/RIGHT/TOP 正好 0/1/2），
+    第四项起全错。一条只验前三项的断言会给出假绿。
+
+- **为什么当初没选「改原生」**：`shell_begin_resize` 收 HT* 值也能做，但要
+  `bun run build:native` 重编 DLL、`dist/libshell.dll` 要一起提交、消费者得升版本，
+  而原生侧的错误信息（`edge > 7` 拒掉）与参数校验本来就在同一处。TS 层查表把
+  「协议的两套编号」收敛在唯一一个映射表上，改动面最小、可逆。
 
 - **证据**：`源码核实`（`native/shell.cc` 的 `cmd_kind::resize` 与
   `shell_begin_resize`）+ `实测结果`（mvp 自检 `beginResize 拒越界` 稳定复现 `rc=-1`；
@@ -1379,9 +1393,20 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
   `target` 是 `browser`，`bun:ffi` 是 Bun 内置模块，浏览器里不存在——
   模块解析阶段就炸，而 HTML 是静态的，页面照样渲染。
 
-- **判据**：页面只能用**不碰原生**的子路径（`./ipc` 是纯 `Channel` 抽象、
-  `./state` 只碰文件与事件泵）。常量要么在应用侧抄一份并注明出处，
-  要么把常量挪到一个零依赖的 `.ts`（当前没有这样一个入口）。
+- **判据**：页面只能用**不碰原生**的子路径。当前可用的有三个：
+  `./ipc`（纯 `Channel` 抽象）、`./state`（只碰文件与事件泵）、
+  `./types`（**0.6.0 新增**：零 import 的纯常量面）。
+
+- **`./types` 是为本条开的出口**：`BROWSER_UI_*` / `FLAG_*` / `ZOOM_LADDER` /
+  `RESIZE_EDGE` 这四类常量过去只能由消费者手抄，抄漏抄错都没有门禁能发现
+  （`baw-mvp` 的 `UI_BITS` 抄 5 条、`ZOOM_LADDER` 抄 14 档、`NATIVE_EDGE` 抄 8 条）。
+  现在页面里写 `import { BROWSER_UI_ALL } from "bun-app-window/types"` 即可。
+
+- **这个出口有个唯一前提，并由判据守住**：`src/shell/types.ts` 必须保持**零 import**。
+  一旦有人往里加一句 `import`，子路径就不再浏览器安全，而症状会是一个
+  隔了好几层的 `Could not resolve "bun:ffi"`。`tests/types-purity.test.ts` 用
+  静态断言 + 剥注释的正则钉住它，并附带一条「拿带 import 的样本自检」的反向验证
+  （判据失效的最常见方式是它恒真）。
 
 - **证据**：`源码核实`（`src/shell/native.ts` 的 `bun:ffi` 导入）+ `逻辑推断`
   （与 pitfalls ⑦ 同一条链路：脚本没跑起来，页面看起来正常）。

@@ -6,9 +6,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**The last two PowerShell scripts are deleted rather than migrated, and the gate's `.ps1` stage went with them. The public API is unchanged.**
+_(nothing yet)_
+
+## [0.6.0] - 2026-10-21
+
+**`beginResize` now takes `RESIZE_EDGE` values (10–17) instead of raw native indices, and five sources of consumer boilerplate are gone. The first is a behaviour change; the rest are additive.**
+
+### Added
+
+- **`bun-app-window/types` — a zero-dependency subpath, safe to bundle for the browser.** `src/shell/types.ts` was already import-free, but there was no way to reach it: the main entry pulls in `./native`, which imports `bun:ffi`, and a browser bundle cannot resolve that (`pitfalls` 5.14). So consumers hand-copied constants — `BROWSER_UI_*` (5 bits), `ZOOM_LADDER` (14 steps), the 8 edge indices — with no gate able to notice when a copy drifted from the source.
+
+    The subpath's entire value rests on one invariant: **`types.ts` must stay import-free**. Adding a single `import` silently makes it browser-unsafe, and the symptom is a `Could not resolve "bun:ffi"` several layers away from the cause. `tests/types-purity.test.ts` pins it with a static assertion (comments stripped first — the file's own prose mentions `import` while explaining why it cannot be used), plus a self-check that the predicate can actually fail.
+
+- **`ZOOM_LADDER` / `ZOOM_MIN` / `ZOOM_MAX`.** The ladder previously existed only as `kZoomLadder[]` in `native/shell.cc`. `apply_zoom` clamps to the ends without snapping to intermediate steps, so this table is for UIs that want to walk it — which meant every UI kept its own copy of fourteen numbers.
+
+- **`RESIZE_INDEX` and `resizeIndex(edge)`.** The HT* → native-index map, needed by anything calling `shell.symbols.shell_begin_resize()` directly. Exported because hand-writing it is guaranteed to be wrong: it is not `value - 10` (see Fixed).
+
+- **`NativeLibInfo.version`.** `resolve.ts` reads it from the packaged `package.json`. Consumers used to need `import libPkg from "bun-app-window/package.json"` just to display which version they were talking to.
+
+- **`ackOf(shell, rc)`** on the main entry. Turns a bare `rc` into `{ rc, err }`, and centralises the rule that `lastError()` is only read on failure — the error buffer is not cleared by a successful call, so reading it after one returns the previous fault and displays as a phantom.
+
+- **`App.debug`** — equivalent to `debugOf(app.shell)`, saving a call and a subpath import. The stability promise is unchanged: diagnostics may change at any time and production code should not depend on them.
+
+- **`App.attachPlacement(file, opts?)`** — wires placement persistence to the skeleton's single event pump. Calling `attachPlacementStore(shell, file)` without `{ events }` makes it start a **second** pump, and `shell.pollEvents()` is consumptive: the two pumps each get part of the stream, window position is dropped at random, and neither side reports anything. This was the library's easiest way to fail silently, so the choice was removed rather than documented harder.
+
+### Changed
+
+- **BREAKING: `Shell.beginResize(edge)` takes `RESIZE_EDGE` values (10–17).** Migrating from 0.5.x:
+
+    | You were passing | Before | Now |
+    | --- | --- | --- |
+    | `RESIZE_EDGE.LEFT` (10) and friends | `rc=-1`, nothing moved | works |
+    | raw indices 0–7 | worked | `rc=-1` |
+
+    If you were passing raw indices, replace them with the matching `RESIZE_EDGE` member — `RESIZE_INDEX` is exported if you need to see the mapping.
+
+### Fixed
+
+- **`RESIZE_EDGE` and `shell_begin_resize()` were never the same numbering** (`pitfalls` 5.13). `RESIZE_EDGE` is the Win32 `HT*` constants (10–17); the native side reads `codes[edge]` as an **array index 0–7** over `{HTLEFT, HTRIGHT, HTTOP, HTBOTTOM, HTTOPLEFT, HTTOPRIGHT, HTBOTTOMLEFT, HTBOTTOMRIGHT}`. The mapping is therefore not an offset — `HTTOPLEFT` (13) lands at index 4 while `HTBOTTOM` (15) lands at 3. `beginResize` used to pass its argument straight through, so following the documentation produced `rc=-1` and a window that did not resize, while the gate stayed green.
+
+    Fixed in TypeScript, so **the DLL does not need rebuilding**. Three assertions now hold the mapping down, the important one being that it is *not* `value - 10`: subtracting ten happens to be correct for the first three entries (LEFT/RIGHT/TOP → 0/1/2) and wrong from the fourth on, which is exactly how a partial assertion would have given false confidence.
 
 ### Removed
+
+**The last two PowerShell scripts are deleted rather than migrated, and the gate's `.ps1` stage went with them.**
 
 - **`scripts/test-sign.ps1` and `scripts/verify-sign-crypto.ps1` are gone — 195 lines that will not be replaced.** The standing decision (`ADR 0014`) was "these two stay PowerShell forever". Both premises failed in the same direction, so the third outcome applies: the capability itself is no longer wanted.
 
@@ -485,7 +526,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.4.0...v0.4.1
