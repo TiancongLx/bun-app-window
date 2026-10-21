@@ -115,13 +115,11 @@ guard("§3 目录结构：磁盘上的脚本必须被声明", () => {
      * `native/model-image.ts` 就漏在目录树外整整一轮，而这段时间门禁一直是绿的。
      * 目录树是 agent 的第一份地图，漏登的文件等于不存在。
      */
-    test("native/ 与 tools/ 下的每个 .ts 都在目录树里登记过", () => {
+    test("native/ 下的每个 .ts 都在目录树里登记过", () => {
         const declared = new Set(directoryTreeEntries().map((e) => e.name));
-        const onDisk = ["native", "tools"].flatMap((dir) =>
-            readdirSync(join(ROOT, dir))
-                .filter((n) => n.endsWith(".ts"))
-                .sort(),
-        );
+        const onDisk = readdirSync(join(ROOT, "native"))
+            .filter((n) => n.endsWith(".ts"))
+            .sort();
         // 防止空转：一个都没读到就等于没检查
         expect(onDisk.length).toBeGreaterThan(5);
         expect(onDisk.filter((n) => !declared.has(n))).toEqual([]);
@@ -259,6 +257,7 @@ guard("文档里的脚本路径引用", () => {
     const DELETED = new Map<string, string>([
         ["scripts/capture-window.ps1", "2026-10-20 删除（两个替代品制造歧义）"],
         ["scripts/capture.ps1", "同上（CopyFromScreen，受前台遮挡影响）"],
+        ["tools/capture-window.ts", "截图层迁至 agent-eyes（2026-10-21）；pitfalls 里的实测数字仍引自它"],
         ["native/build-pack.ps1", "迁为 native/build-pack.ts（ADR 0014）"],
         ["native/build.ps1", "迁为 native/build.ts"],
         ["native/fetch.ps1", "迁为 native/fetch.ts"],
