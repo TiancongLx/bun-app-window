@@ -176,6 +176,37 @@ export const ZOOM_LADDER = [
 export const ZOOM_MIN = ZOOM_LADDER[0];
 export const ZOOM_MAX = ZOOM_LADDER[ZOOM_LADDER.length - 1];
 
+/**
+ * 自绘标题栏的几何规格（**逻辑像素**，96 DPI 基准）。
+ *
+ * 这两个值有**三处**副本，`tests/types.test.ts` 用判据把它们钉在一起：
+ *
+ * | 处 | 用途 | 为什么不能省 |
+ * | --- | --- | --- |
+ * | 这里 | 页面侧布局与命中测试的共同事实源 | 页面要按它画，原生要按它算 |
+ * | `src/ui/titlebar.ts` 的 CSS | 视觉尺寸 | 页面真正渲染的是 CSS |
+ * | `native/shell.cc` 的 `kCaptionBarHeight` / `kCaptionButtonWidth` | `WM_NCHITTEST` 命中区 | C++ 无法 import TS |
+ *
+ * 为什么必须一致：`HTMAXBUTTON` 是「悬停弹 Snap Layouts」的**唯一**触发条件
+ * （微软文档明写 Win32 应用要返回它）。命中区与视觉按钮错位，表现为
+ * 「悬停位置偏了才弹」或「悬停不弹」——两种都极难从现象反推回常量。
+ *
+ * 规格取自 Win 11：标题栏 32 px、caption button 46×32。
+ */
+export const CAPTION_BAR_HEIGHT = 32;
+export const CAPTION_BUTTON_WIDTH = 46;
+
+/**
+ * 从右往左的三个 caption button，与 Win 11 的顺序一致。
+ *
+ * 顺序不是审美选择：`close` 贴右上角，`maximize` 在它左边，`minimize` 再左。
+ * `WM_NCHITTEST` 按这个顺序算矩形，页面 CSS 也按这个顺序排 DOM。
+ */
+export const CAPTION_BUTTONS = ["close", "maximize", "minimize"] as const;
+
+/** `CAPTION_BUTTONS` 的成员名 */
+export type CaptionButton = (typeof CAPTION_BUTTONS)[number];
+
 /** window state 位掩码（与原生 shell_get_state 一致） */
 export const STATE_MAXIMIZED = 1;
 export const STATE_MINIMIZED = 2;

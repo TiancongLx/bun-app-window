@@ -118,6 +118,43 @@ int g_min_h = 200;
 int g_start_w = 1200;
 int g_start_h = 800;
 
+// ---- 自绘标题栏的 caption button 命中区（逻辑像素，96 DPI 基准）----
+//
+// 这三个值有**三处**副本，缺一不可：
+//
+//   src/shell/types.ts        CAPTION_BAR_HEIGHT / CAPTION_BUTTON_WIDTH / CAPTION_BUTTONS
+//   src/ui/titlebar.ts 的 CSS  --ws-tb-height: 32px / .ws__tb-btn { width: 46px }
+//   这里                        命中区（C++ 无法 import TS）
+//
+// `tests/types.test.ts` 用判据把三处钉在一起，包括「顺序」。
+//
+// ## 为什么必须精确一致
+//
+// `HTMAXBUTTON` 是「鼠标悬停在最大化按钮上时弹 Snap Layouts」的**唯一**触发条件：
+// 微软文档（Support snap layouts for desktop apps on Windows 11）明写 Win32 应用
+// 要「respond to WM_NCHITTEST with a return value of HTMAXBUTTON for the
+// maximize/restore button」。这里算错几个像素，表现为「悬停位置偏了才弹」或
+// 「根本不弹」——两种都极难从现象反推回常量，所以宁可用断言锁死。
+//
+// ## 为什么是「焊死」而不是让页面告诉壳层
+//
+// Win 11 的 caption button 本来就是固定规格（46×32），焊接不会错；而让页面
+// 运行时上报命中区会引入一条新的 IPC 时序（页面还没挂标题栏的那一帧，
+// 命中区是空的，此时悬停最大化按钮什么都不发生）。规格固定时，静态常量更可靠。
+const int kCaptionBarHeight = 32;
+const int kCaptionButtonWidth = 46;
+// 顺序必须与 types.ts 的 CAPTION_BUTTONS 一致：从右往左 close → maximize → minimize
+// （判定见 caption_button_at，只在这里用一次）
+
+// 全屏状态：进入前保存样式与矩形，退出时原样还原。
+//
+// 声明放在这里（而不是原先跟着 toggle_fullscreen 走）：hit_test_client 要用它
+// 判断「全屏时标题栏不可见，caption button 不参与命中」，而 hit_test_client 在
+// 文件里出现得更早。C++ 的名字查找是按声明顺序，放晚了就是编译错误。
+bool g_fullscreen = false;
+LONG_PTR g_saved_style = 0;
+RECT g_saved_rect{};
+
 // 两把锁，锁序固定为 life → queue，避免任何自锁路径：
 //   g_life_mu  — 保护 g_webview 的生死：enqueue 的「检查后投递」与 teardown 的「销毁后清空」互斥
 //   g_queue_mu — 只保护命令队列本身
@@ -441,21 +478,79 @@ int frame_border_y() {
          GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
 }
 
-// 返回 HT* 代码；HTCLIENT 表示不落在缩放边框上。坐标为顶层窗口客户区坐标（设备像素）。
+// 自绘 caption button 的命中判定。
 //
-// 三个前置条件里 **`IsZoomed` 是刻意的**，不是漏判：Windows 里最大化的窗口本来
-// 就不能拖边缘缩放（资源管理器自己也一样），必须先还原。所以最大化时一律
-// 返回 HTCLIENT，让点击直接落到页面。
+// 返回 HT* 码（HTCLOSE / HTMAXBUTTON / HTMINBUTTON）；不在按钮上返回 -1。
+// **不用 HTNOWHERE 当哨兵**：那是合法的 HT 值（0），拿它做「没命中」会让
+// 调用点分不清「不在按钮上」与「命中了位置 0」。
+//
+// ## 为什么这个判定必须先于缩放边框
+//
+// 缩放边框判定在 `IsZoomed` 时整体跳过（最大化的窗口本来就不能拖边缘）。
+// 而 caption button 在**最大化时同样要能被命中**——用户靠它还原。
+// 如果沿用原来的 early-return，最大化后悬停/点击最大化按钮全部失效。
+//
+// ## 坐标
+//
+// 入参是**客户区坐标（设备像素）**。逻辑像素常量在这里按 `current_dpi()` 换算，
+// 所以 200% 缩放下 46×32 逻辑像素的按钮是 92×64 物理像素。
+int caption_button_at(const RECT &client, POINT pt) {
+  const UINT dpi = current_dpi();
+  const int bw = MulDiv(kCaptionButtonWidth, static_cast<int>(dpi), 96);
+  const int bh = MulDiv(kCaptionBarHeight, static_cast<int>(dpi), 96);
+  if (bw <= 0 || bh <= 0) {
+    return -1;
+  }
+
+  // 标题栏带：只在顶部 bh 高之内
+  if (pt.y < client.top || pt.y >= client.top + bh) {
+    return -1;
+  }
+  if (pt.x < client.left || pt.x >= client.right) {
+    return -1;
+  }
+
+  // 从右边缘往左数：0 = close，1 = maximize，2 = minimize。
+  // 顺序与 types.ts 的 CAPTION_BUTTONS 一致。
+  const int from_right = client.right - pt.x;
+  const int idx = from_right / bw;
+  if (idx == 0) return HTCLOSE;
+  if (idx == 1) return HTMAXBUTTON;
+  if (idx == 2) return HTMINBUTTON;
+  return -1;
+}
+
+// 返回 HT* 代码；HTCLIENT 表示不落在缩放边框或 caption button 上。
+// 坐标为顶层窗口客户区坐标（设备像素）。
+//
+// 前置条件里 **`IsZoomed` 是刻意的**，不是漏判：Windows 里最大化的窗口本来
+// 就不能拖边缘缩放（资源管理器自己也一样），必须先还原。所以最大化时跳过缩放
+// 边框判定，让点击直接落到页面。
 //
 // 这一条原本没有注释，2026-10-21 排查时被误判成「缩放边框在最大化下失效」——
 // 一处有意的判断如果没写理由，在别人（和下一个 agent）眼里就长得像 bug。
 // 判断本身是对的，缺的是理由。
+//
+// **但 caption button 不在「跳过」之列**：它先判，且不受 resizable / zoomed 影响。
 LRESULT hit_test_client(HWND hwnd, POINT pt) {
-  if (!g_frameless || !g_resizable || IsZoomed(hwnd)) {
+  if (!g_frameless) {
     return HTCLIENT;
   }
   RECT rc{};
   GetClientRect(hwnd, &rc);
+
+  // 1. caption button（最优先）。全屏时标题栏不可见，不参与命中。
+  if (!g_fullscreen) {
+    const int cap = caption_button_at(rc, pt);
+    if (cap != -1) {
+      return static_cast<LRESULT>(cap);
+    }
+  }
+
+  // 2. 缩放边框。最大化 / 不可缩放时不做。
+  if (!g_resizable || IsZoomed(hwnd)) {
+    return HTCLIENT;
+  }
 
   const int bx = frame_border_x();
   const int by = frame_border_y();
@@ -950,10 +1045,9 @@ const double kZoomLadder[] = {0.25, 0.33, 0.5, 0.67, 0.8, 0.9, 1.0,
 const int kZoomCount = static_cast<int>(sizeof(kZoomLadder) / sizeof(kZoomLadder[0]));
 double g_zoom = 1.0;
 
-// 全屏状态：进入前保存样式与矩形，退出时原样还原。
-bool g_fullscreen = false;
-LONG_PTR g_saved_style = 0;
-RECT g_saved_rect{};
+// 注：`g_fullscreen` / `g_saved_style` / `g_saved_rect` 的声明已上移到
+// caption button 常量旁边——`hit_test_client` 需要 g_fullscreen，而它在这里
+// 出现得更早。C++ 名字查找按声明顺序，重复定义会直接编译失败。
 
 // 取 CoreWebView2。调用方负责 Release()。失败返回 nullptr（老 runtime 或缺 COM 上下文）。
 ICoreWebView2 *core_webview() {
@@ -2121,6 +2215,35 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     const LRESULT code = hit_test(hwnd, pt);
     if (code != HTCLIENT) {
       return code;
+    }
+    break;
+  }
+
+  // 自绘 caption button 的**点击**必须在这里执行。
+  //
+  // 一旦 `WM_NCHITTEST` 返回 `HTMAXBUTTON` / `HTMINBUTTON` / `HTCLOSE`，系统就把
+  // 那个点当成**非客户区**：按下时发 `WM_NCLBUTTONDOWN` 而**不是** `WM_LBUTTONDOWN`
+  // ——页面因此收不到任何 pointer/click 事件。
+  //
+  // 这正是「加了 HTMAXBUTTON 就必须同时加这条」的原因：只改 hit_test 的话，
+  // 按钮会变成一个吃掉点击的黑洞，表现是「点最大化没反应」。
+  //
+  // 只处理这三个码，其余（`HTCAPTION` 拖动、八个边框码缩放）继续 `break` 交给
+  // `DefWindowProc` —— 那是系统自己的模态循环，不能抢。
+  case WM_NCLBUTTONDOWN: {
+    const WPARAM hit = wp;
+    if (hit == HTCLOSE) {
+      DestroyWindow(hwnd);
+      return 0;
+    }
+    if (hit == HTMINBUTTON) {
+      ShowWindow(hwnd, SW_MINIMIZE);
+      return 0;
+    }
+    if (hit == HTMAXBUTTON) {
+      // 与 `shell_toggle_maximize()` 同一条语义：最大化时还原，否则最大化。
+      ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+      return 0;
     }
     break;
   }
