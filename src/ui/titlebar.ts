@@ -45,6 +45,13 @@ export type TitleBarDocument = {
     body?: TitleBarElement;
     getElementById(id: string): TitleBarElement | null;
     querySelector(selector: string): TitleBarElement | null;
+    /**
+     * 可选：字体可用性探测，通常是 `document.fonts`。
+     *
+     * 缺省时 {@link detectIconSet} 按 `fluent` 处理（Win 10 / 11 都自带其中一个
+     * icon 字体）。传了就按探测结果选字形，两个字体都不在时退回 `unicode`。
+     */
+    fonts?: TitleBarFonts;
 };
 
 type EventLike = {
@@ -56,16 +63,58 @@ type EventLike = {
 export type TitleBarIconSet = "unicode" | "fluent";
 
 /**
+ * Win 11 caption 字形所用的字体栈。
+ *
+ * `Segoe Fluent Icons` 是 Win 11 的，`Segoe MDL2 Assets` 是 Win 10 的，
+ * 而 `E921` / `E922` / `E923` / `E8BB` 这几个人码位在两者里**是同一个位置**——
+ * 所以同一份码位在两代系统上都能正确显示。这一点是照着
+ * `egoist/mygo` 的 `internal/windows/titlebar.go` 核实的：它同时支持 Win 10 / 11，
+ * 用的就是这一份码位表，只换字体名。
+ */
+export const TITLEBAR_ICON_FONT_STACK = '"Segoe Fluent Icons", "Segoe MDL2 Assets"';
+
+/**
  * 按钮字形。
  *
- * `unicode` 是几何符号，任何字体都有，零依赖；
- * `fluent` 是 Segoe Fluent Icons 的私有区码位，观感更接近 Win 11 原生，
- * 但该字体缺失时会显示成豆腐块——所以不是默认值。
+ * `unicode` 是几何符号，任何字体都有，零依赖，但**撑不满 em 框**——
+ * 实测在 10px 字号下 `\u25A1` 的墨迹只有 5×4.5 逻辑 px，
+ * 而 Win 11 的 caption 字形是 10×10。这是「字形看起来偏小」的根因，不是字号问题。
+ *
+ * `fluent` 是 Segoe Fluent Icons / Segoe MDL2 Assets 的私有区码位，字形填满 em 框，
+ * 观感与 Win 11 原生一致。真正的风险只剩「两个字体都没有」的环境
+ * （非 Windows 宿主、极旧系统），那时 PUA 码位会渲染成豆腐块——
+ * 所以由 {@link detectIconSet} 探测，探测不到才退回 `unicode`。
  */
 export const TITLEBAR_GLYPHS = {
     unicode: { minimize: "\u2500", maximize: "\u25A1", restore: "\u2750", close: "\u2715" },
     fluent: { minimize: "\uE921", maximize: "\uE922", restore: "\uE923", close: "\uE8BB" },
 } as const;
+
+/**
+ * 只问一件事的字体探测接口（`document.fonts` 的结构子集）。
+ *
+ * 单独抽出来而不是直接依赖 `FontFaceSet`：组件刻意不依赖 DOM 类型声明
+ * （`tsconfig` 的 `lib` 只有 ESNext），这一层最小接口既够用又能被测试注入。
+ */
+export type TitleBarFonts = {
+    check(font: string): boolean;
+};
+
+/**
+ * 选字形集：优先 `fluent`，两个 icon 字体都不在时才退化到 `unicode`。
+ *
+ * 没有探测能力（`fonts` 缺省）时按 `fluent` 处理——目标平台是 Windows，
+ * Win 10 与 Win 11 都自带其中之一。冒险的只有「非 Windows 宿主 + 不传 fonts」，
+ * 那本来也不是这个组件的目标场景。
+ */
+export function detectIconSet(fonts?: TitleBarFonts): TitleBarIconSet {
+    if (!fonts) {
+        return "fluent";
+    }
+    const hasFluent = fonts.check(`10px "Segoe Fluent Icons"`);
+    const hasMdl2 = fonts.check(`10px "Segoe MDL2 Assets"`);
+    return hasFluent || hasMdl2 ? "fluent" : "unicode";
+}
 
 /**
  * 取某个按钮当前该显示的字形。
@@ -111,10 +160,22 @@ export function titleBarCss(): string {
     --ws-tb-bg: #202020;
     --ws-tb-fg: #ffffff;
     --ws-tb-dim: rgba(255, 255, 255, 0.786);
-    --ws-tb-hover: rgba(255, 255, 255, 0.0605);
-    --ws-tb-active: rgba(255, 255, 255, 0.0419);
+    /* ---- 五个状态 ----------------------------------------------------------
+       Win 11 的 caption 背板是「前景色 + 一份 alpha」，不是固定灰；
+       数值取自 Windows 自己的实现，与 egoist/mygo 的
+       internal/windows/titlebar.go（colors()）一致：hover 0x1A、pressed 0x33。
+       旧值 0.0605 / 0.0419 偏淡到几乎看不见悬停。
+       失焦只降字形（0x72），禁用再降一档（0x5C）；hot / pressed 优先于失焦。 */
+    --ws-tb-hover: rgba(255, 255, 255, 0.102);
+    --ws-tb-active: rgba(255, 255, 255, 0.200);
     --ws-tb-close-hover: #c42b1c;
     --ws-tb-close-active: #b02a1c;
+    --ws-tb-inactive: rgba(255, 255, 255, 0.447);
+    --ws-tb-disabled: rgba(255, 255, 255, 0.361);
+    /* 字形当前色。做成自定义属性而不是直接写 color，
+       这样「失焦变淡」与「hover 恢复满强度」可以靠继承关系表达，
+       不必给 hover 规则堆特异性去压过 [data-active="false"]。 */
+    --ws-tb-btn-fg: var(--ws-tb-fg);
     --ws-tb-border: rgba(255, 255, 255, 0.08);
 
     display: flex;
@@ -144,9 +205,16 @@ export function titleBarCss(): string {
     --ws-tb-bg: #f3f3f3;
     --ws-tb-fg: #000000;
     --ws-tb-dim: rgba(0, 0, 0, 0.6063);
-    --ws-tb-hover: rgba(0, 0, 0, 0.0373);
-    --ws-tb-active: rgba(0, 0, 0, 0.0241);
+    --ws-tb-hover: rgba(0, 0, 0, 0.102);
+    --ws-tb-active: rgba(0, 0, 0, 0.200);
+    --ws-tb-inactive: rgba(0, 0, 0, 0.447);
+    --ws-tb-disabled: rgba(0, 0, 0, 0.361);
     --ws-tb-border: rgba(0, 0, 0, 0.0578);
+}
+
+/* 窗口失焦：只降字形，背板照旧（hover / pressed 仍然优先，见下） */
+.ws-titlebar[data-active="false"] {
+    --ws-tb-btn-fg: var(--ws-tb-inactive);
 }
 
 .ws-titlebar__lead {
@@ -190,8 +258,11 @@ export function titleBarCss(): string {
     border: 0;
     padding: 0;
     background: transparent;
-    color: var(--ws-tb-dim);
+    color: var(--ws-tb-btn-fg);
     font: inherit;
+    /* Win 11 的 caption 字形是 10 DIP。在这个字号下，
+       Fluent 图标字体把 10×10 逻辑 px 填满（实测墨迹填满 em 框），
+       而几何符号的墨迹只占 5×4.5——所以换字体才是「字形偏小」的解。 */
     font-size: 10px;
     line-height: 1;
     display: grid;
@@ -201,7 +272,7 @@ export function titleBarCss(): string {
 }
 
 .ws-titlebar__btn:hover { background: var(--ws-tb-hover); color: var(--ws-tb-fg); }
-.ws-titlebar__btn:active { background: var(--ws-tb-active); }
+.ws-titlebar__btn:active { background: var(--ws-tb-active); color: var(--ws-tb-fg); }
 
 .ws-titlebar__btn--close:hover { background: var(--ws-tb-close-hover); color: #ffffff; }
 .ws-titlebar__btn--close:active { background: var(--ws-tb-close-active); color: #ffffff; }
@@ -211,8 +282,22 @@ export function titleBarCss(): string {
     outline-offset: -2px;
 }
 
+/* 禁用：字形再淡一档，且不响应悬停 / 按下。Win 11 用 aria-disabled 语义即可，
+   不必另造一个属性名。 */
+.ws-titlebar__btn[aria-disabled="true"] {
+    color: var(--ws-tb-disabled);
+    pointer-events: none;
+}
+.ws-titlebar__btn[aria-disabled="true"]:hover,
+.ws-titlebar__btn[aria-disabled="true"]:active {
+    background: transparent;
+    color: var(--ws-tb-disabled);
+}
+
 .ws-titlebar[data-icons="fluent"] .ws-titlebar__btn {
-    font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+    font-family: ${TITLEBAR_ICON_FONT_STACK}, sans-serif;
+    /* 图标字体的字形是等宽方框，不要被消费方的 letter-spacing 拉开 */
+    letter-spacing: 0;
 }
 `.trim();
 }
@@ -226,7 +311,9 @@ export type TitleBarOptions = {
     bridge: TitleBarBridge;
     /** 初始是否已最大化 */
     maximized?: boolean;
-    /** 按钮字形，默认 `unicode` */
+    /** 窗口初始是否处于激活状态（决定字形是否变淡）。缺省 `true` */
+    active?: boolean;
+    /** 按钮字形，缺省由 {@link detectIconSet} 按字体可用性决定（通常 `fluent`） */
     icons?: TitleBarIconSet;
     /** 主题，缺省跟随 `prefers-color-scheme` */
     theme?: "light" | "dark";
@@ -242,6 +329,23 @@ export type TitleBarHandle = {
     setMaximized(maximized: boolean): void;
     /** 组件最后一次被设置的最大化状态。用于核对与宿主推送是否同步 */
     isMaximized(): boolean;
+    /**
+     * 窗口是否处于激活（聚焦）状态。失焦时字形降到 45% 不透明度，
+     * 这是 Win 11 与「永远满强度」的一处可见差别。
+     *
+     * 接 `windowState` 推送里的 `focused`：用户点别的窗口时它会变，
+     * 页面自己看不到这件事。
+     */
+    setActive(active: boolean): void;
+    /** 组件最后一次被设置的激活状态 */
+    isActive(): boolean;
+    /**
+     * 按 Win 11 的规则禁用某个按钮。
+     *
+     * 用途是「这个窗口不能最大化」这类情形——禁用后字形变淡、且不再派发动作。
+     * 用 `aria-disabled` 而不是另造属性：它同时是给辅助技术的语义。
+     */
+    setEnabled(action: "minimize" | "maximize" | "close", enabled: boolean): void;
     setTheme(theme: "light" | "dark"): void;
     /** 移除 DOM 与事件监听。样式表保留（可能是别的实例注入的） */
     destroy(): void;
@@ -289,7 +393,9 @@ function inControls(target: unknown): boolean {
  */
 export function mountTitleBar(opts: TitleBarOptions): TitleBarHandle {
     const doc = resolveDocument(opts.document);
-    const icons: TitleBarIconSet = opts.icons ?? "unicode";
+    // 缺省按字体探测：Win 10 / 11 都有 icon 字体，看到的就是原生字形；
+    // 两个都没有才退回几何符号（`unicode`）。
+    const icons: TitleBarIconSet = opts.icons ?? detectIconSet(doc.fonts);
 
     // 样式只注入一次。多个标题栏实例（多窗口页面）共用同一份
     if (!doc.getElementById(STYLE_ID)) {
@@ -302,6 +408,8 @@ export function mountTitleBar(opts: TitleBarOptions): TitleBarHandle {
     const root = doc.createElement("header");
     root.className = "ws-titlebar";
     root.setAttribute("data-icons", icons);
+    // 缺省按激活处理：窗口刚创建时就是前台，写成 false 会让标题栏一开始是灰的。
+    root.setAttribute("data-active", opts.active === false ? "false" : "true");
     if (opts.theme) {
         root.setAttribute("data-theme", opts.theme);
     }
@@ -361,6 +469,24 @@ export function mountTitleBar(opts: TitleBarOptions): TitleBarHandle {
     /** 当前是否最大化。供调用方在本地校验状态是否同步 */
     const isMaximized = (): boolean => maximizedState;
 
+    let activeState = opts.active !== false;
+
+    /** 当前是否处于激活状态 */
+    const isActive = (): boolean => activeState;
+
+    const applyActive = (next: boolean): void => {
+        activeState = next;
+        root.setAttribute("data-active", next ? "true" : "false");
+    };
+
+    const applyEnabled = (action: "minimize" | "maximize" | "close", enabled: boolean): void => {
+        const btn = buttons[action];
+        if (!btn) {
+            return;
+        }
+        btn.setAttribute("aria-disabled", enabled ? "false" : "true");
+    };
+
     const onPointerDown = (ev: EventLike): void => {
         if (ev.button !== undefined && ev.button !== 0) {
             return;
@@ -382,6 +508,11 @@ export function mountTitleBar(opts: TitleBarOptions): TitleBarHandle {
     const onControlsClick = (ev: EventLike): void => {
         const node = ev.target as { closest?: (s: string) => { getAttribute(n: string): string | null } | null } | null;
         const btn = typeof node?.closest === "function" ? node.closest("[data-act]") : null;
+        // 禁用的按钮不派发动作。CSS 已经用 pointer-events: none 拦住鼠标，
+        // 但键盘（Tab 到按钮上按 Enter/Space）仍会走到这里，所以判定必须在这里也做一次。
+        if (btn?.getAttribute("aria-disabled") === "true") {
+            return;
+        }
         const act = btn?.getAttribute("data-act");
         if (act === "minimize") {
             opts.bridge.minimize();
@@ -412,6 +543,9 @@ export function mountTitleBar(opts: TitleBarOptions): TitleBarHandle {
         },
         setMaximized: applyMaximized,
         isMaximized,
+        setActive: applyActive,
+        isActive,
+        setEnabled: applyEnabled,
         setTheme(theme: "light" | "dark"): void {
             root.setAttribute("data-theme", theme);
         },

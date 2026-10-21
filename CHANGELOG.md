@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **The caption buttons now draw Win 11's actual glyphs at Win 11's actual size, and the component has all five states instead of two.** The previous defaults were two independent misses that compounded.
+
+    **The glyphs were wrong for the platform, not just "less pretty".** `TITLEBAR_GLYPHS.unicode` renders `─ □ ❐ ✕` — geometric symbols from whatever text font is loaded. Their ink fills about half the em box: measured on `baw-mvp` at @192dpi, `\u25A1` came out **10×9 physical** and `\u25B1` **16×2**, against Win 11's **20×20** and **20×2** (measured on the Settings app, same machine). The fix is not a bigger `font-size` — `10px` was already correct — it is the font. `TITLEBAR_GLYPHS.fluent` holds `E921` / `E922` / `E923` / `E8BB`, which `Segoe Fluent Icons` (Win 11) and `Segoe MDL2 Assets` (Win 10) draw at **the same code points**, so one table covers both systems.
+
+    `fluent` was previously opt-in because a missing font renders private-use code points as tofu. `detectIconSet()` now checks `document.fonts` for either face and only falls back to `unicode` when neither is present; with no `FontFaceSource` to ask, it assumes `fluent`, since the component targets Windows. The result on `baw-mvp`: **20×20 / 20×20 / 20×2 physical**, identical to the system's own buttons, with horizontal centring at 0.0 px.
+
+    **Two states became five.** Hover and pressed backplates move from `0.0605` / `0.0419` to **`0.102` / `0.200`** of the foreground colour — the old values were faint enough that hovering looked like nothing happened. `setActive()` dims the glyph to `0.447` when the window loses focus, and `setEnabled(action, enabled)` drops it to `0.361` and stops dispatching. All four numbers, and the close button's red, come from Windows' own implementation as cross-checked against `egoist/mygo`'s `internal/windows/titlebar.go` (`colors()`).
+
+    **Focus dimming is expressed as a custom property, not a specificity fight.** `.ws-titlebar__btn` sets `color: var(--ws-tb-btn-fg)`, and `[data-active="false"]` on the root re-points that variable. Writing `color: var(--ws-tb-inactive)` straight onto the button would have lost to the `:hover` rule below it, and the fix for that would have been `:not()` chains or `!important` — the kind of thing that works until the next state arrives.
+
+    `setEnabled` guards in **two** places on purpose: CSS `pointer-events: none` stops the mouse, but a keyboard user tabbing to the button and pressing Enter still reaches the click handler. The `aria-disabled` attribute is the single source both read.
+
+    Verification: 38 assertions in `tests/titlebar.test.ts` (up from 25), including `detectIconSet` in all four combinations, the five-state CSS values asserted **inside their rule blocks**, and the disabled button not firing. Reverse-verified by restoring `--ws-tb-hover: 0.0605` — exactly one assertion went red, the rest stayed green.
+
+    **Still manual:** whether the focus-dimmed glyph actually renders dimmer on screen. The check needs the window to lose foreground, and in this session `SetForegroundWindow` never took it away from the host chat window — both readings came back at full brightness, i.e. the window never left the active state, so the probe measured nothing. The logic is covered by unit tests and the CSS is a plain attribute selector, but the end-to-end path (native `focused` bit → `windowState` push → `setActive` → repaint) has not been observed.
+
 - **Caption buttons on a frameless window now answer `HTMAXBUTTON`, so Windows 11 Snap Layouts works.** The only documented trigger is `WM_NCHITTEST` returning `HTMAXBUTTON` for the maximize/restore button (*Support snap layouts for desktop apps on Windows 11*). Previously `hit_test_client` returned only the eight resize codes and `HTCLIENT`, so hovering maximize never opened the layout picker — the last piece of "looks like a Win 11 app" that CSS cannot buy.
 
     Three constants became a single source of truth in `types.ts` — `CAPTION_BAR_HEIGHT` (32), `CAPTION_BUTTON_WIDTH` (46), `CAPTION_BUTTONS` (`close` / `maximize` / `minimize`, right to left). Two copies follow it: `kCaptionBarHeight` / `kCaptionButtonWidth` plus the `caption_button_at()` order in `native/shell.cc` (C++ cannot import TS), and the `32px` / `46px` in `titlebar.css`.
