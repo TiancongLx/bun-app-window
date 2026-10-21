@@ -29,7 +29,9 @@ import {
   STATE_FOCUSED,
   STATE_MAXIMIZED,
   STATE_MINIMIZED,
+  resizeIndex,
   type NativeLibInfo,
+  type ResizeEdge,
   type ShellOptions,
   type StartResult,
   type WindowState,
@@ -48,6 +50,35 @@ export type {
   WindowEvent,
 } from "./events";
 
+/**
+ * 原生调用的回执。
+ *
+ * 刻意不是裸 `number`：`rc` 只回答「有没有投递出去」，`err` 才回答「为什么没投递」。
+ * 把两者分开，调用方才能区分两种完全不同的故障：
+ *
+ * - `rc === 0` 但状态没变 → 时序 / 前置条件问题（原生侧是异步投递到 UI 线程的）
+ * - `rc < 0` 且 `err` 非空 → 调用方用错 API（窗口已销毁、参数越界）
+ *
+ * **`rc === 0` 不等于效果发生了。** 要判效果必须读回状态
+ * （`state()` / `getZoom()` / `getBounds()`）。
+ */
+export type NativeAck = {
+  /** `0` = 已投递给 UI 线程；负数 = 当场被拒（窗口已销毁、参数越界等） */
+  rc: number;
+  /** 失败原因；成功时恒为空串 */
+  err: string;
+};
+
+/**
+ * 把裸 `rc` 包成 `NativeAck`。
+ *
+ * **只在失败时读 `lastError()`**：壳层的错误缓冲区不会被成功的调用清空，
+ * 成功时读它只会拿到上一次的残留——显示出来就是一个假故障。
+ */
+export function ackOf(shell: Shell, rc: number): NativeAck {
+  return { rc, err: rc === 0 ? "" : shell.lastError() };
+}
+
 export type Shell = {
   /** 创建窗口并加载 URL。返回码 0 表示成功；失败原因见 lastError() */
   start(): StartResult;
@@ -59,8 +90,20 @@ export type Shell = {
   close(): number;
   /** 由页面 pointerdown 触发原生拖拽；保留贴边分屏 */
   drag(): number;
-  /** 由页面 pointermove 触发边框缩放；edge 取 RESIZE_EDGE 的值 */
-  beginResize(edge: number): number;
+  /**
+   * 由页面触发的边框缩放（进入 Windows 的模态缩放循环，鼠标被系统接管）。
+   *
+   * **入参是 `RESIZE_EDGE` 的 HT* 值（10–17）**，不是内部数组下标。
+   *
+   * 0.5.x 的实现把入参直传给原生 `shell_begin_resize()`，而原生收的是
+   * `codes[8]` 的**数组下标 0–7**——两者的映射是 `HT*` 常量在 Win32 里的定义顺序，
+   * 既不是恒等也不是「减 10」（`HTTOPLEFT`=13 在下标 4、`HTBOTTOM`=15 在下标 3）。
+   * 于是照着注释传 `RESIZE_EDGE.LEFT`（=10）会被 `edge > 7` 当场拒掉，
+   * `rc=-1`，外部表现是「点了没反应」，而门禁全绿。
+   *
+   * 0.6.0 起由本方法在 TS 层查表转换，原生 DLL 不需要重编。非法值仍然返回 -1。
+   */
+  beginResize(edge: ResizeEdge): number;
   /** 最小尺寸，逻辑像素 */
   setMinSize(width: number, height: number): void;
   /**
@@ -241,7 +284,7 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
     toggleMaximize: () => symbols.shell_toggle_maximize(),
     close: () => symbols.shell_close(),
     drag: () => symbols.shell_drag(),
-    beginResize: (edge) => symbols.shell_begin_resize(edge),
+    beginResize: (edge) => symbols.shell_begin_resize(resizeIndex(edge)),
     setMinSize: (w, h) => symbols.shell_set_min_size(w, h),
     show: () => symbols.shell_show(),
     setAppId: (appId) => symbols.shell_set_app_id(cstr(appId)),

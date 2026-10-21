@@ -27,8 +27,18 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 import type { NativeLibInfo } from "./types";
+import pkg from "../../package.json";
 
 const DLL_PATTERN = /^libshell.*\.dll$/i;
+
+/**
+ * 本包版本号。取自包内 `package.json`——它是唯一事实源，`NativeLibInfo.version`
+ * 只是把它带到运行期，避免消费者为了显示版本再 `import "…/package.json"`。
+ *
+ * 与 `native/build-pack.ts` 的 `--windows-version` 是两处会写进产物的版本号，
+ * 由 `tests/version.test.ts` 守着同源（那一条和这里无关，别混）。
+ */
+const PKG_VERSION: string = pkg.version;
 
 /** 包根目录：src/shell → 上两级。打包态下该值不可用于文件系统访问。 */
 const PKG_ROOT = resolve(import.meta.dir, "..", "..");
@@ -60,6 +70,7 @@ function fromPath(path: string, source: NativeLibInfo["source"]): NativeLibInfo 
   return {
     path,
     source,
+    version: PKG_VERSION,
     sha256: "",
     bytes: statSync(path).size,
     reused: false,
@@ -168,6 +179,7 @@ export async function resolveNativeLib(opts: ResolveOptions = {}): Promise<Nativ
         return {
           path,
           source: "embedded",
+          version: PKG_VERSION,
           sha256,
           bytes: bytes.length,
           reused,

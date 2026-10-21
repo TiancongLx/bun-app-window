@@ -3,6 +3,18 @@
  *
  * 这里的类型是**稳定面**：改动需要按语义化版本对待。
  * 调试自省类能力单独放在 Shell["debug"] 下，不视为稳定契约。
+ *
+ * ## 这个文件必须保持「零 import」
+ *
+ * 它是 `bun-app-window/types` 子路径的全部内容，而开这个子路径的目的是让
+ * **页面侧代码也能 import 这些常量**：主入口 `./index` 从 `./native` 导入
+ * `bun:ffi`，浏览器 bundle 解析不了，所以页面过去只能把位值手抄一遍
+ * （`BROWSER_UI_*` 抄 5 条、缩放阶梯抄 14 档、边框索引抄 8 条），抄漏抄错
+ * 都不会被任何门禁抓到。
+ *
+ * 因此本文件只允许出现 `export const` / `export type` / `export function`
+ * 形式的纯声明，**不得出现任何 `import`**——一旦有了，子路径就不再是浏览器安全的。
+ * `tests/types-purity.test.ts` 用一条静态断言守住这条。
  */
 
 /** 无边框：原生层不画标题栏与边框，由页面自绘 */
@@ -78,7 +90,24 @@ export const BROWSER_UI_AUTOFILL = 16;
 export const BROWSER_UI_ALL =
     BROWSER_UI_MENU | BROWSER_UI_KEYS | BROWSER_UI_STATUSBAR | BROWSER_UI_SWIPE | BROWSER_UI_AUTOFILL;
 
-/** 缩放边框的 8 个命中边，取值与 Win32 HT* 常量一致 */
+/**
+ * 缩放边框的 8 个命中边，取值与 Win32 HT* 常量一致。
+ *
+ * 这是 `Shell.beginResize()` 的**入参取值**。传 `RESIZE_EDGE.LEFT` 即可。
+ *
+ * 历史（0.6.0 修正）：原生 `shell_begin_resize()` 收的是内部数组下标 0–7，
+ * 而本位定义是 HT* 常量 10–17，两者差一个**非线性**映射——
+ *
+ * ```c
+ * static const WPARAM codes[8] = {HTLEFT, HTRIGHT, HTTOP, HTBOTTOM,
+ *                                 HTTOPLEFT, HTTOPRIGHT, HTBOTTOMLEFT, HTBOTTOMRIGHT};
+ * ```
+ *
+ * 注意 `HTTOPLEFT`(13) 在下标 4、`HTBOTTOM`(15) 在下标 3：既不是恒等也不是减 10。
+ * 0.5.x 里 `beginResize` 的注释写「取 RESIZE_EDGE 的值」而实现直传下标，
+ * 照注释写必然被 `edge > 7` 拒掉（`rc=-1`，表现是「点了没反应」）。0.6.0 起由
+ * `Shell.beginResize()` 在 TS 层查表转换，本常量成为真正的入参契约。
+ */
 export const RESIZE_EDGE = {
   LEFT: 10,
   RIGHT: 11,
@@ -91,6 +120,61 @@ export const RESIZE_EDGE = {
 } as const;
 
 export type ResizeEdge = (typeof RESIZE_EDGE)[keyof typeof RESIZE_EDGE];
+
+/**
+ * `RESIZE_EDGE` 的 HT* 值 → 原生 `codes[]` 的**数组下标**。
+ *
+ * 顺序必须与 `native/shell.cc` 里那张表逐项一致：
+ *
+ * ```c
+ * static const WPARAM codes[8] = {HTLEFT, HTRIGHT, HTTOP, HTBOTTOM,
+ *                                 HTTOPLEFT, HTTOPRIGHT, HTBOTTOMLEFT, HTBOTTOMRIGHT};
+ * ```
+ *
+ * **它既不是恒等也不是 `value - 10`**：`HTTOPLEFT`=13 落在下标 4、`HTBOTTOM`=15
+ * 落在下标 3。`tests/types.test.ts` 有一条断言逐项钉住这张表。
+ *
+ * 消费者一般不需要它——`Shell.beginResize()` 已经替你查表了。放在公共面是因为
+ * 它属于「协议的另一半」，逃生机 `shell.symbols.shell_begin_resize()` 要直连原生
+ * 时需要它，而那种时候手写映射必然抄错。
+ */
+export const RESIZE_INDEX: Readonly<Record<number, number>> = {
+  [RESIZE_EDGE.LEFT]: 0,
+  [RESIZE_EDGE.RIGHT]: 1,
+  [RESIZE_EDGE.TOP]: 2,
+  [RESIZE_EDGE.BOTTOM]: 3,
+  [RESIZE_EDGE.TOPLEFT]: 4,
+  [RESIZE_EDGE.TOPRIGHT]: 5,
+  [RESIZE_EDGE.BOTTOMLEFT]: 6,
+  [RESIZE_EDGE.BOTTOMRIGHT]: 7,
+};
+
+/**
+ * HT* 值 → 下标；不认识的值返回 -1。
+ *
+ * 返回 -1 而不是抛错：原生 `shell_begin_resize()` 用 `edge < 0` 把它当场拒掉并回
+ * `rc=-1`，与「窗口已销毁」是同一个外部表现，调用方按 `rc` 处理即可。
+ */
+export function resizeIndex(edge: number): number {
+  return RESIZE_INDEX[edge] ?? -1;
+}
+
+/**
+ * 缩放阶梯，与原生 `native/shell.cc` 的 `kZoomLadder` 逐档一致。
+ *
+ * 原生侧 `apply_zoom` 只把入参夹到首尾两档（0.25 ~ 3.0），不吸附中间档——
+ * 传任意值都能生效。这份表是给「按档位走」的界面用的：`−` / `+` 要按相邻档
+ * 跳，而档位表属于两边都要知道的常量。
+ *
+ * 过去消费者只能自己抄一份（抄了 14 个数，没有任何门禁能发现它与 C++ 漂移）。
+ */
+export const ZOOM_LADDER = [
+  0.25, 0.33, 0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+] as const;
+
+/** 缩放倍率的上下限（`ZOOM_LADDER` 的首尾两项） */
+export const ZOOM_MIN = ZOOM_LADDER[0];
+export const ZOOM_MAX = ZOOM_LADDER[ZOOM_LADDER.length - 1];
 
 /** window state 位掩码（与原生 shell_get_state 一致） */
 export const STATE_MAXIMIZED = 1;
@@ -117,6 +201,15 @@ export type NativeLibInfo = {
    * fallback-tmp — 受限环境下退回 Bun 默认释放
    */
   source: "explicit" | "dev" | "package" | "embedded" | "fallback-tmp";
+  /**
+   * `bun-app-window` 自身的版本号（取自包内 `package.json`，不是 DLL 的 PE 版本）。
+   *
+   * 加它的理由：消费者要在界面上显示「连上的确实是这个版本」时，过去只能
+   * `import libPkg from "bun-app-window/package.json"` 再拼字符串——那是一条
+   * 额外的子路径依赖，且 `package.json` 在 `files` 白名单里所以要跟着发布面走。
+   * 现在顺手带出来，页面侧直接读 `shell.libInfo.version`。
+   */
+  version: string;
   sha256: string;
   bytes: number;
   reused: boolean;

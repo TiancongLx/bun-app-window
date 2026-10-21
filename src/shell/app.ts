@@ -32,6 +32,8 @@ import { EVENT_CLOSED, attachEventPump, type EventPump } from "./events";
 import { openShell, type Shell } from "./index";
 import { serveOnSafePort } from "./port";
 import { FLAG_CENTER, FLAG_RESIZABLE, type ShellOptions } from "./types";
+import { debugOf, type ShellDebug } from "./debug";
+import { attachPlacementStore, type PlacementStore } from "./state";
 
 /** 骨架起出来的东西。`shell` 是完整的内核对象，骨架只是帮它把周边接好 */
 export type App = {
@@ -55,6 +57,29 @@ export type App = {
     readonly token: string;
     /** 给了 `service` 才有；否则为 null */
     readonly ipc: IpcServer | null;
+    /**
+     * 排障接口（`hittest` / `metrics` / `dpi` / `selfBase` / `selfPath`）。
+     *
+     * 等价于 `debugOf(app.shell)`，只是省掉一次调用和一条子路径依赖。
+     * 排障面的稳定性承诺与 `bun-app-window/debug` 相同：**随时可能变化，生产代码
+     * 不应依赖**。骨架把它挂上来不改变这个定位，只是让它更好拿。
+     */
+    readonly debug: ShellDebug;
+    /**
+     * 把窗口位置持久化挂到这个 App 上。
+     *
+     * 与直接调 `attachPlacementStore(shell, file, { events })` 的差别只有一件事：
+     * **事件泵由骨架提供**，不可能忘。那条 `{ events }` 参数漏掉的后果是
+     * `attachPlacementStore` 自建第二个泵，而 `shell.pollEvents()` 是消费式的——
+     * 两个泵各自拿到一部分事件，窗口位置会**随机漏掉**一些变化，且两端都不报错。
+     * 这是本库里最容易静默出错的接线点，所以收进骨架。
+     *
+     * ```ts
+     * const store = app.attachPlacement(join(dataDir, "window.json"));
+     * // 关闭前：await store.flush(); store.dispose();
+     * ```
+     */
+    attachPlacement(file: string, opts?: { debounceMs?: number }): PlacementStore;
     /**
      * 停止窗口与本地服务。
      *
@@ -317,6 +342,15 @@ export async function createApp(opts: AppOptions): Promise<App> {
         url,
         token,
         ipc,
+        debug: debugOf(shell),
+        attachPlacement(file: string, opts2?: { debounceMs?: number }): PlacementStore {
+            // 事件泵用骨架这一个：`shell.pollEvents()` 是消费式的，再起一个就分票。
+            // 这里不给调用方传 `events` 的机会，正是这个方法存在的全部理由。
+            return attachPlacementStore(shell, file, {
+                events,
+                ...(opts2?.debounceMs === undefined ? {} : { debounceMs: opts2.debounceMs }),
+            });
+        },
         async stop(): Promise<void> {
             if (stopped) {
                 return;

@@ -23,6 +23,7 @@ import {
     FLAG_RESIZABLE,
     RESIZE_EDGE,
     STATE_FOCUSED,
+    ackOf,
     createShell,
     isRestrictedPort,
     openShell,
@@ -44,6 +45,16 @@ import nativeLibPath from "bun-app-window/native" with { type: "file" };
 import { parseBounds, parsePlacement } from "bun-app-window/state";
 import { DEFAULT_APP_FLAGS, buildAppUrl, decideWs } from "bun-app-window/app";
 import { glyphFor, labelFor, titleBarCss } from "bun-app-window/titlebar";
+
+// `./types` 是为页面侧开的常量面（零 import，浏览器安全）。这里的静态导入本身就是
+// 判据：如果它牵连进 `bun:ffi`，本探针在 Bun 里还能跑，但消费者的浏览器 bundle 会崩
+// ——`tests/types-purity.test.ts` 守那条，这里守「装成 tarball 之后真的能拿到」。
+import {
+    BROWSER_UI_ALL as TYPES_BROWSER_UI_ALL,
+    RESIZE_EDGE as TYPES_RESIZE_EDGE,
+    ZOOM_LADDER,
+    resizeIndex,
+} from "bun-app-window/types";
 
 type Result = { name: string; ok: boolean; detail: string };
 
@@ -81,6 +92,7 @@ const expectedSubpaths = [
     "./state",
     "./ipc",
     "./titlebar",
+    "./types",
     "./native",
     "./package.json",
 ];
@@ -102,6 +114,34 @@ equal("FLAG_CENTER 取值", FLAG_CENTER, 4);
 equal("RESIZE_EDGE.LEFT 与 Win32 HTLEFT 一致", RESIZE_EDGE.LEFT, 10);
 equal("STATE_FOCUSED 取值", STATE_FOCUSED, 4);
 equal("BROWSER_UI_ALL 覆盖五位", BROWSER_UI_ALL, 1 | 2 | 4 | 8 | 16);
+check("主入口导出 ackOf", typeof ackOf === "function");
+
+// `ackOf` 的成功分支不读 `lastError()`——壳层的错误缓冲区不会被成功调用清空，
+// 成功时读它只会拿到上一次的残留（显示成假故障）。用未启动的 shell 就能验：
+// 失败分支必须带原因，成功分支必须恒为空串。
+const ackFail = ackOf(createIdleShell(), -1);
+check("ackOf 失败时带回 lastError 文案", ackFail.rc === -1 && ackFail.err.length > 0, ackFail.err);
+check("ackOf 成功时 err 恒为空串（不残留上次的错）", ackOf(createIdleShell(), 0).err === "");
+
+function createIdleShell(): Parameters<typeof ackOf>[0] {
+    // 只为拿一个「窗口未启动」的 shell；不同步、不开窗
+    return {
+        lastError: () => "shell not started: 窗口未启动",
+    } as unknown as Parameters<typeof ackOf>[0];
+}
+
+// ---- 2b. types：页面侧常量面 -------------------------------------------------
+
+equal("types.BROWSER_UI_ALL 与主入口同值", TYPES_BROWSER_UI_ALL, BROWSER_UI_ALL);
+equal("types.RESIZE_EDGE 与主入口同值", TYPES_RESIZE_EDGE.LEFT, RESIZE_EDGE.LEFT);
+equal("types.ZOOM_LADDER 与原生 kZoomLadder 同长", ZOOM_LADDER.length, 14);
+equal("types.ZOOM_LADDER 首档", ZOOM_LADDER[0], 0.25);
+equal("types.ZOOM_LADDER 末档", ZOOM_LADDER[ZOOM_LADDER.length - 1], 3.0);
+// 0–7 是原生下标、10–17 是 HT* 值：查表必须给出前者
+equal("types.resizeIndex 把 HTLEFT 映射为 0", resizeIndex(TYPES_RESIZE_EDGE.LEFT), 0);
+equal("types.resizeIndex 把 HTBOTTOM 映射为 3（不是减 10）", resizeIndex(TYPES_RESIZE_EDGE.BOTTOM), 3);
+equal("types.resizeIndex 拒非法值", resizeIndex(0), -1);
+equal("types.libInfo.version 与 package.json 同源", (await createShell({ url: "http://127.0.0.1:1/" })).libInfo.version, String(meta["version"]));
 
 // ---- 3. 原生库：真的能定位、真的是 PE ----------------------------------------
 
