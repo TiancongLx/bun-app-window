@@ -56,6 +56,10 @@ import {
     resizeIndex,
 } from "bun-app-window/types";
 
+// `./pack` 是构建期工具。静态导入它，等于确认「装成 tarball 之后仍然可解析」——
+// 只检查 `exports` 里有这个键是不够的，键在但文件没打进包的情形照样能骗过那一类断言。
+import { bundlePage } from "bun-app-window/pack";
+
 type Result = { name: string; ok: boolean; detail: string };
 
 const results: Result[] = [];
@@ -91,6 +95,7 @@ const expectedSubpaths = [
     "./debug",
     "./state",
     "./ipc",
+    "./pack",
     "./titlebar",
     "./types",
     "./native",
@@ -142,6 +147,12 @@ equal("types.resizeIndex 把 HTLEFT 映射为 0", resizeIndex(TYPES_RESIZE_EDGE.
 equal("types.resizeIndex 把 HTBOTTOM 映射为 3（不是减 10）", resizeIndex(TYPES_RESIZE_EDGE.BOTTOM), 3);
 equal("types.resizeIndex 拒非法值", resizeIndex(0), -1);
 equal("types.libInfo.version 与 package.json 同源", (await createShell({ url: "http://127.0.0.1:1/" })).libInfo.version, String(meta["version"]));
+
+// ---- 2c. pack：构建期打包工具 -------------------------------------------------
+
+// 只验导出面。行为判据在 `tests/pack.test.ts`（6 条，含真打包与失败路径）；
+// 这里要回答的是另一个问题：装成 tarball 之后，这个子路径还导得出东西吗。
+check("pack.bundlePage 是函数", typeof bundlePage === "function");
 
 // ---- 3. 原生库：真的能定位、真的是 PE ----------------------------------------
 

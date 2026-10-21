@@ -47,6 +47,11 @@ _(nothing yet)_
 
     If you were passing raw indices, replace them with the matching `RESIZE_EDGE` member — `RESIZE_INDEX` is exported if you need to see the mapping.
 
+- `tests/gate.test.ts` shrank with the stage: `parsePs1Summary` and the `.ps1`-failure short-circuit assertions are gone, and `planStages` now asserts three stages.
+- **A new assertion keeps the deletion honest.** `tests/gate.test.ts` now fails if a `.ps1` appears anywhere in the repository. Deleting a stage and leaving nothing behind would mean the next `.ps1` arrives ungoverned and looks exactly like "the migration is complete". Verified in both directions: creating `scripts/__probe.ps1` turns it red naming that path, removing it returns green.
+- `docs/pitfalls.md` 3.18 keeps all five traps and is re-headed as *retired* rather than *paused* — the values and consequences were measured, so the record outlives the script. 5.2 and 5.6 no longer describe a `.ps1` that might come back.
+- Two ghost instructions surfaced while deleting: `scripts/trust-cert.ts` told the user to run `scripts/test-sign.ts`, a path that never existed, and `native/build-pack.ts` told them to run `scripts/make-icon.ps1`, which was migrated to TypeScript long ago. Both now point at something that exists.
+
 ### Fixed
 
 - **`RESIZE_EDGE` and `shell_begin_resize()` were never the same numbering** (`pitfalls` 5.13). `RESIZE_EDGE` is the Win32 `HT*` constants (10–17); the native side reads `codes[edge]` as an **array index 0–7** over `{HTLEFT, HTRIGHT, HTTOP, HTBOTTOM, HTTOPLEFT, HTTOPRIGHT, HTBOTTOMLEFT, HTBOTTOMRIGHT}`. The mapping is therefore not an offset — `HTTOPLEFT` (13) lands at index 4 while `HTBOTTOM` (15) lands at 3. `beginResize` used to pass its argument straight through, so following the documentation produced `rc=-1` and a window that did not resize, while the gate stayed green.
@@ -65,12 +70,7 @@ _(nothing yet)_
 
 - **The gate's second stage (`.ps1` syntax check) is deleted.** It existed as a migration-period fence for scripts that had neither type checking nor tests. With zero `.ps1` left it scans nothing, and a stage that can only ever report green is dead weight. Stages are now `bun check` → `bun test` → consumer acceptance: 1.3 s versus 1.8 s for four, and **the gate no longer needs `pwsh`** — only `bun` and `git`.
 
-### Changed
-
-- `tests/gate.test.ts` shrank with the stage: `parsePs1Summary` and the `.ps1`-failure short-circuit assertions are gone, and `planStages` now asserts three stages.
-- **A new assertion keeps the deletion honest.** `tests/gate.test.ts` now fails if a `.ps1` appears anywhere in the repository. Deleting a stage and leaving nothing behind would mean the next `.ps1` arrives ungoverned and looks exactly like "the migration is complete". Verified in both directions: creating `scripts/__probe.ps1` turns it red naming that path, removing it returns green. Net test count `552` → `551` (two lost with the stage, one gained).
-- `docs/pitfalls.md` 3.18 keeps all five traps and is re-headed as *retired* rather than *paused* — the values and consequences were measured, so the record outlives the script. 5.2 and 5.6 no longer describe a `.ps1` that might come back.
-- Two ghost instructions surfaced while deleting: `scripts/trust-cert.ts` told the user to run `scripts/test-sign.ts`, a path that never existed, and `native/build-pack.ts` told them to run `scripts/make-icon.ps1`, which was migrated to TypeScript long ago. Both now point at something that exists.
+- **The shell's capture remnants are gone (`ADR 0017`).** `native/gdi.ts` lost 142 of its 380 lines: `captureWindow`, `cropBgra`, `parseCrop`, `nonBlackPercent`, and the `GetDIBits` dlopen block that served only them. No caller remained inside the repository — the one test that referenced `cropBgra` was asserting against a function nothing used. Window capture lives in `echoes-of-the-eye` (formerly `agent-eyes`, renamed in the same window); the shell keeps only the icon-extraction closure that `scripts/extract-icon.ts` needs to prove `--windows-icon` works. **Repository-only**: `native/` is not published, so nothing changes for package consumers.
 
 ## [0.5.1] - 2026-10-21
 
