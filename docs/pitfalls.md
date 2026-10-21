@@ -786,6 +786,58 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
   其余 24 条保持绿；装回后 25/25。真机居中偏差从 `-35.5 / -36.0 / -36.0` 变为
   `0.5 / 0.0 / 0.0` 物理 px，close 按钮贴住客户区右边缘。
 
+### 2.21 原生 caption 子窗口：一个空指针，和一把量了四次都没量到东西的尺子
+
+- **背景**：frameless 窗口的三个 caption 按钮改由壳层画——一个 `WS_EX_LAYERED | WS_CHILD` 子窗口贴在客户区右上角，自己应答 `WM_NCHITTEST`。`HTMAXBUTTON` 由壳层直接给出，页面的 DOM 只留 `46 × 3` 的位置。
+- **验收读数**：`FindWindowExW` + `windowRect` 得 `276×64 at 2796,0`（贴客户区右边缘，高 = `32 × 2` 精确）；`WindowFromPoint` 3/3 落在 `webview_shell_caption`；三个按钮分别返回 `HTCLOSE` / `HTMAXBUTTON` / `HTMINBUTTON`；标题空白与客户区仍返回 `Chrome_RenderWidgetHostHWND`，页面照收鼠标。
+- **证据**：`实测结果`（2026-10-22，`baw-mvp` @192dpi 最大化，门禁 `603 pass / 0 fail`）。
+
+#### 一、`psize` 传 `nullptr`：句柄对、可见、在 child 链最顶、矩形也对，就是不参与命中
+
+- **症状**：子窗口每一样都对——`IsWindow` 真、`IsWindowVisible` 真、在 child 链最顶、`GetWindowRect` 给出正确的 `276×64`——但 `WindowFromPoint` 在按钮中心回报 `Chrome_WidgetWin_1`。整个按钮像被挖掉，鼠标从上面穿过去。
+- **看起来像**：Z 序错了、`WS_EX_LAYERED` 的 alpha 填得不够、或者 `HT*` 没返回。**都不是**：前两个逐项排除过，第三个根本走不到——命中都不落在它身上。
+- **原因**：`UpdateLayeredWindow` 的 `psize` 传了 `nullptr`。surface 于是是 `0×0`，整块 alpha 为 0，layered 窗口按 alpha 做命中穿透：形状合法、内容全透明，于是什么都吃不到。
+- **最容易被骗的一点**：**两种写法都返回 `true`。** 没有错误码、没有 `GetLastError`、没有一行日志。
+
+    ```cpp
+    // 错：surface 是 0×0，整块 alpha=0，layered 按 alpha 穿透
+    UpdateLayeredWindow(g_caption, screen, nullptr, nullptr, mem, &src_pt, 0, &bf, ULW_ALPHA);
+
+    // 对
+    SIZE win_size{w, h};
+    UpdateLayeredWindow(g_caption, screen, nullptr, &win_size, mem, &src_pt, 0, &bf, ULW_ALPHA);
+    ```
+
+- **文档那句话的边界**：文档写「If `psize` is NULL, the size of the window does not change」。这句在「**从未设过尺寸**」这一步不成立——不设不会替你补，留下的是 `0×0`。它描述的是「改尺寸时可以不传」，不是「不传就等于设过尺寸」。
+- **判据**：`tests/nav-guard.test.ts` 钉住 `UpdateLayeredWindow` 的 `psize` 实参不是 `nullptr`。
+
+#### 二、`alpha` 的阈值就是 `1`
+
+同一个窗口只改 rest 底的填充 alpha 做 A/B：
+
+| alpha | `UpdateLayeredWindow` | 命中 |
+| --- | --- | --- |
+| 0 | `true` | **0/3** |
+| 1 ~ 255 | `true` | **3/3** |
+
+- rest 底填 `alpha = 1`（1/255，肉眼不可见）不是「差不多就行」，是**唯一能保住命中的最小值**。别优化成 0，也别因为看不见就删掉这次填充。
+- 五态 hover 靠背板亮度区分，实测 `32.0 → 55.1`（**+23.1**，理论值 +22.7）。三个字形的包围盒 `20×20 / 20×20 / 20×2` 物理 = `10×10 / 10×10 / 10×1` 逻辑，居中偏差 `0.0 / 0.0 / 0.0`。
+
+#### 三、`WM_NCMOUSEMOVE` 不能提前 `return`
+
+- **机制**：Snap 的悬停检测由 `DefWindowProc` 在 `WM_NCMOUSEMOVE` 里做。子窗口的过程函数只要在这个分支里 `return 0`，消息就到此为止，`DefWindowProcW` 永远收不到，悬停检测也就永远不发生——窗口看起来完全正常，只是悬停没有面板。
+- **修法**：该分支用 `break` 落到 `DefWindowProcW`，不是 `return 0`。
+- **判据**：`tests/nav-guard.test.ts` 钉住这一条。
+- **同一个坑的第二层**：`WM_NCHITTEST` 返回 `HTMAXBUTTON` 之后，那个点是 non-client——按下投递 `WM_NCLBUTTONDOWN` 而不是 `WM_LBUTTONDOWN`，页面一个 `click` 都收不到。所以点击必须由壳层自己执行，且只在同一按钮上松开才生效。
+
+#### 四、「判据的零」必须先自证不是瞎的
+
+- **事故**：本轮为确认「child 窗口的 `DefWindowProc` 到底会不会触发 Snap 悬停检测」，写了四次探针，量出四个 `0`，据此写下「这条路对 Snap 是死的」，并推了一套不需要做的方案（让位 + 把标题栏整体搬到 GDI）。把窗口摆好、请人用真鼠标悬停，面板**弹出**。`egoist/mygo` 那段注释没骗人。
+- **原因**：四次用的是**同一把尺子**——枚举前后顶层窗口快照、看有没有新增。而 Snap 的 flyout 是 **DWM 拥有的弹出窗口**，根本不在枚举结果里。尺子看不见被量的东西，量多少次都是 0。
+- **规矩**：判据报 `0` 时，「零」本身不构成证据。必须先做一次**对照**——让同一把尺子在「已知为真」的样本上报出非零。做不到对照，只能写「未观测到」，不能写「不存在」。
+- **合格判据的样子**：`tests/types.test.ts` 数 `if (idx == N) return HT*` 恰好 3 处，这条**自证过**——数值改成 48 只红数值那条，`HTMAXBUTTON` 与 `HTMINBUTTON` 互换只红顺序那条。它能报绿，也能准确地报红，读数才算数。
+- **拿不准就换判据**：需要真实鼠标、真实焦点、真实前台的事（Snap flyout、悬停态、失焦变暗），把窗口摆好、把坐标报出来，**请人按一下**。这不是偷懒——本轮四次自动探针加起来，还不如三秒钟的一次真人悬停。
+
 ---
 
 ## 三、原生边界

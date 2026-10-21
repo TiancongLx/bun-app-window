@@ -88,6 +88,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     maximised → minimise → 147,147,1826,1271,1,192   ← maxed bit preserved
     ```
 
+- **The caption buttons are now drawn and hit-tested by the shell on its own layered child window, so a consumer can stop faking them with DOM.** `FLAG_NATIVE_CAPTIONS` (512) creates a `WS_EX_LAYERED | WS_CHILD` window named `webview_shell_caption`, anchored to the client area's top-right corner at exactly `3 × CAPTION_BUTTON_WIDTH` by `CAPTION_BAR_HEIGHT` in logical pixels (`276×64` physical at @192dpi). It answers `WM_NCHITTEST` itself with `HTCLOSE` / `HTMAXBUTTON` / `HTMINBUTTON`; the title strip and the client area still report `Chrome_RenderWidgetHostHWND`, so the page keeps receiving mouse input. `mountTitleBar({ captions: "native" })` skips creating the three buttons and only reserves their footprint.
+
+    It supersedes `FLAG_TITLEBAR_RESERVE` for consumers that draw their own title bar. `baw-mvp` now runs `flags = 573`; the DLL grows to `1,025,536 B` with its 34 exports unchanged, and `gdi32` joins the subsystem library list (ten now).
+
+    Three details it depends on, each pinned by an assertion in `tests/nav-guard.test.ts`:
+
+    - **`UpdateLayeredWindow` must be given an explicit `SIZE`.** Passing `nullptr` returns `true`, sets no error, and leaves the surface `0×0` — the window then exists, is visible, sits at the top of the child chain, has a correct rectangle, and is hit-transparent anyway. The window under it receives every click. See `docs/pitfalls.md` 2.21 for the A/B and for why the documented "the size does not change" does not cover "never was set".
+    - **The rest fill is `alpha = 1`, not 0.** A fully transparent layered window is hit-transparent: measured 0/3 hits at `alpha = 0`, 3/3 for every value from 1 to 255. Rest state is invisible at 1/255 either way, so the value exists only to keep the window hittable.
+    - **`WM_NCMOUSEMOVE` breaks to `DefWindowProcW` instead of returning 0.** That is where the Snap hover detection happens; short-circuiting it costs the layout picker while leaving the window looking completely normal.
+
+    Clicks go through `WM_SYSCOMMAND` from the shell process, and only fire when released over the same button. Once `WM_NCHITTEST` answers `HTMAXBUTTON` the point is non-client — the press arrives as `WM_NCLBUTTONDOWN`, not `WM_LBUTTONDOWN` — so the page never sees a `click` and the shell has to perform the action itself. This is also why the three buttons are children of the shell rather than elements of the page: a DOM button cannot return a non-client hit code.
+
+    Measured on `baw-mvp` at @192dpi maximised: `WindowFromPoint` lands on `webview_shell_caption` 3/3, the three hit codes are exact, glyph boxes are `20×20 / 20×20 / 20×2` physical (`10×10 / 10×10 / 10×1` logical) with `0.0` centring offsets, and the hover backplate moves `32.0 → 55.1` (`+23.1`, against `+22.7` expected). Gate: `72 files`, `603 pass / 0 fail`, `VERIFY-PACK PASSED (7 checks)`.
+
+    **Snap Layouts was confirmed by a real mouse, and that is the interesting part.** Four automated probes reported zero new top-level windows while hovering and were read as "a child window cannot trigger Snap" — which was wrong. The flyout is a DWM-owned popup, so window enumeration never sees it and the probe could not have reported anything else. The rule this leaves behind (`docs/pitfalls.md` 2.21, fourth section): a guard that reports `0` must first prove it is not blind, by reporting non-zero on a sample known to be true.
+
 ## [0.6.0] - 2026-10-21
 
 **`beginResize` now takes `RESIZE_EDGE` values (10–17) instead of raw native indices, and five sources of consumer boilerplate are gone. The first is a behaviour change; the rest are additive.**
