@@ -239,6 +239,7 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 - **症状**：鼠标移到窗口边缘没有出现缩放光标。
 - **原因**：WebView2 的容器子窗口（widget）铺满整个客户区，`WM_NCHITTEST` 先落到它身上，永远返回 `HTCLIENT`。
 - **修法**：`SetWindowLongPtrW(widget, GWLP_WNDPROC, ...)` 子类化，在 `WM_NCHITTEST` 里判定落在边框区域时返回 `HTTRANSPARENT`，让同一线程的父窗口接手判定。
+- **几何判据不在本仓**（`ADR 0017`）：本仓的静态断言只钉「子类化在 `webview_set_size` 之前安装」，钉不住「widget 的实际客户区尺寸对不对」。要看清顶层窗口与每一层子窗口的矩形，跑 `agent-eyes` 的 `probe-child-windows`（`--pid` 或 `--class webview_shell`）。**别为了这一条在本仓重造窗口枚举。**
 - **证据**：`实测`。九个边缘点的命中码全部正确，中心为 `HTCLIENT`。
 
 ### 2.7 DPI 感知必须尽早声明
@@ -1236,6 +1237,146 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 - **证据**：`实测`（2026-10-21，mvp 的 0.5.1 拖放验收）。
   `--peek` 报的 `title` 里带着完整路径，一眼看出抓错了窗口。
 
+### 5.13 `RESIZE_EDGE` 的取值与 `shell_begin_resize()` 收的不是同一套数
+
+- **症状**：页面按 README 写 `shell.beginResize(RESIZE_EDGE.LEFT)`，调用不抛错、
+  返回 `rc = -1`，窗口**一点都不动**。外部表现与「按钮没接上」完全一样。
+
+- **真因**：两处各用了一套编号，而且都不算错：
+
+    | 处 | 收/给什么 |
+    | --- | --- |
+    | `src/shell/types.ts` 的 `RESIZE_EDGE` | Win32 `HT*`：`LEFT=10 … BOTTOMRIGHT=17` |
+    | `native/shell.cc` 的 `shell_begin_resize(edge)` | **数组下标 0–7**：`if (edge >= 0 && edge <= 7) codes[edge]` |
+
+    `codes[8]` 的排列是 `{HTLEFT, HTRIGHT, HTTOP, HTBOTTOM, HTTOPLEFT, HTTOPRIGHT,
+    HTBOTTOMLEFT, HTBOTTOMRIGHT}`。所以正确取值是
+    `LEFT=0, RIGHT=1, TOP=2, BOTTOM=3, TOPLEFT=4, TOPRIGHT=5, BOTTOMLEFT=6, BOTTOMRIGHT=7`
+    ——和 `RESIZE_EDGE` 差一个常数，且**排序也不同**（`RESIZE_EDGE` 是顺时针，`codes[]`
+    是先四边后四角）。
+
+- **为什么没被门禁抓住**：`tests/types.test.ts` 只断言「`RESIZE_EDGE.LEFT === 10`」，
+  它问的是常量自己，没有一条判据去问原生侧面收什么。这是「门禁绿但行为错」的标本：
+  断言测的是声明，不是契约。
+
+- **当前处置**：常量不动（改它会破坏已在用 `HT*` 语义的调用方，且 `HT*` 确实是
+  Win32 的真值），文档与消费者各自映射。`baw-mvp` 仓的 `api.ts` 里维护 `NATIVE_EDGE`，
+  并把「传 10 会被拒」写成一条自检判据（`传 HT 值 10 → rc=-1`），反过来钉住这件事。
+
+- **待办（未做）**：给 `shell_begin_resize` 接受 `HT*` 值，或在 `Shell.beginResize`
+  里做一次映射，让两套编号合一。任一种都是**行为改变**，需要按语义化版本对待。
+
+- **证据**：`源码核实`（`native/shell.cc` 的 `cmd_kind::resize` 与
+  `shell_begin_resize`）+ `实测结果`（mvp 自检 `beginResize 拒越界` 稳定复现 `rc=-1`；
+  改传 0–7 后 8 个方向都能拖动窗口）。
+
+### 5.14 页面 bundle 不能 import 主入口，否则拖进 `bun:ffi`
+
+- **症状**：想在页面里复用 `BROWSER_UI_*` / `FLAG_*` 常量，写成
+  `import { BROWSER_UI_ALL } from "bun-app-window"`。`bun check` 通过，
+  `bun run build` 通过，页面打开后**整段脚本一行都不执行**。
+
+- **真因**：`src/shell/index.ts` 顶层 `import { cstr, openNativeLib } from "./native"`，
+  而 `native.ts` 里有 `import { dlopen, ptr } from "bun:ffi"`。页面 bundle 的
+  `target` 是 `browser`，`bun:ffi` 是 Bun 内置模块，浏览器里不存在——
+  模块解析阶段就炸，而 HTML 是静态的，页面照样渲染。
+
+- **判据**：页面只能用**不碰原生**的子路径（`./ipc` 是纯 `Channel` 抽象、
+  `./state` 只碰文件与事件泵）。常量要么在应用侧抄一份并注明出处，
+  要么把常量挪到一个零依赖的 `.ts`（当前没有这样一个入口）。
+
+- **证据**：`源码核实`（`src/shell/native.ts` 的 `bun:ffi` 导入）+ `逻辑推断`
+  （与 pitfalls ⑦ 同一条链路：脚本没跑起来，页面看起来正常）。
+
+### 5.15 Solid 的 `jsx: "preserve"` 不被 `Bun.build` 接受，必须走 `solid-js/h`
+
+- **症状**：想给页面用 Solid，按官方 tsconfig 写 `"jsx": "preserve"`，打包时报
+
+    ```text
+    TypeError [ERR_INVALID_ARG_TYPE]: Invalid jsx.runtime: 'preserve'.
+    Must be one of: 'classic', 'automatic', 'react', 'react-jsx', 'react-jsxdev'
+    ```
+
+- **真因**：Solid 的标准编译链是 `babel-preset-solid`，它把 JSX 编译成**模板字符串**
+  （`_$template("...")` + 就地更新），这是 Solid 性能优势的来源。`Bun.build` 的 JSX
+  转换只做「JSX → 函数调用」，没有模板优化这一步，所以它连 `preserve` 这个值都不接。
+
+- **修法**：走 Solid 官方备的 hyperscript runtime，`solid-js` 的 `exports` 里有
+  `./h` 与 `./h/jsx-runtime`：
+
+    ```ts
+    Bun.build({
+        entrypoints: ["page.tsx"],
+        target: "browser",
+        format: "esm",
+        minify: true,
+        jsx: { runtime: "automatic", importSource: "solid-js/h" },
+    });
+    ```
+
+- **实测对照**（同一套 `target: browser` / `esm` / `minify`）：
+
+    | 入口 | 产物 | 构建 |
+    | --- | --- | --- |
+    | 空 TS（baseline） | 18 B | 9 ms |
+    | React 19.3.1 最小 | 431,288 B（421.2 KiB） | 21 ms |
+    | **Solid 1.9.17 + `solid-js/h`** | **21,154 B（20.7 KiB）** | 20 ms |
+    | Solid + `importSource: "solid-js"` | **`AggregateError: Bundle failed`** | — |
+
+  React 直接可用（`importSource: "react"`）；Solid 必须换 `importSource`，
+  产物仍比 React 小 20 倍。
+
+- **代价**：放弃模板编译优化，退化成 hyperscript 调用。体积优势保留，
+  「编译期静态模板、运行时零协调」那一半优势拿不到。这不是缺陷，是
+  `Bun.build` 不带 babel 插件的必然结果——要那半优势就得在打包前插一道 babel。
+
+- **证据**：`实测结果`（2026-10-21，独立目录装 `solid-js@1.9.17` / `react@19.3.1`）。
+
+### 5.16 WebGPU 的三处静默失效：都不抛异常，只是结果不对
+
+`navigator.gpu` 可用之后，下面三处**不会报错**，只会给出错误数据。三条都实测踩过：
+
+- **一、buffer 太小 → validation error 不抛，`try/catch` 抓不到**
+
+    ```ts
+    // 4×4 texture + 64 字节 buffer
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: rb, bytesPerRow: 256 }, [4, 4]);
+    ```
+
+    `bytesPerRow` 必须对齐 256，4 行至少要 `256*3 + 16 = 784` 字节。buffer 只有 64 字节时
+    触发 **validation error**——那走的是 `uncapturederror` 事件，不是 JS 异常。表现是
+    `mapAsync` 成功、读回来全 0。
+
+    **判据**：`device.pushErrorScope("validation")` + `popErrorScope()` 显式收错误；
+    或者先 `device.addEventListener("uncapturederror", ...)`。**不要指望 `try/catch`。**
+
+- **二、从 canvas 用 `copyExternalImageToTexture` 读回不可靠**
+
+    WebGPU canvas 的内容在 present 之后就不再是稳定的可拷贝外部图像。实测
+    `nonBlackPercent: 0` / 三色各 0 像素，而同一帧的 `drawCalls` / `geometries` 正常——
+    渲染确实发生了，只是读不到。
+
+    **判据**：要读像素就**渲染到 `RenderTarget`**，再从 texture 读回。canvas 只用于呈现。
+
+- **三、`readRenderTargetPixelsAsync` 没有输出 buffer 参数**
+
+    真实签名（`three/src/renderers/common/Renderer.js`）：
+
+    ```js
+    async readRenderTargetPixelsAsync( renderTarget, x, y, width, height, textureIndex = 0, faceIndex = 0 )
+    ```
+
+    它**自己返回** `Uint8Array`。把 `new Uint8Array(w*h*4)` 当第 6 个参数传进去，
+    就落到了 `textureIndex` 位，报 `TypeError: Invalid value used as weak map key`。
+    这是 three r186 的签名；它和 `renderer.readRenderTargetPixels`（WebGL 的，要传 buffer）
+    参数形状不同，容易想当然。
+
+- **共同教训**：GUI 侧的「没抛错」完全不等于「效果发生了」。这三条都是
+  **调用成功、状态正常、数据错**。判据必须落在**读回的具体数值**上
+  （`[1,2,3,4]` / `[255,128,64,255]` / `centerPixel`），不是「await 没有 reject」。
+
+- **证据**：`实测结果`（2026-10-21，Intel Arc 核显，WebView2 155）。
+
 ---
 
 ## 六、已确认的运行时行为基线
@@ -1256,3 +1397,68 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 | DLL 体积 | 约 993 KB（1,016,832 B，含外部导航守卫、窗口事件环与拖放处理器） |
 | 内嵌释放 | `%LOCALAPPDATA%\BunAppWindow\runtime\libshell-<sha 前 16 位>.dll`，二次运行复用（mtime 不变） |
 | 签名开销 | 约 7.2 KB |
+
+### 6.1 WebGPU / WebGL 基线（2026-10-21 实测）
+
+`ADR 0004` 定的是「web 为主 + TypeGPU 局部」混合路线，所以这条基线决定那条路成不成立。
+在真实 WebView2 窗口里跑探针（不是 `--app` 模式），逐项读回：
+
+| 项 | 值 |
+| --- | --- |
+| UA | `Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0` |
+| `navigator.gpu` | `object` |
+| `requestAdapter()` | 成功 |
+| adapter `vendor` / `architecture` | `intel` / `xe-lpg` |
+| `requestDevice()` | 成功 |
+| **compute 读回** | `[1,2,3,4]` —— storage buffer 写入正确 |
+| **render 读回** | `[255,128,64,255]` —— 清屏色精确 |
+| canvas `getContext("webgpu")` | 成功，`getPreferredCanvasFormat()` = `bgra8unorm` |
+| WebGL2（对照） | 成功，`ANGLE (Intel, Intel(R) Arc(TM) Graphics (0x00007D55) Direct3D11 vs_5_0 ps_5_0, D3D11)` |
+
+`adapter.features`（20 项，含）：`shader-f16` / `timestamp-query` / `texture-compression-bc` /
+`subgroups` / `subgroup-size-control` / `texture-formats-tier2` / `dual-source-blending` /
+`float32-filterable` / `depth-clip-control` / `clip-distances` / `primitive-index`。
+
+`adapter.limits`：
+
+| limit | 值 |
+| --- | --- |
+| `maxTextureDimension2D` | 16384 |
+| `maxBufferSize` | 2,147,483,648（2 GiB） |
+| `maxStorageBufferBindingSize` | 2,147,483,644 |
+| `maxComputeWorkgroupStorageSize` | 32768 |
+
+**three.js r186 WebGPU 在同一个窗口里跑通**（三个纯色球的真实场景）：
+
+```text
+isWebGPU        true
+initMs          130 / 202 / 324（三次）
+nonBlackPercent 17
+redPixels       4456     greenPixels 4152     bluePixels 4456
+centerPixel     [0,255,0,255]   ← 中心像素纯绿，正是中间那个球
+geometries      3
+verdict         THREE-WEBGPU RENDERS REAL PIXELS
+```
+
+**打包体积**（`Bun.build`，`target: browser` / `esm` / `minify`）：
+
+| 入口 | 产物 |
+| --- | --- |
+| 空 TS | 18 B |
+| React 19.3.1 最小 | 421.2 KiB |
+| Solid 1.9.17 + `solid-js/h` | 20.7 KiB |
+| three.js WebGL | 521.6 KiB |
+| three.js WebGPU | 778.6 KiB |
+| TypeGPU 0.12.8 | 275.5 KiB（构建 1292 ms） |
+
+**两条不能当读数的数**：
+
+- `renderAsync` 连调 30 次的平均耗时（实测 0.36 ms/帧）**不是帧率**。
+  `renderAsync` 只提交命令，不等人把 GPU 做完。要测帧率得用
+  `requestAnimationFrame` + `querySet`（adapter 支持 `timestamp-query`），
+  或 `queue.onSubmittedWorkDone()` 强制同步。
+- `renderer.info.render.drawCalls` 在渲染完成后读会是 0——它在每帧开头重置。
+  判「渲染发生了」用 `geometries` 与读回的像素。
+
+未验证（`有待验证`）：远程桌面 / 虚拟机下的 WebGPU 可用性、ARM64 Windows 的 WebGPU、
+`WebGPURenderer` 的 WebGL 回落路径（`forceWebGL`）在本机是否真能接管。
