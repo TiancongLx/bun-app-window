@@ -756,6 +756,36 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
   后指针落在 216 像素之外（说明用户正在用鼠标）。**已验证的是文档写明的那个前置
   条件，未验证的是面板本身。**
 
+### 2.20 标题栏组件挂在 `<header>` 上，消费方的元素选择器会渗进来
+
+- **症状**：自绘标题栏的三个 caption 按钮整体偏左，看起来像「字形没有居中」。
+  @192dpi 实测：字形包围盒相对按钮左边只有 +3 物理 px，右侧留白 70+ px。
+- **看起来像**：`display: grid; place-items: center` 在 `<button>` 上失效。
+  **不是。** 量 hover 背板（`background` 覆盖整个按钮，它的边界就是按钮边界）：
+  背板 92 物理宽、字形中心与背板中心都是 `d=137.5` —— 字形在按钮内**精确居中**。
+- **原因**：组件挂在 `<header class="ws-titlebar">` 上，而消费方写了一条元素选择器
+  `header { padding: 12px 18px 10px; gap: 12px }`（做它自己的页头）。
+  `.ws-titlebar` 里**没有声明 `padding`**，于是：
+    - `18px` 右内边距把三个按钮整体推左 18 CSS = **36 物理 px**（实测就是这个数）
+    - `box-sizing: border-box` 下，上下 12/10 的内边距把 32px 高的标题栏压成
+      **9px 内容高**，按钮跟着缩到 18 物理 px 高
+- **机制**：元素选择器（`0,0,1`）的特异性低于类选择器（`0,1,0`），但那只在组件
+  **声明了该属性**时才有意义。没写的属性不参与竞争，等于把控制权交给消费方。
+  组件的挂载标签是公开契约的一部分——`<header>`、`<button>`、`<div>` 都是消费方
+  最容易写全局规则的那几个。
+- **修法**：根节点与按钮都把 `margin` / `padding` / `gap` 显式清零。
+  消费方那一侧同时把 `header { … }` 收成类选择器、把 `button { … }` 收成
+  `button:not(.ws-titlebar__btn)`——后者顺带挡住 `button:active { transform: translateY(1px) }`
+  渗进 caption 按钮（组件没声明 `transform`），否则按下时字形下沉 1px，
+  而 Win 11 的 caption 按下只换背板。
+- **判据**：`tests/titlebar.test.ts` 的三条断言必须**在规则块内**做
+  （`cssBlock(css, ".ws-titlebar")` 再 `toContain("padding: 0")`）。
+  写成 `expect(css).toContain("padding: 0")` 会被 `.ws-titlebar__btn` 里那条同值规则
+  满足，判据自己变成恒真——本表里就有这个巧合。
+- **证据**：`实测`。反向验证：摘掉 `.ws-titlebar` 的 `padding: 0` → 恰好一条红，
+  其余 24 条保持绿；装回后 25/25。真机居中偏差从 `-35.5 / -36.0 / -36.0` 变为
+  `0.5 / 0.0 / 0.0` 物理 px，close 按钮贴住客户区右边缘。
+
 ---
 
 ## 三、原生边界

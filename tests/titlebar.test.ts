@@ -200,6 +200,72 @@ test("样式表包含 Win 11 的关键取值", () => {
     expect(css).toContain("user-select: none");
 });
 
+// ---------- 消费方元素选择器的渗入 ----------
+
+/**
+ * 取样式表里某个选择器的第一个规则块（`{` 到 `}`）。
+ *
+ * 断言必须在**块内**做：`expect(css).toContain("padding: 0")` 会被任意一条
+ * 无关规则的 `padding: 0` 满足（本表里 `.ws-titlebar__btn` 就有），
+ * 于是判据自己变成恒真。
+ */
+function cssBlock(css: string, selector: string): string {
+    const at = css.indexOf(`${selector} {`);
+    if (at < 0) {
+        return "";
+    }
+    const open = css.indexOf("{", at);
+    const close = css.indexOf("\n}", open);
+    return close < 0 ? css.slice(open) : css.slice(open, close + 1);
+}
+
+/**
+ * 根节点必须显式声明 padding / margin / gap。
+ *
+ * 挂载点是 `<header class="ws-titlebar">`，而消费方普遍用元素选择器写自己的页头
+ * （`header { padding: 12px 18px 10px }` 是最常见的一种）。元素选择器的特异性
+ * 低于类选择器，但**只在组件声明了该属性时**才被压住——没写的属性等于交给消费方。
+ *
+ * 实测（`baw-mvp` 的 `index.html`）：这三条缺一条就出事，
+ * 18px 右内边距把三个按钮整体推左 18 CSS px（@192dpi 量到 36 物理 px），
+ * 12/10 的上下内边距把 32px 的标题栏压成 9px 内容高。
+ * 症状是「字形没居中」——而字形在按钮内其实是居中的，整块被推歪了。
+ *
+ * 这条判据守的是意图（不许把控制权交出去），不是某个具体取值。
+ */
+test("根节点显式声明 padding / margin / gap，否则消费方的元素选择器会渗进来", () => {
+    const block = cssBlock(titleBarCss(), ".ws-titlebar");
+    expect(block.length).toBeGreaterThan(0);
+    expect(block).toContain("padding: 0");
+    expect(block).toContain("margin: 0");
+    expect(block).toContain("gap: 0");
+    // 高度必须由组件自己说了算：消费方一句 `header { padding }` 就能把它吃掉
+    expect(block).toContain("box-sizing: border-box");
+});
+
+/** 按钮同理：`button { margin: ... }` 是消费方最常见的写法之一。 */
+test("按钮显式清零 margin / padding / border", () => {
+    const block = cssBlock(titleBarCss(), ".ws-titlebar__btn");
+    expect(block.length).toBeGreaterThan(0);
+    expect(block).toContain("margin: 0");
+    expect(block).toContain("padding: 0");
+    expect(block).toContain("border: 0");
+    // 46×32 是 Win 11 的 caption 规格，被内边距一挤就不对了
+    expect(block).toContain("width: 46px");
+    expect(block).toContain("height: 100%");
+});
+
+/**
+ * 控件容器同样不能被外来的 `margin` / `padding` 改尺寸：
+ * 三个按钮的右边缘要贴着客户区右边缘，这是 caption 按钮的定义位。
+ */
+test("控件容器不靠外来样式定尺寸", () => {
+    const block = cssBlock(titleBarCss(), ".ws-titlebar__controls");
+    expect(block.length).toBeGreaterThan(0);
+    expect(block).toContain("flex: none");
+    expect(block).toContain("align-items: stretch");
+});
+
 // ---------- 挂载 ----------
 
 test("挂载后结构完整：标题栏 + 图标 + 标题 + 三个按钮", () => {

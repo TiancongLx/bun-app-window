@@ -125,6 +125,17 @@ export function titleBarCss(): string {
     font: 400 12px/1 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
     user-select: none;
     -webkit-user-select: none;
+    /* 下面四条**必须显式声明**。
+       挂载点是 <header>，而消费方常写元素选择器「header { padding: ... }」做自己的页头。
+       元素选择器的特异性低于类选择器，但只在组件**声明了**该属性时才被压住——
+       没写的属性等于把控制权交给消费方。
+       实测（baw-mvp）：它的「header { padding: 12px 18px 10px }」漏进来，
+       18px 右内边距把三个按钮整体推左 18 CSS px（@192dpi = 36 物理 px），
+       12/10 的上下内边距又把 32px 的标题栏压成 9px 内容高，按钮跟着缩到 18 物理 px。
+       两者合起来看起来像「字形没有居中」，而字形在按钮内其实是居中的。 */
+    margin: 0;
+    padding: 0;
+    gap: 0;
     border-bottom: 1px solid var(--ws-tb-border);
     box-sizing: border-box;
 }
@@ -173,6 +184,9 @@ export function titleBarCss(): string {
 .ws-titlebar__btn {
     width: 46px;
     height: 100%;
+    /* margin 必须显式清零：消费方常写「button { margin: ... }」之类，
+       元素选择器只在组件没声明该属性时生效。与 .ws-titlebar 那一组同理。 */
+    margin: 0;
     border: 0;
     padding: 0;
     background: transparent;

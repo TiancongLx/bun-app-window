@@ -40,6 +40,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The caption buttons sat 18 CSS px left of where they belong, and the title bar was squeezed to a third of its height — because a consumer's `header { … }` rule leaked into the component.** The component mounts on `<header class="ws-titlebar">`, and `baw-mvp`'s page has an element-selector rule for its own page header: `header { padding: 12px 18px 10px; gap: 12px }`. `.ws-titlebar` never declared `padding`, so the 18px right padding pushed all three buttons left by 18 CSS px (measured: 36 physical px @192dpi), and under `box-sizing: border-box` the 12/10 vertical padding squeezed the 32px bar down to 9px of content, shrinking the buttons to 18 physical px tall.
+
+    **It reads as "the glyph is not centred", and that diagnosis is wrong.** Measuring the hover backplate — `background` covers the whole button, so its edges *are* the button's edges — put the backplate at 92 physical px wide with the glyph's centre and the backplate's centre both at `d=137.5`: the glyph was centred all along. The whole group was displaced, then squashed.
+
+    **Specificity is not the mechanism.** An element selector (`0,0,1`) does lose to a class selector (`0,1,0`) — but only where the component *declares* the property. An undeclared property does not compete at all, so it is handed to the consumer. The mounting tag is part of the public contract, and `<header>` / `<button>` / `<div>` are exactly the tags consumers write global rules for.
+
+    The fix declares `margin` / `padding` / `gap` on `.ws-titlebar` and `margin` on `.ws-titlebar__btn`. The consumer sides changes too: `header { … }` becomes `.app-header { … }`, and `button { … }` becomes `button:not(.ws-titlebar__btn)` — the latter also stops `button:active { transform: translateY(1px) }` from reaching the caption buttons, which had been sinking the glyph 1px on press where Win 11 only swaps the backplate.
+
+    Three assertions guard it in `tests/titlebar.test.ts`, and they must be made **inside the rule block** (`cssBlock(css, ".ws-titlebar")` before `toContain("padding: 0")`). Writing `expect(css).toContain("padding: 0")` would be satisfied by the identically-valued declaration already in `.ws-titlebar__btn` — the guard would silently become a tautology, and this stylesheet happens to contain exactly that coincidence.
+
+    Verified by reverse: dropping `padding: 0` from `.ws-titlebar` turned **exactly one** assertion red and left the other 24 green; restoring it gave 25/25. On a real window the centring offsets went from `-35.5 / -36.0 / -36.0` to `0.5 / 0.0 / 0.0` physical px, and the close button now ends flush with the client area's right edge.
+
 - **`getBounds()` returned the Win32 minimised sentinel rectangle, and `attachPlacementStore` wrote it straight to disk.** `format_bounds()` only took `WINDOWPLACEMENT.rcNormalPosition` when `IsZoomed()` was true. A minimised window is not zoomed, so it fell through to `GetWindowRect()` — which for a minimised window reports `-32000,-32000` plus an icon-sized box (measured: `314x50`). `IsIconic()` was never consulted.
 
     Those values look entirely valid: integer coordinates, positive dimensions. The existing shape checks (finite numbers, size > 0) cannot distinguish them from a real rectangle. So `window.json` became `{"x":-32000,"y":-32000,"width":314,"height":50,"dpi":192}`, and the next launch restored a 314×50 window — observed on `baw-mvp` as a 666×471 window with the page wrapped and scrolling.
