@@ -2,6 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/bun-app-window?color=cb3837&logo=npm)](https://www.npmjs.com/package/bun-app-window)
 [![Bun](https://img.shields.io/badge/Bun-%3E%3D1.4.3-f472b6?logo=bun&logoColor=white)](https://bun.sh)
+[![TypeScript](https://img.shields.io/badge/TypeScript-%3E%3D7.0.2-3178C6?logo=typescript&logoColor=white)](#系統需求與設計邊界)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6?logo=windows&logoColor=white)](#系統需求與設計邊界)
 [![WebView2](https://img.shields.io/badge/WebView2-System%20Runtime-008080)](#系統需求與設計邊界)
 [![License](https://img.shields.io/badge/License-MIT-2ea44f)](./LICENSE)
@@ -29,6 +30,7 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 | --- | --- |
 | 僅支援 Windows x64 | `package.json` 中的 `os` 與 `cpu` 欄位已做強制限制，拒絕在其他平台安裝（套件名稱保持平台中立僅為預留命名空間）。預編譯動態連結程式庫 `libshell.dll` 隨套件發佈，無需在安裝期編譯 |
 | 僅支援 Bun 執行環境 | 套件內直接發佈 TypeScript 原始碼，要求 Bun ≥ 1.4.3。Node.js 環境雖可完成套件安裝，但無法直接執行 |
+| 型別檢查要求 TypeScript ≥ 7.0.2 | API 在 TypeScript 7.0.2 下設計與檢查，`devDependencies` 中精確鎖版；不為更舊的編譯器做相容。高於 7.0.2 的結果未作斷言——`bun-types` 只在那一側才開啟 `typesVersions: ">= 7.1"` 閘控，`with { type: "text" }` 的解析結果會隨之改變 |
 | 型別檢查需自備 `@types/bun` | 套件內是 `.ts` 原始碼，消費方的 `bun check` 會一併編譯它們。需執行 `bun add -d @types/bun`，否則型別檢查會在 `node_modules` 內回報 `TS2868: Cannot find name 'Bun'` |
 | 基於 `bun:ffi` 建構 | `bun:ffi` 在 Bun 中仍標記為實驗性功能（Experimental）。官方建議正式環境優先採用 Node-API，本專案選擇 `bun:ffi` 是為了換取零第三方相依性的輕量架構 |
 

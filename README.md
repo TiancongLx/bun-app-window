@@ -2,6 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/bun-app-window?color=cb3837&logo=npm)](https://www.npmjs.com/package/bun-app-window)
 [![Bun](https://img.shields.io/badge/Bun-%3E%3D1.4.3-f472b6?logo=bun&logoColor=white)](https://bun.sh)
+[![TypeScript](https://img.shields.io/badge/TypeScript-%3E%3D7.0.2-3178C6?logo=typescript&logoColor=white)](#requirements--design-boundaries)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6?logo=windows&logoColor=white)](#requirements--design-boundaries)
 [![WebView2](https://img.shields.io/badge/WebView2-System%20Runtime-008080)](#requirements--design-boundaries)
 [![License](https://img.shields.io/badge/License-MIT-2ea44f)](./LICENSE)
@@ -29,6 +30,7 @@ Before adopting this package, please review the following architectural constrai
 | --- | --- |
 | Windows x64 only | Enforced via `os` and `cpu` fields in `package.json` (the platform-neutral package name is reserved for future expansion). A prebuilt `libshell.dll` is shipped in the package; no install-time compilation is required |
 | Bun runtime required | Ships raw TypeScript source files and requires Bun >= 1.4.3. While Node.js can install the package, it cannot execute it |
+| TypeScript >= 7.0.2 to type-check it | The API is designed and checked on TypeScript 7.0.2, pinned exactly in `devDependencies`; no compatibility work is done for older compilers. Above 7.0.2 the outcome is unasserted — `bun-types` only opens its `typesVersions: ">= 7.1"` gate there, which changes what a `with { type: "text" }` import resolves to |
 | Type-checking needs `@types/bun` | Because the package ships `.ts` sources, your own `bun check` compiles them too. Add `bun add -d @types/bun`; without it the checker reports `TS2868: Cannot find name 'Bun'` from inside `node_modules` |
 | Built on `bun:ffi` | `bun:ffi` is marked as experimental in Bun. While Bun recommends Node-API for production stability, this library chooses `bun:ffi` to achieve a zero-dependency footprint |
 
