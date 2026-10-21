@@ -174,6 +174,27 @@ await app.wait();                  // 視窗關閉時 resolve
 await app.stop();                  // 釋放事件泵與服務；冪等，已關閉時立即回傳
 ```
 
+傳 `page` 就能把打包好的頁面指令碼交給骨架，不必自己寫那條路由。`createApp` 會應答
+`PAGE_JS_PATH`（`/page.js`）並帶上正確的 `content-type`——而這裡正是靜默出錯的地方：
+模組指令碼以 `text/plain` 送出時會被拒絕執行且不報語法錯，頁面照常渲染、指令碼一行不跑。
+
+```ts
+import { bundlePage } from "bun-app-window/pack";
+
+// 建置期，不是啟動時——見下文 pack 一節
+const { code } = await bundlePage({ entry: "src/ui/page.ts" });
+
+const app = await createApp({ html, page: code, service });
+```
+
+`App` 上另有兩個成員，各替我省一次呼叫和一條子路徑匯入：
+
+- `app.debug` —— 與 `debugOf(app.shell)` 回傳同一個物件。同樣不在穩定性承諾範圍內。
+- `app.attachPlacement(file)` —— 把位置持久化接到骨架的**唯一**事件泵上。自己呼叫
+  `attachPlacementStore` 而忘了傳 `{ events: app.events }`，它會起第二個泵；而
+  `shell.pollEvents()` 是消費式的，兩個泵各拿一半事件，視窗位置隨機遺失，兩端都不報錯。
+  這個方法讓那個錯誤無法表達。
+
 ```ts
 // page.ts —— index.html 的 bundle 內
 import { connect } from "bun-app-window/ipc";
@@ -421,6 +442,45 @@ d.hittest(x, y);
 
 `metrics()` 與 `dpi()` 回傳的是**格式化文字**，不是物件。真要解析就寫進一次性指令碼裡，別把
 解析器塞進正式程式碼——這個格式不屬於任何契約。
+
+### `bun-app-window/types` — 常數面，瀏覽器安全
+
+一個零依賴模組，承載全部常數：`FLAG_*`、`BROWSER_UI_*`、`RESIZE_EDGE`、`RESIZE_INDEX`、
+`ZOOM_LADDER`、`ZOOM_MIN`、`ZOOM_MAX`、`STATE_*` 及相關型別。
+
+**頁面側請用這個子路徑。** 主入口經 `./native` 引入 `bun:ffi`，瀏覽器打包器解析不了它——
+所以在頁面程式碼裡寫 `import { BROWSER_UI_ALL } from "bun-app-window"` 會在打包期失敗。
+開這個子路徑就是為了讓同一份常數被共用，而不是各自手抄：
+
+```ts
+import { BROWSER_UI_ALL, ZOOM_LADDER, RESIZE_EDGE, resizeIndex } from "bun-app-window/types";
+```
+
+它只有一個不變量：`src/shell/types.ts` 必須保持零 import。有靜態斷言守著。
+
+### `bun-app-window/pack` — 打包頁面指令碼
+
+頁面指令碼必須先打包瀏覽器才載入得了：它會 import `bun-app-window/ipc` 這類裸模組名，
+瀏覽器解析不了。打包要放在**建置期**，不是啟動時——`bun build --compile` 之後
+`import.meta.dir` 指向封存內部（`B:\~BUN\root`），`.ts` 原始碼已經不在那裡了。
+
+```ts
+import { bundlePage, writePageBundle } from "bun-app-window/pack";
+
+// 只在記憶體裡：把字串交給 createApp({ page })
+const { code, bytes } = await bundlePage({ entry: "src/ui/page.ts" });
+
+// 或者寫入磁碟，例如從一個 bundle:page 的 npm script 裡呼叫
+await writePageBundle({ entry: "src/ui/page.ts", out: "src/ui/page.bundle.txt" });
+```
+
+`target: "browser"` 與 `format: "esm"` 是固定的，不可配置——頁面指令碼就是這兩者。
+`bytes` 是 UTF-8 位元組數，不是 `string.length`；原始碼裡只要有非 ASCII 文字兩者就不同，
+而一個「看起來對」的體積讀數比沒有讀數更糟。
+
+失敗時拋錯並帶上 Bun 的完整診斷。兩種形態都覆蓋了：編譯期問題以
+`{ success: false, logs }` 回傳，而入口本身不可達時**拋 `AggregateError`**，
+它的 `message` 只有一句 `Bundle failed`，細節在 `.errors` 上。
 
 ### `bun-app-window/native` — 預編譯動態連結程式庫本體
 

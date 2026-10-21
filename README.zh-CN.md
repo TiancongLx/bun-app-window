@@ -175,6 +175,27 @@ await app.wait();                  // 窗口关闭时 resolve
 await app.stop();                  // 释放事件泵与服务；幂等，已关闭时立即返回
 ```
 
+传 `page` 就能把打包好的页面脚本交给骨架，不必自己写那条路由。`createApp` 会应答
+`PAGE_JS_PATH`（`/page.js`）并带上正确的 `content-type`——而这里正是静默出错的地方：
+模块脚本以 `text/plain` 送出时会被拒绝执行且不报语法错，页面照常渲染、脚本一行不跑。
+
+```ts
+import { bundlePage } from "bun-app-window/pack";
+
+// 构建期，不是启动时——见下文 pack 一节
+const { code } = await bundlePage({ entry: "src/ui/page.ts" });
+
+const app = await createApp({ html, page: code, service });
+```
+
+`App` 上另有两个成员，各替我省一次调用和一条子路径导入：
+
+- `app.debug` —— 与 `debugOf(app.shell)` 返回同一个对象。同样不在稳定性承诺范围内。
+- `app.attachPlacement(file)` —— 把位置持久化接到骨架的**唯一**事件泵上。自己调
+  `attachPlacementStore` 而忘了传 `{ events: app.events }`，它会起第二个泵；而
+  `shell.pollEvents()` 是消费式的，两个泵各拿一半事件，窗口位置随机丢失，两端都不报错。
+  这个方法让那个错误无法表达。
+
 ```ts
 // page.ts —— index.html 的 bundle 里
 import { connect } from "bun-app-window/ipc";
@@ -421,6 +442,45 @@ d.hittest(x, y);
 
 `metrics()` 与 `dpi()` 返回的是**格式化文本**，不是对象。真要解析就写进一次性脚本里，别把解析器
 塞进生产代码——这个格式不属于任何契约。
+
+### `bun-app-window/types` — 常量面，浏览器安全
+
+一个零依赖模块，承载全部常量：`FLAG_*`、`BROWSER_UI_*`、`RESIZE_EDGE`、`RESIZE_INDEX`、
+`ZOOM_LADDER`、`ZOOM_MIN`、`ZOOM_MAX`、`STATE_*` 及相关类型。
+
+**页面侧请用这个子路径。** 主入口经 `./native` 引入 `bun:ffi`，浏览器打包器解析不了它——
+所以在页面代码里写 `import { BROWSER_UI_ALL } from "bun-app-window"` 会在打包期失败。
+开这个子路径就是为了让同一份常量被共享，而不是各自手抄：
+
+```ts
+import { BROWSER_UI_ALL, ZOOM_LADDER, RESIZE_EDGE, resizeIndex } from "bun-app-window/types";
+```
+
+它只有一个不变量：`src/shell/types.ts` 必须保持零 import。有静态断言守着。
+
+### `bun-app-window/pack` — 打包页面脚本
+
+页面脚本必须先打包浏览器才加载得了：它会 import `bun-app-window/ipc` 这类裸模块名，
+浏览器解析不了。打包要放在**构建期**，不是启动时——`bun build --compile` 之后
+`import.meta.dir` 指向归档内部（`B:\~BUN\root`），`.ts` 源码已经不在那里了。
+
+```ts
+import { bundlePage, writePageBundle } from "bun-app-window/pack";
+
+// 只在内存里：把字符串交给 createApp({ page })
+const { code, bytes } = await bundlePage({ entry: "src/ui/page.ts" });
+
+// 或者写盘，例如从一个 bundle:page 的 npm script 里调
+await writePageBundle({ entry: "src/ui/page.ts", out: "src/ui/page.bundle.txt" });
+```
+
+`target: "browser"` 与 `format: "esm"` 是固定的，不可配——页面脚本就是这两者。
+`bytes` 是 UTF-8 字节数，不是 `string.length`；源码里只要有非 ASCII 文本两者就不同，
+而一个「看起来对」的体积读数比没有读数更糟。
+
+失败时抛错并带上 Bun 的完整诊断。两种形态都覆盖了：编译期问题以
+`{ success: false, logs }` 返回，而入口本身不可达时**抛 `AggregateError`**，
+它的 `message` 只有一句 `Bundle failed`，细节在 `.errors` 上。
 
 ### `bun-app-window/native` — 预编译动态库本体
 

@@ -177,6 +177,28 @@ await app.wait();                  // resolves when the window closes
 await app.stop();                  // releases the event pump and the server; idempotent
 ```
 
+Pass `page` to serve a bundled page script without writing a route yourself. `createApp` answers
+`PAGE_JS_PATH` (`/page.js`) with the right `content-type`, which is the part that silently breaks:
+a module script served as `text/plain` is refused with no syntax error, so the page renders and
+nothing runs.
+
+```ts
+import { bundlePage } from "bun-app-window/pack";
+
+// Build time, not startup — see the `pack` section below.
+const { code } = await bundlePage({ entry: "src/ui/page.ts" });
+
+const app = await createApp({ html, page: code, service });
+```
+
+Two more things on `App` that save a call and a subpath import:
+
+- `app.debug` — the same object `debugOf(app.shell)` returns. Still outside the stability contract.
+- `app.attachPlacement(file)` — wires placement persistence to the skeleton's **single** event pump.
+  Call `attachPlacementStore` yourself and forget `{ events: app.events }`, and it starts a second
+  pump; since `shell.pollEvents()` is consumptive, the two split the stream and window position is
+  dropped at random with no error on either side. This method makes that mistake unrepresentable.
+
 ```ts
 // page.ts — inside index.html's bundle
 import { connect } from "bun-app-window/ipc";
@@ -437,6 +459,47 @@ d.hittest(x, y);
 
 `metrics()` and `dpi()` return **formatted text**, not objects. Parse it in throwaway tooling if you
 must; do not put a parser in production code, because the layout is not part of any contract.
+
+### `bun-app-window/types` — Constants, Safe for the Browser
+
+A zero-dependency module holding the whole constant surface: `FLAG_*`, `BROWSER_UI_*`, `RESIZE_EDGE`,
+`RESIZE_INDEX`, `ZOOM_LADDER`, `ZOOM_MIN`, `ZOOM_MAX`, `STATE_*`, and the related types.
+
+**Use this subpath on the page side.** The main entry imports `bun:ffi` through `./native`, which a
+browser bundle cannot resolve — so `import { BROWSER_UI_ALL } from "bun-app-window"` inside page code
+fails at bundle time. This subpath exists precisely so the same constants can be shared instead of
+hand-copied:
+
+```ts
+import { BROWSER_UI_ALL, ZOOM_LADDER, RESIZE_EDGE, resizeIndex } from "bun-app-window/types";
+```
+
+Its only invariant is that `src/shell/types.ts` must stay import-free; a static assertion enforces it.
+
+### `bun-app-window/pack` — Bundling the Page Script
+
+Pages have to be bundled before the browser can load them: they import bare module names like
+`bun-app-window/ipc`, which a browser cannot resolve. Do it at **build time**, not at startup —
+after `bun build --compile`, `import.meta.dir` points inside the archive (`B:\~BUN\root`) and the
+`.ts` source is no longer there.
+
+```ts
+import { bundlePage, writePageBundle } from "bun-app-window/pack";
+
+// In memory — hand the string to createApp({ page })
+const { code, bytes } = await bundlePage({ entry: "src/ui/page.ts" });
+
+// Or write it out, e.g. from a `bundle:page` npm script
+await writePageBundle({ entry: "src/ui/page.ts", out: "src/ui/page.bundle.txt" });
+```
+
+`target: "browser"` and `format: "esm"` are fixed, not configurable — that is what a page script is.
+`bytes` is a UTF-8 byte count, not `string.length`; the two differ on any source containing non-ASCII
+text, and a reported size that only looks right is worse than no reported size.
+
+Failure throws with Bun's full diagnostics. Both shapes are handled: compile-time problems come back
+as `{ success: false, logs }`, while an unreachable entry point **throws an `AggregateError`** whose
+`message` is only `Bundle failed` and whose detail lives on `.errors`.
 
 ### `bun-app-window/native` — The Prebuilt DLL
 
