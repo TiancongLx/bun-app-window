@@ -24,6 +24,13 @@
  * `--clean` 在 %TEMP% 里 clone 一份干净副本再跑，消除 `.build/` / `node_modules/` /
  * `vendor/webview2/` 等本地残留掩盖问题的可能；未提交改动会被提示并排除在外。
  *
+ * **`--clean` 的覆盖范围比工作区小，这一点每次都会打印出来。** `AGENTS.md` 与
+ * `.internal/adr/` 不在版本控制里（`.gitignore`），干净副本没有它们，
+ * `tests/agents-doc.test.ts` 的 `guard` 于是整组 `describe.skip`。连带后果是
+ * `文档里的脚本路径引用` 那条也不跑，而它同时检查 `docs/pitfalls.md`——所以
+ * 「文档里引用了不存在的路径」这一类问题，只有在不带 `--clean` 时才可能被抓到。
+ * 打 `GATE PASSED` 一律带 `(clean)` 后缀，就是为了不让两种覆盖范围混为一谈。
+ *
  * 为什么是 TypeScript 而不是 PowerShell（ADR 0012）：
  *
  *   - `$LASTEXITCODE` 是全局变量，只反映最后一条 native 命令；`Bun.spawn` 的
@@ -607,6 +614,27 @@ export async function gateClean(root: string, opts: GateOptions, deps: GateDeps)
 
     io.step(`clean clone HEAD(${headSha}) -> ${probe}`);
 
+    // 显式声明覆盖范围的缺口。不写出来的话，`GATE PASSED (clean)` 会被读成
+    // 「比工作区更严格」——而实际上它**少**了一整组断言：`AGENTS.md` 与
+    // `.internal/adr/` 都不在版本控制里，干净副本没有它们，
+    // `tests/agents-doc.test.ts` 的 `guard` 于是整组 `describe.skip`。
+    // 连带后果容易被忽略：`文档里的脚本路径引用` 那条同时检查 `docs/pitfalls.md`
+    // （版控内），也一并被跳过了，所以文档里的幽灵路径引用在 --clean 下不会被抓。
+    // 数字不写死（会漂移），只声明覆盖了哪些、没覆盖哪些。
+    //
+    // 走 `io.log` 而不是 `io.warn`：它是**信息性声明**而非错误，且 stdout / stderr
+    // 被分开收集时（工具调用、CI、重定向），warn 会让这段跑到输出的末尾去，
+    // 与它要解释的那行脱节。
+    for (const line of [
+        "         NOTE: this run does NOT cover documentation consistency.",
+        "               AGENTS.md and .internal/adr/ are not version-controlled,",
+        "               so tests/agents-doc.test.ts skips its guard group here —",
+        "               including the docs path-reference check, which also covers",
+        "               docs/pitfalls.md. Run without --clean to exercise it.",
+    ]) {
+        io.log(line);
+    }
+
     // file:// 前缀：本地路径直接 clone 时 git 会忽略 --depth 并告警
     const srcUrl = `file:///${root.replace(/\\/g, "/")}`;
     const clone = await spawn(["git", "clone", "--quiet", "--depth", "1", srcUrl, probe], root);
@@ -653,6 +681,9 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
         console.log(`bun run scripts/gate.ts [options]
 
   --clean        在 HEAD 的干净副本里跑（消除本地产物掩盖问题的可能）
+                 ⚠ 覆盖范围比工作区小：AGENTS.md 与 .internal/adr/ 不在版本控制里，
+                   干净副本没有它们，tests/agents-doc.test.ts 的整组断言会 skip，
+                   连带 docs/pitfalls.md 的路径引用检查也不跑。每次运行都会提示。
   --keep-clone   与 --clean 同用，保留副本供排查
   --skip-test    只跑类型检查与 .ps1 语法，跳过行为测试与消费方验收
   --skip-pack    跳过消费方验收（只在改门禁自身时用）

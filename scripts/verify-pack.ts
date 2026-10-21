@@ -349,7 +349,11 @@ export async function main(argv: readonly string[]): Promise<number> {
             `${JSON.stringify(
                 {
                     compilerOptions: {
-                        lib: ["ESNext"],
+                        // `DOM` 必须在场。包发布的是 `.ts` 源码，消费者编译的是**我们的源码**，
+                        // 所以它看到的全局类型取决于这个 `lib`，而不是我们的 tsconfig。
+                        // 少一个 `DOM` 会让整个「带 document 的消费者」形态脱离验收——
+                        // 0.4.0 的 TS2352 就是这样活过一个全绿门禁的（pitfalls 3.17）。
+                        lib: ["ESNext", "DOM"],
                         target: "ESNext",
                         module: "Preserve",
                         moduleResolution: "bundler",
