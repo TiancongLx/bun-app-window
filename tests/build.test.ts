@@ -110,7 +110,7 @@ describe("clangArgs", () => {
 });
 
 describe("LIBS 与产物的一致性", () => {
-    test("九个子系统库与 pwsh 版本逐一对齐", () => {
+    test("十个子系统库与 pwsh 版本逐一对齐", () => {
         expect([...LIBS]).toEqual([
             "advapi32",
             "ole32",
@@ -121,6 +121,9 @@ describe("LIBS 与产物的一致性", () => {
             "user32",
             "version",
             "dwmapi",
+            // 原生 caption 按钮的字形绘制。此前没有这一项：旧实现全靠页面 CSS
+            // 画按钮，壳层一个 GDI 调用都没有；少了它链接期就会报未解析符号。
+            "gdi32",
         ]);
     });
 

@@ -42,6 +42,10 @@ export const LIBS = [
     "user32",
     "version",
     "dwmapi",
+    // 原生 caption 按钮要画字形：CreateDIBSection / CreateFontW / DrawTextW
+    // 分属 gdi32 与 user32。此前没有这一项——旧实现全靠页面 CSS 画按钮，
+    // 壳层一个 GDI 调用都没有。
+    "gdi32",
 ] as const;
 
 /** 与平台/优化相关的固定开关 */

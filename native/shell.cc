@@ -72,6 +72,60 @@ enum ShellFlag : int {
   //
   // 需要「应用本身就是浏览器」时再给这个标志。
   SHELL_FLAG_ALLOW_EXTERNAL_NAV = 128,
+  // 顶部让出一条给自绘标题栏：把 WebView2 的容器子窗口整体下移 caption 高度。
+  //
+  // ## 为什么需要它（这不是布局偏好，是命中测试的硬约束）
+  //
+  // `WebView2` 的容器子窗口（widget）铺满整个客户区，它的内部还有三层 Chrome 窗口，
+  // 而**真实鼠标的 `WM_NCHITTEST` 走的是光标下最深那层**（`pitfalls` 2.14 的实测链）：
+  //
+  //   webview_widget → Chrome_WidgetWin_0 → Chrome_WidgetWin_1
+  //   → Chrome_RenderWidgetHostHWND → Intermediate D3D Window
+  //
+  // 后三层在**别的进程**里（实测 pid 各不相同），`SetWindowLongPtr` 够不着，
+  // 所以「把 HTTRANSPARENT 一路传上去」这条子类化路线走不通。它们返回 `HTCLIENT`，
+  // 顶层窗口那套 `HTMAXBUTTON` 逻辑永远没机会被问到——Snap Layouts 因此不弹。
+  //
+  // 让 widget 别盖住标题栏，光标就落在顶层窗口自己身上，命中测试正常走
+  // `hit_test_client` → `caption_button_at` → `HTMAXBUTTON`。实测（可逆的
+  // `SetWindowPos` 实验，@192dpi 下移 64 物理 px）：
+  //
+  //   WindowFromPoint(最大化按钮)  改前 0x8d00b8 Chrome_RenderWidgetHostHWND
+  //                              改后 0x3509b6 webview_shell（就是顶层）
+  //   悬停结果                     改前 无面板   改后 Snap 面板弹出
+  //
+  // ## 为什么是显式 flag 而不是无条件
+  //
+  // 无边框不等于要自绘标题栏：有的应用整窗都是内容区，`baw-mvp` 也是按
+  // `windowMode()` 决定挂不挂标题栏。无条件让位会在那些应用顶部留一条
+  // 点不到的死区。所以由消费者声明「我顶部要放东西」。
+  SHELL_FLAG_TITLEBAR_RESERVE = 256,
+  // 在客户区右上角盖一层**原生绘制**的 caption 按钮（close / maximize / minimize）。
+  //
+  // ## 它解决什么
+  //
+  // 让页面拿到 Snap Layouts。`WM_NCHITTEST` 走光标下最深那层，而 WebView2 的渲染
+  // 子窗口在别的进程里、返回 `HTCLIENT`，光标的查询根本到不了顶层窗口
+  // （`pitfalls` 2.14 的实测链）。盖一个自己的子窗口在按钮位置上，命中就落在
+  // 壳层手里，`HTMAXBUTTON` 才生效。
+  //
+  // ## 它与 TITLEBAR_RESERVE 是**替代关系**，不能同时用
+  //
+  // `TITLEBAR_RESERVE` 的做法是把 widget 整体下移 caption 高度，让光标落到顶层窗口。
+  // 那条路实测能让 Snap 弹（见该 flag 的注释），但它把页面内容下移 32 逻辑 px，
+  // 而 caption 命中区固定在客户区 `y ∈ [0, 32)`——页面自己画的标题栏会与命中区
+  // **错位 32px**，想对齐只能给页面负偏移，那已经出了 widget 客户区、被子窗口裁掉。
+  // 所以「HTML 画标题栏 + 让位」在几何上不成立。
+  //
+  // 本 flag 不动布局：子窗口只是**盖在**按钮位置上（`SetWindowPos(HWND_TOP)`），
+  // 页面该怎么排还怎么排，缩放边框也不受影响。
+  //
+  // ## 与 `egoist/mygo` 的同构
+  //
+  // `internal/windows/titlebar.go` 就是这么做的：一个 layered 子窗口盖在 webview 上，
+  // 自己应答 `HTMINBUTTON` / `HTMAXBUTTON` / `HTCLOSE`，并把 `WM_NCMOUSEMOVE`
+  // 交给 `DefWindowProc`——后者才是真正弹出 Snap 面板的那一环。
+  SHELL_FLAG_NATIVE_CAPTIONS = 512,
 };
 
 enum ShellState : int {
@@ -112,6 +166,11 @@ bool g_resizable = true;
 bool g_defer_show = false;    // 延迟显示：等 shell_show() 再 ShowWindow
 bool g_accept_drop = false;   // 接受文件拖放
 bool g_start_maximized = false;  // 首次显示即以最大化出现
+// 顶部让出一条给自绘标题栏（见 SHELL_FLAG_TITLEBAR_RESERVE）。
+// 只在 g_frameless 时起作用：带边框模式的标题栏由系统画，widget 本来就在客户区内。
+bool g_titlebar_reserve = false;
+// 原生 caption 按钮（见 SHELL_FLAG_NATIVE_CAPTIONS）。同样只在 frameless 时起作用。
+bool g_native_captions = false;
 std::wstring g_app_id;        // AppUserModelID：决定任务栏分组与图标归属
 int g_min_w = 320;
 int g_min_h = 200;
@@ -145,6 +204,28 @@ const int kCaptionBarHeight = 32;
 const int kCaptionButtonWidth = 46;
 // 顺序必须与 types.ts 的 CAPTION_BUTTONS 一致：从右往左 close → maximize → minimize
 // （判定见 caption_button_at，只在这里用一次）
+const int kCaptionButtonCount = 3;
+// caption 字形尺寸（逻辑像素，96 DPI 基准）。Win 11 量出来的真值：
+// 关闭 / 最大化 / 还原 都是 10×10，最小化是 10×1（一条横线）。
+//
+// 这个数字与 CSS 的 `font-size: 10px` 是同一个口径——但两边落地方式不同：
+// CSS 靠字体的 em 框，这里靠 GDI 的 `lfHeight = -MulDiv(10, dpi, 96)`（负值表示
+// 字符高度 = em height）。同在 10 这个值下，Fluent Icons 的字形填满 10×10，
+// 而几何符号只占 5×4.5 —— 这就是「字形偏小」的真正原因，换字号治不了。
+const int kCaptionGlyphSize = 10;
+
+// ---- 原生 caption 按钮子窗口（SHELL_FLAG_NATIVE_CAPTIONS）----
+//
+// 为什么需要独立的子窗口、而不是让顶层窗口自己应答命中：
+// `WM_NCHITTEST` 走光标下**最深**那层，而 WebView2 的渲染子窗口在别的进程里
+// 且返回 `HTCLIENT`（`pitfalls` 2.14）。盖一个自己的窗口在按钮位置上，
+// 命中就落在壳层手里。详见 SHELL_FLAG_NATIVE_CAPTIONS 的注释。
+HWND g_caption = nullptr;
+// hover / pressed 的按钮索引，与 caption_index_at 的编号一致（0=close 1=max 2=min）。
+int g_caption_hot = -1;
+int g_caption_pressed = -1;
+// 是否已向系统注册「离开非客户区」的通知。见 caption_proc 的 WM_NCMOUSEMOVE。
+bool g_caption_tracking = false;
 
 // 全屏状态：进入前保存样式与矩形，退出时原样还原。
 //
@@ -478,23 +559,25 @@ int frame_border_y() {
          GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
 }
 
-// 自绘 caption button 的命中判定。
+// 自绘 caption button 的命中判定（返回**按钮索引**）。
 //
-// 返回 HT* 码（HTCLOSE / HTMAXBUTTON / HTMINBUTTON）；不在按钮上返回 -1。
-// **不用 HTNOWHERE 当哨兵**：那是合法的 HT 值（0），拿它做「没命中」会让
-// 调用点分不清「不在按钮上」与「命中了位置 0」。
+// 返回 0=close / 1=maximize / 2=minimize（从右往左），不在按钮上返回 -1。
+// **不用 0 当哨兵**：0 是合法的「关闭按钮」索引。
 //
-// ## 为什么这个判定必须先于缩放边框
+// 这个函数是命中逻辑的**唯一**实现，两个消费者共用：
 //
-// 缩放边框判定在 `IsZoomed` 时整体跳过（最大化的窗口本来就不能拖边缘）。
-// 而 caption button 在**最大化时同样要能被命中**——用户靠它还原。
-// 如果沿用原来的 early-return，最大化后悬停/点击最大化按钮全部失效。
+//   `caption_button_at`  —— 顶层窗口的 WM_NCHITTEST（子窗口建不起来时的兜底）
+//   `caption_proc`       —— 原生 caption 子窗口的 WM_NCHITTEST / WM_NCMOUSEMOVE
+//
+// 分两份写必然漂移：改一处忘一处，表现是「子窗口上的悬停高亮位置和点击位置差一格」。
 //
 // ## 坐标
 //
-// 入参是**客户区坐标（设备像素）**。逻辑像素常量在这里按 `current_dpi()` 换算，
+// 入参是**所在窗口的客户区坐标（设备像素）**。两个消费者传的都是「贴客户区右上角、
+// 宽 3×46、高 32（逻辑）」的那块矩形自己的客户区，所以按 `client.right` 从右往左
+// 数出来的索引与顶层窗口一致。逻辑像素常量按 `current_dpi()` 换算，
 // 所以 200% 缩放下 46×32 逻辑像素的按钮是 92×64 物理像素。
-int caption_button_at(const RECT &client, POINT pt) {
+int caption_index_at(const RECT &client, POINT pt) {
   const UINT dpi = current_dpi();
   const int bw = MulDiv(kCaptionButtonWidth, static_cast<int>(dpi), 96);
   const int bh = MulDiv(kCaptionBarHeight, static_cast<int>(dpi), 96);
@@ -510,10 +593,27 @@ int caption_button_at(const RECT &client, POINT pt) {
     return -1;
   }
 
-  // 从右边缘往左数：0 = close，1 = maximize，2 = minimize。
-  // 顺序与 types.ts 的 CAPTION_BUTTONS 一致。
   const int from_right = client.right - pt.x;
   const int idx = from_right / bw;
+  if (idx >= 0 && idx < kCaptionButtonCount) {
+    return idx;
+  }
+  return -1;
+}
+
+// 自绘 caption button 的命中判定（返回 HT* 码）。
+//
+// 返回 HT* 码（HTCLOSE / HTMAXBUTTON / HTMINBUTTON）；不在按钮上返回 -1。
+// **不用 HTNOWHERE 当哨兵**：那是合法的 HT 值（0），拿它做「没命中」会让
+// 调用点分不清「不在按钮上」与「命中了位置 0」。
+//
+// ## 为什么这个判定必须先于缩放边框
+//
+// 缩放边框判定在 `IsZoomed` 时整体跳过（最大化的窗口本来就不能拖边缘）。
+// 而 caption button 在**最大化时同样要能被命中**——用户靠它还原。
+// 如果沿用原来的 early-return，最大化后悬停/点击最大化按钮全部失效。
+int caption_button_at(const RECT &client, POINT pt) {
+  const int idx = caption_index_at(client, pt);
   if (idx == 0) return HTCLOSE;
   if (idx == 1) return HTMAXBUTTON;
   if (idx == 2) return HTMINBUTTON;
@@ -577,15 +677,491 @@ LRESULT hit_test(HWND hwnd, POINT screen_pt) {
   return hit_test_client(hwnd, pt);
 }
 
-// 把 widget 铺满顶层窗口客户区。widget 的 WM_SIZE 会驱动 put_Bounds。
+// 把 widget 放到顶层窗口客户区里。
+//
+// 默认铺满整个客户区；`SHELL_FLAG_TITLEBAR_RESERVE` 打开时**从顶部让出
+// 一条 caption 高度**，让光标能落在顶层窗口自己身上（命中测试走
+// `hit_test_client` → `caption_button_at`，见该 flag 的注释）。
+//
+// widget 的 WM_SIZE 会驱动 put_Bounds，所以这里只摆位置与尺寸，内容区自己跟随。
+// 让位高度按当前 DPI 换算：`kCaptionBarHeight` 是 96 DPI 的逻辑像素。
 void fit_widget() {
   if (!g_hwnd || !g_widget) {
     return;
   }
   RECT rc{};
   GetClientRect(g_hwnd, &rc);
-  SetWindowPos(g_widget, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+  const int w = rc.right - rc.left;
+  const int h = rc.bottom - rc.top;
+
+  int top = 0;
+  if (g_frameless && g_titlebar_reserve) {
+    const int bar = MulDiv(kCaptionBarHeight, static_cast<int>(current_dpi()), 96);
+    // 只在还有余量时才让：窗口比标题栏还矮时（极小尺寸）让位会把 widget 压成
+    // 负高度，SetWindowPos 收到负值的行为没有保证。宁可不让位也不给畸形尺寸。
+    if (bar > 0 && bar < h) {
+      top = bar;
+    }
+  }
+
+  SetWindowPos(g_widget, nullptr, 0, top, w, h - top,
                SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+// ============================================================================
+// 原生 caption 按钮（SHELL_FLAG_NATIVE_CAPTIONS）
+// ============================================================================
+//
+// 完整理由见 SHELL_FLAG_NATIVE_CAPTIONS 的注释。这里只留两条实现层面的要点。
+//
+// ## 1. 为什么是 layered + per-pixel alpha
+//
+// Win 11 的 caption 按钮在 rest 状态下**没有背板**——字形周围透出的是页面本身
+// （深色 #202020 / 浅色 #f3f3f3，由页面自己的 --ws-tb-bg 决定）。普通子窗口会拿
+// 自己的背景刷子盖住那片区域，观感是标题栏右上角贴了一块色块。只有
+// `WS_EX_LAYERED` + `UpdateLayeredWindow` 能表达「字形有像素、其余透明」。
+// （子窗口支持 WS_EX_LAYERED 从 Windows 8 开始，本包目标平台是 Windows x64。）
+//
+// ## 2. 为什么 rest 的 alpha 必须是 1 而不是 0
+//
+// layered window 的命中测试**按 alpha 走**：alpha 为 0 的像素让鼠标穿透过去
+// （MS 文档「Hit Testing and Layered Windows」）。rest 状态若老老实实全画成
+// alpha=0，光标移到按钮空白处就穿到下面的 WebView2 渲染窗口，命中断在那里
+// ——整个子窗口白建，而且症状和「没建」一模一样。所以整块底填 **alpha=1**
+// （1/255，肉眼不可见），只为保住命中。
+//
+// `egoist/mygo` 的 `captionBar.colors()` 里 rest 背板同样是 `alpha = 1`，
+// 注释写着「几乎全透明，但保住命中」——同一个坑，同一处修法。
+//
+// ## 3. 颜色与五态的规格来源
+//
+// 与 `src/ui/titlebar.ts` 的 CSS 是**同一份规格的两处落地**（第三处是
+// `src/shell/types.ts` 的常量）。改一边必须改另一边，否则同一个窗口里
+// HTML 画的标题栏与原生画的按钮会有色差。数值取自 Windows 自身实现，
+// 与 `egoist/mygo/internal/windows/titlebar.go` 的 `colors()` 逐项核对过。
+
+// 打包成 premultiplied BGRA。`UpdateLayeredWindow` 要求 AC_SRC_ALPHA，
+// 即每个通道都已乘过 alpha——不预乘的合成结果会「边缘发白」。
+uint32_t cap_premul(int r, int g, int b, int a) {
+  const uint32_t ua = static_cast<uint32_t>(a);
+  const uint32_t pr = static_cast<uint32_t>(r) * ua / 255u;
+  const uint32_t pg = static_cast<uint32_t>(g) * ua / 255u;
+  const uint32_t pb = static_cast<uint32_t>(b) * ua / 255u;
+  return (ua << 24) | (pr << 16) | (pg << 8) | pb;
+}
+
+void cap_fill(uint32_t *px, int stride, int x0, int y0, int x1, int y1, uint32_t v) {
+  for (int y = y0; y < y1; ++y) {
+    uint32_t *row = px + static_cast<size_t>(y) * static_cast<size_t>(stride);
+    for (int x = x0; x < x1; ++x) {
+      row[x] = v;
+    }
+  }
+}
+
+// 建一个字体再问它「你到底是谁」：被系统替换掉时 `GetTextFaceW` 会给出真实字体名，
+// 比按名字 `EnumFontFamiliesEx` 更硬（同一手法见 mygo 的 `fontFace`）。
+//
+// 为什么需要探测而不是直接写 `Segoe Fluent Icons`：那是 Win 11 的字体，Win 10 上
+// 没有，缺字体时 PUA 码位会渲染成豆腐块。两份字体里 E921/E922/E923/E8BB
+// **位置相同**，所以一份码位覆盖两代系统，只需换字体名。
+bool cap_font_available(const wchar_t *face) {
+  HFONT f = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                        OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                        DEFAULT_PITCH | FF_DONTCARE, face);
+  if (!f) {
+    return false;
+  }
+  HDC dc = CreateCompatibleDC(nullptr);
+  if (!dc) {
+    DeleteObject(f);
+    return false;
+  }
+  HGDIOBJ old = SelectObject(dc, f);
+  wchar_t got[LF_FACESIZE] = {0};
+  GetTextFaceW(dc, LF_FACESIZE, got);
+  SelectObject(dc, old);
+  DeleteDC(dc);
+  DeleteObject(f);
+  return lstrcmpiW(got, face) == 0;
+}
+
+// 探测结果缓存到进程级：字体在进程生命周期内不会变，每次重绘都枚举一遍没有意义。
+const wchar_t *cap_face() {
+  static const wchar_t *cached = nullptr;
+  static bool probed = false;
+  if (!probed) {
+    probed = true;
+    if (cap_font_available(L"Segoe Fluent Icons")) {
+      cached = L"Segoe Fluent Icons";  // Win 11
+    } else if (cap_font_available(L"Segoe MDL2 Assets")) {
+      cached = L"Segoe MDL2 Assets";  // Win 10
+    }
+  }
+  return cached;
+}
+
+// 按钮索引 → 字形码位。与 `TITLEBAR_GLYPHS.fluent` 逐字一致。
+const wchar_t *cap_glyph(int idx, bool maximized) {
+  if (idx == 0) return L"\uE8BB";                          // ChromeClose
+  if (idx == 1) return maximized ? L"\uE923" : L"\uE922";  // ChromeRestore / ChromeMaximize
+  if (idx == 2) return L"\uE921";                          // ChromeMinimize
+  return L"";
+}
+
+// 重绘整个 caption 子窗口。hot / pressed / active / maximized / 主题任一变化都要调。
+void caption_paint() {
+  if (!g_caption || !IsWindow(g_caption)) {
+    return;
+  }
+  RECT rc{};
+  GetClientRect(g_caption, &rc);
+  const int w = rc.right - rc.left;
+  const int h = rc.bottom - rc.top;
+  if (w <= 0 || h <= 0) {
+    return;
+  }
+  const wchar_t *face = cap_face();
+  if (!face) {
+    return;  // 两个图标字体都没有：不画，但命中仍由 caption_proc 负责
+  }
+
+  const UINT dpi = current_dpi();
+  const int bw = MulDiv(kCaptionButtonWidth, static_cast<int>(dpi), 96);
+  const int bh = MulDiv(kCaptionBarHeight, static_cast<int>(dpi), 96);
+  if (bw <= 0 || bh <= 0) {
+    return;
+  }
+  const int glyph_top = 0;
+  const int glyph_bottom = h < bh ? h : bh;
+
+  const bool dark = system_uses_dark();
+  const bool active = g_hwnd && GetForegroundWindow() == g_hwnd;
+  const bool maximized = g_hwnd && IsZoomed(g_hwnd) != FALSE;
+
+  // 两张 DIB：dst 是最终合成结果（premultiplied），mask 只用来取字形覆盖率。
+  // 分两步是必要的——GDI 只会往不透明表面上画，直接画到 dst 上就读不到覆盖率了。
+  // 这里与 mygo 同构：先把字形画成「白字黑底」再按覆盖率做 alpha 合成，
+  // 换来的是抗锯齿正确、且前景色可以任意替换。
+  BITMAPINFO bi{};
+  bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bi.bmiHeader.biWidth = w;
+  bi.bmiHeader.biHeight = -h;  // 负数 = top-down，与下面的行遍历方向一致
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+
+  HDC screen = GetDC(nullptr);
+  HDC mem = screen ? CreateCompatibleDC(screen) : nullptr;
+  void *raw_dst = nullptr;
+  void *raw_mask = nullptr;
+  HBITMAP dib_dst =
+      mem ? CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &raw_dst, nullptr, 0) : nullptr;
+  HBITMAP dib_mask =
+      mem ? CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &raw_mask, nullptr, 0) : nullptr;
+  if (!screen || !mem || !dib_dst || !dib_mask || !raw_dst || !raw_mask) {
+    if (dib_dst) DeleteObject(dib_dst);
+    if (dib_mask) DeleteObject(dib_mask);
+    if (mem) DeleteDC(mem);
+    if (screen) ReleaseDC(nullptr, screen);
+    return;
+  }
+
+  auto *dst = static_cast<uint32_t *>(raw_dst);
+  auto *mask_px = static_cast<uint32_t *>(raw_mask);
+
+  // rest 的底：alpha=1，只为保住命中（见本节第 2 条）。
+  cap_fill(dst, w, 0, 0, w, h, cap_premul(0, 0, 0, 1));
+
+  HGDIOBJ old_bmp = SelectObject(mem, dib_dst);
+
+  // 字形先画到掩码上。掩码必须显式清黑：CreateDIBSection 的内容是未定义的。
+  const int glyph_h = -MulDiv(kCaptionGlyphSize, static_cast<int>(dpi), 96);
+  HFONT font = CreateFontW(glyph_h, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                           OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                           DEFAULT_PITCH | FF_DONTCARE, face);
+  if (font) {
+    SelectObject(mem, dib_mask);
+    cap_fill(mask_px, w, 0, 0, w, h, 0xFF000000u);
+    HGDIOBJ old_font = SelectObject(mem, font);
+    SetBkMode(mem, TRANSPARENT);
+    SetTextColor(mem, RGB(255, 255, 255));
+    for (int idx = 0; idx < kCaptionButtonCount; ++idx) {
+      const int right = w - idx * bw;
+      int left = right - bw;
+      if (left < 0) left = 0;
+      if (right <= left) continue;
+      RECT r{left, glyph_top, right, glyph_bottom};
+      FillRect(mem, &r, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+      RECT tr = r;
+      DrawTextW(mem, cap_glyph(idx, maximized), -1, &tr,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    SelectObject(mem, old_font);
+    SelectObject(mem, dib_dst);
+  }
+
+  // 逐按钮合成：先背板、再字形。前景色依赖按钮状态，所以不能整块一次算完。
+  const int fg = dark ? 255 : 0;
+  for (int idx = 0; idx < kCaptionButtonCount; ++idx) {
+    const int right = w - idx * bw;
+    int left = right - bw;
+    if (left < 0) left = 0;
+    if (right <= left) continue;
+
+    const bool hot = g_caption_hot == idx;
+    const bool pressed = g_caption_pressed == idx;
+    const bool is_close = idx == 0;
+
+    // 五态里的四种画法。第五种（disabled）这里不参与：caption 子窗口只被
+    // 创建来承载这三个按钮，禁用态由消费者通过页面侧表达（见 titlebar 的
+    // `setEnabled`），壳层不重复实现。
+    if (is_close && (hot || pressed)) {
+      // 关闭按钮的红底不走「前景色 + alpha」，它是实色。
+      // 数值与 CSS 的 --ws-tb-close-hover / --ws-tb-close-active 一致。
+      cap_fill(dst, w, left, glyph_top, right, glyph_bottom,
+               pressed ? cap_premul(0xb0, 0x2a, 0x1c, 255)
+                       : cap_premul(0xc4, 0x2b, 0x1c, 255));
+    } else if (pressed) {
+      // --ws-tb-active: rgba(255,255,255,0.200) / 浅色 rgba(0,0,0,0.200)
+      cap_fill(dst, w, left, glyph_top, right, glyph_bottom, cap_premul(fg, fg, fg, 51));
+    } else if (hot) {
+      // --ws-tb-hover: 0.102 → 26/255
+      cap_fill(dst, w, left, glyph_top, right, glyph_bottom, cap_premul(fg, fg, fg, 26));
+    }
+
+    // 字形颜色：红底上是白字（CSS 同样写死 #ffffff）；其余跟主题。
+    // 失焦只降字形不降背板——与 CSS 的 [data-active="false"] 同一条语义。
+    const int glyph_rgb = (is_close && (hot || pressed)) ? 255 : fg;
+    const int glyph_a = active ? 255 : 114;  // --ws-tb-inactive: 0.447 → 114/255
+
+    for (int y = glyph_top; y < glyph_bottom; ++y) {
+      const uint32_t *mrow = mask_px + static_cast<size_t>(y) * static_cast<size_t>(w);
+      uint32_t *drow = dst + static_cast<size_t>(y) * static_cast<size_t>(w);
+      for (int x = left; x < right; ++x) {
+        const int cov = static_cast<int>((mrow[x] >> 16) & 0xFFu);
+        if (cov == 0) continue;
+        const int a = glyph_a * cov / 255;
+        if (a <= 0) continue;
+        const uint32_t ua = static_cast<uint32_t>(a);
+        const uint32_t inv = 255u - ua;
+        const uint32_t d = drow[x];
+        const uint32_t sr = static_cast<uint32_t>(glyph_rgb) * ua / 255u;
+        const uint32_t out_a = ua + ((d >> 24) & 0xFFu) * inv / 255u;
+        const uint32_t out_r = sr + ((d >> 16) & 0xFFu) * inv / 255u;
+        const uint32_t out_g = sr + ((d >> 8) & 0xFFu) * inv / 255u;
+        const uint32_t out_b = sr + (d & 0xFFu) * inv / 255u;
+        drow[x] = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+      }
+    }
+  }
+
+  // psize **必须给**，不能传 nullptr —— 这一条是实测出来的，不是照文档抄的。
+  //
+  // 2026-10-22 用一次性探针对同一个窗口做 A/B：同样一张 `alpha=1` 的 DIB，
+  //   - 传 `&size`  → `WindowFromPoint` 立刻返回 caption 子窗口（3/3 命中）
+  //   - 传 `nullptr` → 一个都不命中
+  // 而两种写法下 `UpdateLayeredWindow` **都返回 true**。症状是「窗口存在、可见、
+  // z 序已经在 child 链最顶，矩形成立，却完全不参与命中」——正是这个坑。
+  //
+  // 原因：`UpdateLayeredWindow` 第一次给窗口建立 layered surface 时，尺寸只能来自
+  // `psize`。传 `nullptr` 的语义是「尺寸不变」，而此刻它**还没有尺寸**——surface
+  // 是 0×0，整块内容都是 alpha=0，layered 窗口按 alpha 做命中测试，于是穿透。
+  // 文档那句「If psize is NULL, the size of the window does not change」
+  // 在「从未设过尺寸」这一步并不成立，它不会替你补。
+  //
+  // 与 `SetWindowPos` 的分工因此不是「两位作者改同一个属性」：窗口位置与窗口尺寸
+  // 归 `SetWindowPos`，**位图**尺寸归 `UpdateLayeredWindow`，两者必须相等，但都要给。
+  SIZE win_size{w, h};
+  POINT src_pt{0, 0};
+  BLENDFUNCTION bf{};
+  bf.BlendOp = AC_SRC_OVER;
+  bf.SourceConstantAlpha = 255;
+  bf.AlphaFormat = AC_SRC_ALPHA;
+  UpdateLayeredWindow(g_caption, screen, nullptr, &win_size, mem, &src_pt, 0, &bf, ULW_ALPHA);
+
+  SelectObject(mem, old_bmp);
+  if (font) DeleteObject(font);
+  DeleteObject(dib_dst);
+  DeleteObject(dib_mask);
+  DeleteDC(mem);
+  ReleaseDC(nullptr, screen);
+}
+
+// caption 子窗口的消息处理。
+//
+// 它是唯一一个「命中落在壳层自己身上」的区域，所以三个按钮的
+// `WM_NCHITTEST` / 悬停 / 点击全在这里闭环——不经过顶层窗口，也不经过页面。
+LRESULT CALLBACK caption_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  switch (msg) {
+  case WM_NCHITTEST: {
+    POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    ScreenToClient(hwnd, &pt);
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    // 复用 `caption_button_at`，**不在这里再抄一遍 idx → HT* 的映射**。
+    // 抄一份的代价是 `tests/types.test.ts` 那条「按钮顺序在两侧一致」会数出
+    // 6 处而不是 3 处——那条判据守的正是「这个映射只能有一处」。
+    const int code = caption_button_at(rc, pt);
+    if (code != -1) {
+      return code;
+    }
+    // 非按钮区（正常情况下不存在，窗口尺寸就是按钮区）。交给同一线程的下层窗口，
+    // 免得几何算错时把页面上的点击吃掉。
+    return HTTRANSPARENT;
+  }
+
+  case WM_NCMOUSEMOVE: {
+    POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    ScreenToClient(hwnd, &pt);
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int idx = caption_index_at(rc, pt);
+    if (idx != g_caption_hot) {
+      g_caption_hot = idx;
+      caption_paint();
+    }
+    if (!g_caption_tracking) {
+      // 注册一次「离开非客户区」的通知，否则 hot 会一直卡在最后一个按钮上。
+      TRACKMOUSEEVENT tme{};
+      tme.cbSize = sizeof(tme);
+      tme.dwFlags = TME_LEAVE | TME_NONCLIENT;
+      tme.hwndTrack = hwnd;
+      TrackMouseEvent(&tme);
+      g_caption_tracking = true;
+    }
+    // **这里不 return 0**：Snap Layouts 是在 `DefWindowProcW` 处理
+    // `WM_NCMOUSEMOVE` 时弹出来的。应答 `HTMAXBUTTON` 只是必要条件，
+    // 真正把面板唤起来的是这一环（mygo 的注释同样点明「DefWindowProc brings
+    // the snap layouts over HTMAXBUTTON」）。谁图省事在这里 return 0，
+    // 症状就是「悬停高亮有、面板永不出现」。
+    break;
+  }
+
+  case WM_NCMOUSELEAVE:
+    g_caption_tracking = false;
+    if (g_caption_hot != -1) {
+      g_caption_hot = -1;
+      caption_paint();
+    }
+    break;
+
+  case WM_NCLBUTTONDOWN: {
+    POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    ScreenToClient(hwnd, &pt);
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int idx = caption_index_at(rc, pt);
+    if (idx < 0) {
+      break;
+    }
+    g_caption_pressed = idx;
+    caption_paint();
+    return 0;
+  }
+
+  case WM_NCLBUTTONUP: {
+    POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    ScreenToClient(hwnd, &pt);
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int idx = caption_index_at(rc, pt);
+    const int pressed = g_caption_pressed;
+    g_caption_pressed = -1;
+    caption_paint();
+    // 与系统按钮同一条语义：必须在同一个按钮上松开才算点击
+    // （按下后移出去再松开 = 取消，这也是用户对标题栏的既有预期）。
+    if (idx < 0 || idx != pressed || !g_hwnd) {
+      return 0;
+    }
+    // 发 `WM_SYSCOMMAND` 而不是自己 `ShowWindow` / `DestroyWindow`：
+    // 这是系统 caption 按钮的做法，应用自己的 `WM_CLOSE` 处理因此仍有话语权。
+    // mygo 在这里踩过一个具体的坑——用 `PostMessage` 的话，「最大化之后紧接着
+    // 再点一次」的第二次收不到，必须 `SendMessage`。
+    WPARAM sc = SC_CLOSE;
+    if (idx == 2) {
+      sc = SC_MINIMIZE;
+    } else if (idx == 1) {
+      sc = IsZoomed(g_hwnd) ? SC_RESTORE : SC_MAXIMIZE;
+    }
+    SendMessageW(g_hwnd, WM_SYSCOMMAND, sc, 0);
+    return 0;
+  }
+
+  default:
+    break;
+  }
+  return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// 重新定位 + 重绘。窗口尺寸、DPI、激活状态、最大化状态、主题任一项变了都要调。
+//
+// 只在 `g_frameless && g_native_captions` 时显示。全屏时藏掉——留着它会在屏幕
+// 顶边形成一条 32px 高的「点不到页面」的带子。
+void caption_update() {
+  if (!g_caption || !g_hwnd) {
+    return;
+  }
+  if (!g_frameless || !g_native_captions || g_fullscreen) {
+    ShowWindow(g_caption, SW_HIDE);
+    return;
+  }
+  RECT rc{};
+  GetClientRect(g_hwnd, &rc);
+  const int w = rc.right - rc.left;
+  const UINT dpi = current_dpi();
+  const int bw = MulDiv(kCaptionButtonWidth, static_cast<int>(dpi), 96);
+  const int bh = MulDiv(kCaptionBarHeight, static_cast<int>(dpi), 96);
+  if (w <= 0 || bw <= 0 || bh <= 0) {
+    ShowWindow(g_caption, SW_HIDE);
+    return;
+  }
+  const int total = bw * kCaptionButtonCount;
+  // 窗口比三个按钮还窄时只画得下能放的那几个，宽度钳到客户区宽度。
+  const int width = total < w ? total : w;
+  // `HWND_TOP` 是必需的，不是顺手：widget 与 caption 是兄弟窗口，谁在上由 z 序
+  // 决定。`fit_widget()` 用的是 `SWP_NOZORDER`（不动 z 序），所以这里显式置顶
+  // 之后，后续每次 resize 都不会把 caption 压回 widget 下面。
+  SetWindowPos(g_caption, HWND_TOP, rc.right - width, 0, width, bh,
+               SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  caption_paint();
+}
+
+void create_caption() {
+  if (g_caption || !g_hwnd) {
+    return;
+  }
+  if (!g_frameless || !g_native_captions) {
+    return;
+  }
+  static bool registered = false;
+  if (!registered) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"webview_shell_caption";
+    wc.lpfnWndProc = caption_proc;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    // 背景刷子留空：内容全部由 UpdateLayeredWindow 提供，类背景永远不会被用上。
+    wc.hbrBackground = nullptr;
+    // 与 webview_shell 同一个理由：CS_*REDRAW 会引发重绘闪烁。
+    wc.style = 0;
+    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+      return;
+    }
+    registered = true;
+  }
+  g_caption = CreateWindowExW(
+      WS_EX_LAYERED | WS_EX_NOACTIVATE, L"webview_shell_caption", L"",
+      WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0, 0, 0, g_hwnd, nullptr,
+      GetModuleHandleW(nullptr), nullptr);
+  if (!g_caption) {
+    return;
+  }
+  g_caption_hot = -1;
+  g_caption_pressed = -1;
+  g_caption_tracking = false;
+  caption_update();
 }
 
 void post_json(const std::string &json) {
@@ -2283,12 +2859,16 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // 保留圆角会在四角露出桌面（尤其任务栏同色时更明显）。
     apply_round_corners(hwnd, !IsZoomed(hwnd));
     fit_widget();
+    // caption 子窗口要跟着走：它是兄弟窗口，不随 widget 自动移动。
+    caption_update();
     push_state();
     emit_state_event();
     break;
 
   case WM_ACTIVATE:
   case WM_SETFOCUS:
+    // 激活状态决定字形亮度（五态里的 inactive），所以这里也要重绘。
+    caption_update();
     push_state();
     emit_state_event();
     break;
@@ -2297,6 +2877,7 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_THEMECHANGED:
     // 系统切换深/浅色时重新应用，并把新状态推给页面
     apply_dark_mode(hwnd);
+    caption_update();
     push_state();
     emit_state_event();
     break;
@@ -2335,6 +2916,8 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                  suggested->bottom - suggested->top,
                  SWP_NOZORDER | SWP_NOACTIVATE);
     fit_widget();
+    // DPI 变了：按钮的物理尺寸与字形都要按新 DPI 重算，caption 也必须重新定位。
+    caption_update();
     push_state();
     emit_state_event();
     return 0;
@@ -2613,6 +3196,8 @@ DWORD WINAPI ui_thread(LPVOID param) {
   g_defer_show = (flags & SHELL_FLAG_DEFER_SHOW) != 0;
   g_accept_drop = (flags & SHELL_FLAG_ACCEPT_DROP) != 0;
   g_start_maximized = (flags & SHELL_FLAG_START_MAXIMIZED) != 0;
+  g_titlebar_reserve = (flags & SHELL_FLAG_TITLEBAR_RESERVE) != 0;
+  g_native_captions = (flags & SHELL_FLAG_NATIVE_CAPTIONS) != 0;
 
   // 任务栏归属必须在窗口创建前设定
   apply_app_user_model_id();
@@ -2692,6 +3277,10 @@ DWORD WINAPI ui_thread(LPVOID param) {
 
   g_widget = static_cast<HWND>(
       webview_get_native_handle(g_webview, WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET));
+
+  // caption 子窗口必须在 widget 之后创建：两者是兄弟窗口，后建的天然在上；
+  // 之后每次定位再显式 `HWND_TOP` 兜一层（见 caption_update）。
+  create_caption();
 
   if (g_accept_drop) {
     enable_drop(g_hwnd);
@@ -2927,6 +3516,11 @@ DWORD WINAPI ui_thread(LPVOID param) {
   g_widget = nullptr;
   g_widget_orig = nullptr;
   g_toplevel_orig = nullptr;
+  // caption 子窗口随顶层窗口一起销毁（它是 WS_CHILD），这里只清指针与状态。
+  g_caption = nullptr;
+  g_caption_hot = -1;
+  g_caption_pressed = -1;
+  g_caption_tracking = false;
   g_hwnd = nullptr;
   g_shown = false;
   g_round_state = -1; // 窗口已销毁，缓存失效
@@ -2981,6 +3575,8 @@ __declspec(dllexport) int shell_start_ex(const char *url, const char *title,
   g_resizable = (flags & SHELL_FLAG_RESIZABLE) != 0;
   g_accept_drop = (flags & SHELL_FLAG_ACCEPT_DROP) != 0;
   g_start_maximized = (flags & SHELL_FLAG_START_MAXIMIZED) != 0;
+  g_titlebar_reserve = (flags & SHELL_FLAG_TITLEBAR_RESERVE) != 0;
+  g_native_captions = (flags & SHELL_FLAG_NATIVE_CAPTIONS) != 0;
   // 外部导航拦截的两个判据基准。在这里算而不是在 ui_thread 里算：
   // 两者都是「启动地址的静态属性」，越早定下来越不会和后续状态混在一起。
   //

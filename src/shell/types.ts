@@ -72,6 +72,68 @@ export const FLAG_START_MAXIMIZED = 64;
  *   `javascript:`、`ms-*:` 以及自定义 scheme 一律静默取消，与本位无关。
  */
 export const FLAG_ALLOW_EXTERNAL_NAV = 128;
+/**
+ * 顶部让出一条给自绘标题栏：把 WebView2 的容器子窗口整体下移 caption 高度（32 逻辑像素）。
+ *
+ * ## 为什么需要它（命中测试的硬约束，不是布局偏好）
+ *
+ * WebView2 的容器子窗口（widget）铺满整个客户区，它内部还有三层 Chrome 窗口，
+ * 而**真实鼠标的 `WM_NCHITTEST` 走光标下最深那层**：
+ *
+ * ```text
+ * webview_widget → Chrome_WidgetWin_0 → Chrome_WidgetWin_1
+ * → Chrome_RenderWidgetHostHWND → Intermediate D3D Window
+ * ```
+ *
+ * 后三层在**别的进程**里（实测 pid 各不相同），`SetWindowLongPtr` 够不着，
+ * 所以「把 `HTTRANSPARENT` 一路传上去」这条子类化路线走不通。它们返回 `HTCLIENT`，
+ * 顶层窗口那套 `HTMAXBUTTON` 逻辑永远没机会被问到——**Snap Layouts 因此不弹**。
+ *
+ * 让 widget 别盖住标题栏，光标就落在顶层窗口自己身上，命中测试正常走到
+ * `hit_test_client` → `caption_button_at` → `HTMAXBUTTON`。
+ *
+ * ## 什么时候该给
+ *
+ * 只在**自绘标题栏**、而且标题栏真的在客户区顶部时。无边框不等于要自绘标题栏：
+ * 有的应用整窗都是内容区，无条件让位会在顶部留一条点不到的死区。
+ *
+ * ## 与 `FLAG_FRAMELESS` 的关系
+ *
+ * 本位只在 `FLAG_FRAMELESS` 同时给出时生效——带边框模式的标题栏由系统画，
+ * widget 本来就在客户区内，不存在遮挡。
+ */
+export const FLAG_TITLEBAR_RESERVE = 256;
+
+/**
+ * 在客户区右上角盖一层**原生绘制**的 caption 按钮（关闭 / 最大化 / 最小化）。
+ *
+ * ## 它解决的是「页面拿不到 Snap Layouts」
+ *
+ * `WM_NCHITTEST` 走光标下最深那层，而 WebView2 的渲染子窗口在**别的进程**里、
+ * 返回 `HTCLIENT`，光标的查询根本到不了顶层窗口（`pitfalls` 2.14 的实测链）。
+ * 盖一个壳层自己的 layered 子窗口在按钮位置上，命中就落在壳层手里，
+ * `HTMAXBUTTON` 才生效，Snap 面板才会弹。
+ *
+ * ## 它与 `FLAG_TITLEBAR_RESERVE` 是**替代关系**，不要同时给
+ *
+ * `TITLEBAR_RESERVE` 的做法是把 WebView2 的容器子窗口整体下移 caption 高度，
+ * 让光标落到顶层窗口。那条路实测也能让 Snap 弹，但它把页面内容整体下移 32 逻辑
+ * 像素，而 caption 命中区固定在客户区 `y ∈ [0, 32)` —— 页面自己画的标题栏会与
+ * 命中区**错位 32px**，想对齐只能给页面负偏移，那已经出了 widget 客户区、
+ * 被子窗口裁掉。所以「HTML 画标题栏 + 让位」在几何上不成立。
+ *
+ * 本位不动布局：子窗口只是**盖在**按钮位置上，页面该怎么排还怎么排，
+ * 缩放边框也不受影响。
+ *
+ * ## 消费方要配合的一件事
+ *
+ * 用了本位就别再让页面画那三个按钮了，改由壳层画；页面的标题栏要在右侧留出
+ * `CAPTION_BUTTON_WIDTH * 3` 的空白（`mountTitleBar` 的 `captions: "native"`
+ * 就是做这件事的）。否则会看到两套按钮叠在一起。
+ *
+ * 只在 `FLAG_FRAMELESS` 同时给出时生效——带边框模式的标题栏由系统画。
+ */
+export const FLAG_NATIVE_CAPTIONS = 512;
 
 /**
  * 关闭 WebView2 的浏览器行为（`ShellOptions.browserUi` 使用）。

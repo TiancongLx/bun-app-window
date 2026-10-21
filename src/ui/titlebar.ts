@@ -249,6 +249,17 @@ export function titleBarCss(): string {
     flex: none;
 }
 
+/* ---- 原生 caption（FLAG_NATIVE_CAPTIONS）----------------------------------
+   三个按钮由壳层画在一个 layered 子窗口里、盖在窗口右上角。页面这边要做的唯一
+   一件事是**把位置留出来**——否则标题文字会被那层子窗口压住。
+   宽度是 46 × 3，与 .ws-titlebar__btn 的 width 同源（后者由
+   tests/types.test.ts 钉在 CAPTION_BUTTON_WIDTH 上）。
+   为什么不用 padding 而是给控件容器定宽：按钮区是「贴住客户区右边缘」的，
+   用容器定宽更直白，也不会与标题栏自己的 padding 相互影响。 */
+.ws-titlebar[data-captions="native"] .ws-titlebar__controls {
+    width: calc(46px * 3);
+}
+
 .ws-titlebar__btn {
     width: 46px;
     height: 100%;
@@ -315,6 +326,22 @@ export type TitleBarOptions = {
     active?: boolean;
     /** 按钮字形，缺省由 {@link detectIconSet} 按字体可用性决定（通常 `fluent`） */
     icons?: TitleBarIconSet;
+    /**
+     * 三个 caption 按钮由谁画。
+     *
+     * - `"dom"`（缺省）：组件自己渲染按钮，行为完全由 `bridge` 决定
+     * - `"native"`：**不渲染按钮**，只在右侧留出 `46 × 3` 的空白，
+     *   由壳层的 `FLAG_NATIVE_CAPTIONS` 把按钮画上去
+     *
+     * 什么时候要 `"native"`：需要 Snap Layouts 的时候。`WM_NCHITTEST` 走光标下
+     * 最深那层，而 WebView2 的渲染子窗口在**别的进程**里、返回 `HTCLIENT`，
+     * 页面画的按钮永远拿不到 `HTMAXBUTTON`（`pitfalls` 2.14）。壳层会盖一个
+     * 自己的子窗口在按钮位置上，命中就落在壳层手里。
+     *
+     * 两者必须配套：壳层开了 `FLAG_NATIVE_CAPTIONS` 而这里仍用 `"dom"`，
+     * 会看到两套按钮叠在一起；反过来则是一块点不到的空区。
+     */
+    captions?: "dom" | "native";
     /** 主题，缺省跟随 `prefers-color-scheme` */
     theme?: "light" | "dark";
     /** 挂载容器，缺省 `document.body` */
@@ -410,6 +437,12 @@ export function mountTitleBar(opts: TitleBarOptions): TitleBarHandle {
     root.setAttribute("data-icons", icons);
     // 缺省按激活处理：窗口刚创建时就是前台，写成 false 会让标题栏一开始是灰的。
     root.setAttribute("data-active", opts.active === false ? "false" : "true");
+    // 原生 caption 模式：不渲染按钮，只在右侧留位（CSS 按这个属性选择器定宽）。
+    // 属性只在 native 时出现，所以缺省形态的 DOM 与引入本位之前**逐字相同**。
+    const nativeCaptions = opts.captions === "native";
+    if (nativeCaptions) {
+        root.setAttribute("data-captions", "native");
+    }
     if (opts.theme) {
         root.setAttribute("data-theme", opts.theme);
     }
@@ -440,16 +473,21 @@ export function mountTitleBar(opts: TitleBarOptions): TitleBarHandle {
     controls.setAttribute("data-ws-tb-controls", "");
 
     const buttons: Partial<Record<"minimize" | "maximize" | "close", TitleBarElement>> = {};
-    for (const action of ["minimize", "maximize", "close"] as const) {
-        const btn = doc.createElement("button");
-        btn.className =
-            action === "close" ? "ws-titlebar__btn ws-titlebar__btn--close" : "ws-titlebar__btn";
-        btn.setAttribute("type", "button");
-        btn.setAttribute("data-act", action);
-        btn.textContent = glyphFor(icons, action, opts.maximized === true);
-        btn.setAttribute("aria-label", labelFor(action, opts.maximized === true));
-        buttons[action] = btn;
-        controls.appendChild(btn);
+    // `captions: "native"` 时一个按钮都不建：那三个由壳层的 layered 子窗口画，
+    // 页面上再画一份就是两套叠在一起。控件容器仍然保留——它是「留位」的载体
+    // （CSS 给它 46×3 的宽度），也是拖拽判定里 `inControls` 的锚点。
+    if (!nativeCaptions) {
+        for (const action of ["minimize", "maximize", "close"] as const) {
+            const btn = doc.createElement("button");
+            btn.className =
+                action === "close" ? "ws-titlebar__btn ws-titlebar__btn--close" : "ws-titlebar__btn";
+            btn.setAttribute("type", "button");
+            btn.setAttribute("data-act", action);
+            btn.textContent = glyphFor(icons, action, opts.maximized === true);
+            btn.setAttribute("aria-label", labelFor(action, opts.maximized === true));
+            buttons[action] = btn;
+            controls.appendChild(btn);
+        }
     }
 
     root.append(lead, controls);

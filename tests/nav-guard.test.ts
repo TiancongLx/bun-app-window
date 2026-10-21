@@ -8,8 +8,10 @@ import {
     FLAG_CENTER,
     FLAG_DEFER_SHOW,
     FLAG_FRAMELESS,
+    FLAG_NATIVE_CAPTIONS,
     FLAG_RESIZABLE,
     FLAG_START_MAXIMIZED,
+    FLAG_TITLEBAR_RESERVE,
     FLAG_TOPMOST,
 } from "@/shell/types";
 
@@ -68,6 +70,8 @@ const TS_FLAGS: Record<string, number> = {
     ACCEPT_DROP: FLAG_ACCEPT_DROP,
     START_MAXIMIZED: FLAG_START_MAXIMIZED,
     ALLOW_EXTERNAL_NAV: FLAG_ALLOW_EXTERNAL_NAV,
+    TITLEBAR_RESERVE: FLAG_TITLEBAR_RESERVE,
+    NATIVE_CAPTIONS: FLAG_NATIVE_CAPTIONS,
 };
 
 test("FLAG_* 在 TS 与 C++ 两侧逐位一致", () => {
@@ -221,4 +225,146 @@ test("不存在「空 origin 一律放行」的判据", () => {
     const classifyAt = SHELL_CODE.indexOf("static NavVerdict classify_nav(");
     const body = SHELL_CODE.slice(classifyAt, classifyAt + 600);
     expect(body).not.toMatch(/if\s*\(\s*g_origin\.empty\(\)\s*\)\s*\{\s*return\s+NavVerdict::Allow/);
+});
+
+// ---------- FLAG_TITLEBAR_RESERVE 的接线 ----------
+
+/**
+ * 这个 flag 存在**只有一个目的**：让 `fit_widget()` 把 widget 从顶部让开。
+ * 没有接进 `fit_widget` 的话，它能声明、能传进来、能解析成一个全局变量，
+ * 而几何一动不动——正是这一层反复出现的「声明了但没接线」。
+ *
+ * 所以判据不是「常量存在」也不是「解析存在」，而是：
+ * 解析结果 `g_titlebar_reserve` **出现在 fit_widget 的函数体里**。
+ */
+test("TITLEBAR_RESERVE 在 fit_widget 里真的被读", () => {
+    const fitAt = SHELL_CODE.indexOf("void fit_widget()");
+    expect(fitAt).toBeGreaterThan(0);
+    // 函数体到下一个顶层 `}` 为止，取一段足以覆盖的窗口
+    const body = SHELL_CODE.slice(fitAt, fitAt + 1200);
+    expect(body).toContain("g_titlebar_reserve");
+    // 让位高度必须来自 caption 常量并按 DPI 换算，不许写死像素
+    expect(body).toContain("kCaptionBarHeight");
+    expect(body).toContain("MulDiv(");
+});
+
+test("TITLEBAR_RESERVE 只在 frameless 时生效（带边框模式的标题栏由系统画）", () => {
+    const fitAt = SHELL_CODE.indexOf("void fit_widget()");
+    const body = SHELL_CODE.slice(fitAt, fitAt + 1200);
+    // 锚定 `if (` 与闭括号，而不是裸的 `toContain("g_frameless && g_titlebar_reserve")`。
+    // 上一版就是后者，而反向验证（把条件改成 `if (false && …)`）**没有变红**——
+    // 子串还在，判据被短路写法骗过去了。这正是 `pitfalls` 2.12 那一族：
+    // 判据要守意图，不能守标识符相邻。
+    expect(body).toMatch(/if\s*\(\s*g_frameless\s*&&\s*g_titlebar_reserve\s*\)/);
+});
+
+test("TITLEBAR_RESERVE 在 ui_thread 与 shell_start_ex 两处都被解析", () => {
+    // 与既有 flag 同构：ui_thread 那份决定窗口创建期的行为，
+    // shell_start_ex 那份让「启动前的静态属性」尽早定下来。
+    const matches = SHELL_CODE.match(
+        /g_titlebar_reserve\s*=\s*\(flags\s*&\s*SHELL_FLAG_TITLEBAR_RESERVE\)\s*!=\s*0/g,
+    );
+    expect(matches?.length).toBe(2);
+});
+
+// ---------- FLAG_NATIVE_CAPTIONS 的接线 ----------
+//
+// 这一组守的是「Snap Layouts 到底弹不弹」。它由三个彼此独立的必要条件串起来，
+// 缺任何一条都表现为「悬停高亮有、面板永不出现」——而三种失效的外观一模一样，
+// 所以必须逐条钉住，不能只测总效果。
+
+test("NATIVE_CAPTIONS 在 ui_thread 与 shell_start_ex 两处都被解析", () => {
+    const matches = SHELL_CODE.match(
+        /g_native_captions\s*=\s*\(flags\s*&\s*SHELL_FLAG_NATIVE_CAPTIONS\)\s*!=\s*0/g,
+    );
+    expect(matches?.length).toBe(2);
+});
+
+test("caption 子窗口只在 frameless + NATIVE_CAPTIONS 时创建", () => {
+    const at = SHELL_CODE.indexOf("void create_caption()");
+    expect(at).toBeGreaterThan(0);
+    // 按**函数边界**切，不按字符数：切 500 个字符会漏掉后面的 CreateWindowExW，
+    // 于是 `WS_EX_LAYERED` 那条断言在函数写对了的情况下照样红。
+    const end = SHELL_CODE.indexOf("void post_json(", at);
+    expect(end).toBeGreaterThan(at);
+    const body = SHELL_CODE.slice(at, end);
+
+    // 带边框模式的标题栏由系统画，盖一层自己的按钮会变成两套
+    expect(body).toMatch(/if\s*\(\s*!g_frameless\s*\|\|\s*!g_native_captions\s*\)/);
+    // 必须是 layered：rest 状态没有背板，普通子窗口会盖出一块色块
+    expect(body).toContain("WS_EX_LAYERED");
+    // 必须是顶层窗口的 child，否则跟随移动与销毁都要另写一套
+    expect(body).toContain("WS_CHILD");
+});
+
+test("caption 子窗口在 widget 之后创建并显式置顶（两者是兄弟窗口）", () => {
+    const widgetAt = SHELL_CODE.indexOf("WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET");
+    const createAt = SHELL_CODE.search(/^\s*create_caption\(\);/m);
+    expect(widgetAt).toBeGreaterThan(0);
+    expect(createAt).toBeGreaterThan(widgetAt);
+
+    // 定位时用 HWND_TOP：`fit_widget()` 是 SWP_NOZORDER（不动 z 序），
+    // 所以每次 resize 都要自己把 caption 抬回去。
+    const updateAt = SHELL_CODE.indexOf("void caption_update()");
+    expect(updateAt).toBeGreaterThan(0);
+    const body = SHELL_CODE.slice(updateAt, updateAt + 900);
+    expect(body).toContain("SetWindowPos(g_caption, HWND_TOP");
+});
+
+/**
+ * 这一条是整个 Snap 机制的**命门**。
+ *
+ * 应答 `HTMAXBUTTON` 只是必要条件；真正把面板唤起来的是 `DefWindowProcW`
+ * 处理 `WM_NCMOUSEMOVE` 时的那段逻辑。所以在 `case WM_NCMOUSEMOVE` 里
+ * `return 0`（或任何提前返回）都会让面板永远不出现——而悬停高亮照旧工作，
+ * 看起来一切正常。
+ *
+ * `egoist/mygo` 的 `internal/windows/titlebar.go` 在同一处专门留了注释
+ * （「DefWindowProc brings the snap layouts over HTMAXBUTTON」），我们照抄的是
+ * 那条**结构性约束**，不是它的代码。
+ */
+test("WM_NCMOUSEMOVE 必须落到 DefWindowProc —— 提前 return 会让 Snap 永不出现", () => {
+    const at = SHELL_CODE.indexOf("case WM_NCMOUSEMOVE:");
+    expect(at).toBeGreaterThan(0);
+    const next = SHELL_CODE.indexOf("case WM_NCMOUSELEAVE:", at);
+    expect(next).toBeGreaterThan(at);
+    const seg = SHELL_CODE.slice(at, next);
+
+    // 必须 break（穿到函数末尾的 DefWindowProcW）
+    expect(seg).toContain("break;");
+    // 不许有任何提前返回
+    expect(seg).not.toMatch(/return\s+[^;]*;/);
+});
+
+/**
+ * layered window 的命中测试**按 alpha 走**：alpha=0 的像素让鼠标穿透。
+ *
+ * Win 11 的 caption 在 rest 状态没有背板，如果老实按「无背板 = 全透明」画，
+ * 光标移到按钮空白处就穿到下面的 WebView2，命中断在那里，子窗口等于没建。
+ * 所以整块底必须填 alpha=1（1/255，肉眼不可见），只为保住命中。
+ *
+ * `egoist/mygo` 的 `captionBar.colors()` 里 rest 背板同样是 `alpha = 1`。
+ */
+test("caption 的 rest 底填 alpha=1 —— alpha=0 会让鼠标穿透，子窗口等于没建", () => {
+    expect(SHELL_CODE).toMatch(/cap_premul\(\s*0\s*,\s*0\s*,\s*0\s*,\s*1\s*\)/);
+});
+
+test("caption 按钮点击走 WM_SYSCOMMAND，且只在同一按钮上松开才生效", () => {
+    const at = SHELL_CODE.indexOf("case WM_NCLBUTTONUP:");
+    expect(at).toBeGreaterThan(0);
+    const next = SHELL_CODE.indexOf("default:", at);
+    expect(next).toBeGreaterThan(at);
+    const body = SHELL_CODE.slice(at, next);
+
+    // 用系统语义而不是自己 ShowWindow / DestroyWindow：
+    // 这样应用的 WM_CLOSE 处理仍有话语权。
+    expect(body).toContain("WM_SYSCOMMAND");
+    expect(body).toContain("SC_CLOSE");
+    expect(body).toContain("SC_MINIMIZE");
+    // 按下后移出去再松开 = 取消，与系统按钮一致
+    expect(body).toMatch(/idx\s*!=\s*pressed/);
+    // `SendMessageW` 而不是 `PostMessageW`：用 Post 的话，
+    // 「最大化之后紧接着再点一次」的第二次收不到（mygo 的实测结论）。
+    expect(body).toContain("SendMessageW(g_hwnd, WM_SYSCOMMAND");
+    expect(body).not.toContain("PostMessageW(g_hwnd, WM_SYSCOMMAND");
 });
