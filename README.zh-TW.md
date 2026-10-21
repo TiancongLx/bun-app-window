@@ -504,7 +504,16 @@ window.addEventListener("shell-msg", (e) => {
 });
 ```
 
-落進視窗的檔案由殼層注入的腳本自動轉發，頁面**不需要**自己監聽 `drop` —— `paths` 裡是**絕對路徑**（來源 `ICoreWebView2File::get_Path`）。
+落進視窗的**檔案與資料夾**都由殼層注入的腳本自動轉發，頁面**不需要**自己監聽 `drop`。每條都是**絕對路徑**（來源 `ICoreWebView2File::get_Path`），而 `dirs` 告訴你其中哪些是資料夾：
+
+```js
+window.addEventListener("shell-msg", (e) => {
+  if (e.detail.t !== "drop") return;
+  for (const p of e.detail.paths) {
+    console.log(e.detail.dirs.includes(p) ? "資料夾" : "檔案", p);
+  }
+});
+```
 
 針對管理員提權場景（High 完整性層級行程接收來自 Medium 層級檔案總管的訊息），底層已透過 `ChangeWindowMessageFilterEx` 自動放行 UIPI 訊息過濾。
 

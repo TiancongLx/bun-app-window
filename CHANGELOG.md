@@ -6,24 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.5.1] - 2026-10-21
 
-**0.5.0's drag-and-drop fix was wrong and made dropped files be refused outright. This release replaces it. The public API is unchanged.**
+**0.5.0's drag-and-drop fix was wrong and made dropped files be refused outright. This release replaces it, and adds folder support. The public API is unchanged.**
 
 ### Fixed
 
-- **Dropped files are accepted again, and the page receives absolute paths.** 0.5.0 set `ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)` on the belief that it stepped aside from WebView2's internal `IDropTarget` and let the OLE chain fall through to the parent window's `DragAcceptFiles` handler. **Both halves of that reasoning were wrong**:
+- **Dropped files and folders are accepted again, and the page receives absolute paths.** 0.5.0 set `ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)` on the belief that it stepped aside from WebView2's internal `IDropTarget` and let the OLE chain fall through to the parent window's `DragAcceptFiles` handler. **Both halves of that reasoning were wrong**:
 
     1. `DragAcceptFiles` only sets `WS_EX_ACCEPTFILES`; it does **not** register an `IDropTarget`. Reading the `OleDropTargetInterface` window property across the whole chain (`webview` → `webview_widget` → `Chrome_WidgetWin_0` → `Chrome_WidgetWin_1` → `Chrome_RenderWidgetHostHWND` → `Intermediate D3D Window`) returns false for every window. Modern Windows does not fall back to that legacy path during OLE hit-testing.
     2. `AllowExternalDrop` means *allow external drop*. `FALSE` refuses drops; it does not forward them.
 
     The user-visible symptom was a red "not allowed" cursor over the window on every drag, with no drop and no `WM_DROPFILES`.
 
-    The fix uses the upstream API built for this case. With `FLAG_ACCEPT_DROP` on, the shell injects a script into the page that forwards `DataTransfer.files` to the host; the host reads them back with `ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects` and converts each `ICoreWebView2File` to an absolute path via `get_Path`. **Pages still need no code of their own** — the listener is injected, like `window.__shell.recv`. On a runtime without `EventArgs2` the `QueryInterface` fails and every other web message keeps working.
+    The fix uses the upstream API built for this case. With `FLAG_ACCEPT_DROP` on, the shell injects a script into the page that forwards the dropped objects to the host; the host reads them back with `ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects` and converts each to an absolute path. **Pages still need no code of their own** — the listener is injected, like `window.__shell.recv`. On a runtime without `EventArgs2` the `QueryInterface` fails and every other web message keeps working.
 
-    The `WM_DROPFILES` path (`handle_drop`) stays as a fallback and keeps its own probe.
+    The `WM_DROPFILES` path (`handle_drop`) stays as a fallback and keeps its own probe. Both paths emit the same shape.
+
+### Added
+
+- **Folders now work, and `dirs` tells them apart.** A dropped folder arrives as a `FileSystemDirectoryHandle`, but on the host side that handle does **not** survive — measured: the collection holds one entry, `QueryInterface` to both `ICoreWebView2File` and `ICoreWebView2FileSystemHandle` fails, and the item is simply unusable. What *does* work is that a folder also appears in `dataTransfer.files` as an ordinary `File`, whose `get_Path` returns the correct path.
+
+    So the injected script posts **handles and files together**, the host tries `ICoreWebView2File` first and the handle second, and duplicate paths are collapsed. Because the surviving object is a `File`, `get_Kind` is unavailable — "is this a folder" is decided by `GetFileAttributesW` + `FILE_ATTRIBUTE_DIRECTORY`, the same predicate the `WM_DROPFILES` fallback uses, which is why both paths produce identical output:
+
+    ```json
+    { "t": "drop", "paths": ["<every path>"], "dirs": ["<the subset that are folders>"] }
+    ```
+
+    `paths` keeps every entry in order; `dirs` is a subset and is always present (possibly empty).
+
+- **The host now always answers.** Previously, when `AdditionalObjects` yielded no usable path, the handler returned silently — the page waited, the host said nothing, and neither side had a clue. Every drop now produces exactly one `shell-msg`, carrying `ok`, `err`, and the counts `nFile` / `nHandle` / `nNoPath` that made this diagnosis possible in the first place.
+
+- **`scripts/probe-drop-live.ts`** — an interactive probe for the half that cannot be synthesised. `AdditionalObjects` only ever contains objects produced by a real drag; page JavaScript cannot fabricate one with a path, and `keybd_event` cannot hold a mouse button across processes. The probe opens a window, waits for one manual drop, and does the judging automatically: the page reports the received payload back over `fetch`, and the probe asserts paths are non-empty, absolute, existing, and classified exactly as the filesystem says. Twelve checks; a failure names *which* of the five gates closed.
+
+    `--file` and `--dir` are mutually exclusive — one target per run, because a run that asks for both will always fail the one you did not drag. It must run **non-elevated**; the file comment says why and how.
 
 ### Note
 
-- **This release went through four rounds of "nothing happens".** Each round was a genuinely different cause with an identical symptom, and only the last one was in the code this release changed. They are recorded as `docs/pitfalls.md` 2.16, and the injected script now carries a marker for each so the next failure names its own stage:
+- **This release went through five rounds of "nothing happens".** Each was a genuinely different cause with an identical symptom, and only the last two were in code this release changed. They are recorded as `docs/pitfalls.md` 2.16 and 2.17, and the injected script now carries a marker for each so the next failure names its own stage:
 
     | Round | Cause | What made it visible |
     | --- | --- | --- |
@@ -31,34 +49,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     | 2 | `preventDefault()` alone does not accept a drop — `dataTransfer.dropEffect` stayed `none` | `dragover=72` with `drop=0` |
     | 3 | `chrome.webview.postMessage` is *not* the pair of `get_AdditionalObjects`; `File` serialises to `{}`, so the collection was empty while the call succeeded | `drop=1 files=1`, `count=0` |
     | 4 | The probe reported its own post as failed — it fetched the marker 250 ms later, after the host had already closed the window | the only red check in an otherwise green run |
+    | 5 | A folder's `FileSystemHandle` does not survive the bridge; only the `File` in `dataTransfer.files` carries a path | `nHandle=0` while the collection was non-empty |
 
-    Item 3 is the one worth remembering: **a call that does not throw is not a call that worked.** The script now records `__shellDropReady` / `__shellDropPosted` / `__shellDropError` so "did the injection run", "was the drop delivered" and "did the host receive an object" are three separate observations instead of one silent guess.
-
-### Added
-
-- **`scripts/probe-drop-live.ts`** — an interactive probe for the half that cannot be synthesised. `AdditionalObjects` only ever contains `File` objects produced by a real drag; page JavaScript cannot fabricate one with a path, and `keybd_event` cannot hold a mouse button across processes. The probe opens a window, waits for one manual drop, and does the judging automatically: the page reports the received `paths` back over `fetch`, and the probe asserts they are non-empty, absolute, existing, and equal to `--file`. Twelve checks, and the first eleven need no human at all — so a failure says *which* of the four gates closed. Not part of the gate.
-
-    It must run **non-elevated**; the file comment says why and how.
+    Rounds 3 and 5 are the same lesson twice: **a call that does not throw is not a call that worked.** `__shellDropReady` / `__shellDropPosted` / `__shellDropVia` / `__shellDropError` now exist so "did the injection run", "which route was posted", "was the drop delivered" and "did the host receive a usable object" are four separate observations instead of one silent guess.
 
 ### Documentation
 
-- `docs/pitfalls.md` gains 2.15 (`AllowExternalDrop(FALSE)` refuses drops rather than forwarding them) and 2.16 (the four gates, with the measured reading at each one); 2.14 now points forward at them instead of recommending the wrong fix.
-- `AGENTS.md` replaces the "step aside from WebView2's `IDropTarget`" rule with the `AdditionalObjects` route, lists the four must-dos, and registers the new probe.
-- Three READMEs state that the page needs no `drop` handler of its own and that `paths` holds absolute paths.
-- `tests/capabilities.test.ts` pins all four gates statically, including that `chrome.webview.postMessage(` must not reappear.
+- `docs/pitfalls.md` gains 2.15 (`AllowExternalDrop(FALSE)` refuses drops), 2.16 (the four gates, with the measured reading at each) and 2.17 (folder handles do not survive); 2.14 now points forward at them instead of recommending the wrong fix.
+- `AGENTS.md` replaces the "step aside from WebView2's `IDropTarget`" rule with the `AdditionalObjects` route, states the file/folder asymmetry and the always-answer rule, and registers the new probe.
+- Three READMEs state that files **and folders** arrive with absolute paths, show how to tell them apart with `dirs`, and confirm the page needs no `drop` handler of its own.
+- `tests/capabilities.test.ts` pins all four gates plus the folder route statically, including that `chrome.webview.postMessage(` must not reappear.
 
 ### Verification
 
 | Command | Result |
 | --- | --- |
 | `bun check` | 69 files |
-| `bun test` | 557 pass / 0 fail |
+| `bun test` | 558 pass / 0 fail |
 | `bun run scripts/gate.ts` | PASSED |
-| `bun run scripts/verify-dll.ts` | PASSED, same source as `native/shell.cc` |
+| `bun run scripts/verify-dll.ts` | PASSED, same source as `native/shell.cc` (1,016,832 B) |
 | `scripts/probe-window-events.ts` | PASSED (21 checks) |
 | `scripts/probe-accelerator-keys.ts` | PASSED (6 checks) |
 | `scripts/probe-drop.ts` | PASSED (6 checks) |
-| `scripts/probe-drop-live.ts` | **PASSED (12 checks)** — one real drag, path `C:\Users\root\Desktop\鲸鱼拖放测试.txt` |
+| `scripts/probe-drop-live.ts --file` | **PASSED (12 checks)** — one real file drag, absolute path |
+| `scripts/probe-drop-live.ts --dir` | **PASSED (12 checks)** — one real folder drag, path **and** folder classification |
 
 ## [0.5.0] - 2026-10-21
 

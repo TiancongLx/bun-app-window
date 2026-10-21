@@ -510,6 +510,59 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
   补 `dropEffect` 后 `drop=1 files=1` 而宿主 `count=0`；换
   `postMessageWithAdditionalObjects` 后整条链通。
 
+### 2.17 目录拖放：`getAsFileSystemHandle()` 的 handle 到宿主是 `null`
+
+- **症状**：文件拖放已通，文件夹拖进来页面照常收到 `drop`（`files=1 items=1`），
+  宿主也收到了 `WebMessage`，但 `paths` 是空数组。
+
+- **实测读数**（宿主侧诊断计数，这一轮专门为此加的）：
+
+    ```json
+    {"paths":[],"dirs":[],"nFile":0,"nHandle":0,"nNoPath":1,"ok":false,
+     "err":"additional objects carried no usable path"}
+    ```
+
+    `nNoPath=1` 说明集合里**确实有 1 项**，但 `QueryInterface` 到
+    `ICoreWebView2File` 与 `ICoreWebView2FileSystemHandle` **都不成立**。
+    也就是说：页面把 `FileSystemDirectoryHandle` 传上去了，
+    落到宿主时变成了一个**不是任何已知 COM 类型的对象**（spec 里「不支持的
+    DOM 对象以 `null` 传递」，实测连 `null` 都不是，而是一个 QI 全失败的项）。
+
+- **版本不是原因**：`ICoreWebView2FileSystemHandle` 要求运行时
+  **1.0.2651.64**，本机 `155.0.4283.60` 远超（`工具核实`，官方参考页）。
+
+- **真正的通路**：目录在 `dataTransfer.files` 里**会以一个 `File` 出现**
+  （`files=1`），`ICoreWebView2File::get_Path` 能给出正确路径。
+  实测同一轮把 handles 与 files **一起**传上去：
+
+    ```json
+    {"paths":["C:\\Users\\root\\Desktop\\鲸鱼拖放测试目录"],
+     "dirs":["C:\\Users\\root\\Desktop\\鲸鱼拖放测试目录"],
+     "nFile":1,"nHandle":0,"nNoPath":1,"ok":true}
+    ```
+
+    `nFile=1` 就是那个 File。所以**主路是 `files`，handles 只是额外尝试**。
+
+- **判据不能靠 `get_Kind`**：`File` 没有 kind，而目录的 handle 又取不到。
+  所以「是不是目录」必须用 `GetFileAttributesW` +
+  `FILE_ATTRIBUTE_DIRECTORY` 判——这与兜底路径 `WM_DROPFILES` 用的是同一个判据，
+  两条路的输出形状因此天然一致。
+
+- **`shell-msg` 的形状**（`FLAG_ACCEPT_DROP`，两条路一致）：
+
+    ```json
+    { "t": "drop", "paths": ["<全部路径>"], "dirs": ["<其中属于目录的>"] }
+    ```
+
+    `paths` 是全部、顺序不变；`dirs` 是子集，为空时也输出该字段。
+    这样只关心路径的消费者不用改。
+
+- **教训**：这一条又是「同一类故障的第三种变体」——`nNoPath` 那条计数是
+  唯一让真相浮出来的东西。没有它，页面在等、宿主沉默，而两边都没有线索。
+
+- **证据**：`实测`（2026-10-21）。读数逐字来自 `scripts/probe-drop-live.ts`
+  的 `宿主推回的原文` 日志行。
+
 ---
 
 ## 三、原生边界

@@ -121,6 +121,41 @@ test("拖放注入脚本覆盖四道关，且只在开关打开时注入", () =>
     expect(SHELL_CC.slice(appendAt - 120, appendAt)).toContain("g_accept_drop");
 });
 
+/**
+ * 目录拖放走的是**另一条通路**，而且必须两条一起传。
+ *
+ * 实测（`pitfalls` 2.17）：`getAsFileSystemHandle()` 的产物到宿主时两个 QI 全失败
+ * （`nHandle=0`、`nNoPath=1`），而目录在 `dataTransfer.files` 里会以一个 `File`
+ * 出现、`get_Path` 给得出正确路径。所以：
+ *
+ * - 注入脚本必须 `handles.concat(files)` 一起投；只传 handles 会一个路径都拿不到；
+ * - 判定「是不是目录」不能用 `get_Kind`（`File` 没有 kind），必须落到
+ *   `GetFileAttributesW` + `FILE_ATTRIBUTE_DIRECTORY`；
+ * - `shell-msg` 必须带 `dirs`，否则消费者分不出文件与文件夹。
+ */
+test("拖放同时传 handles 与 files，目录靠文件系统属性判定", () => {
+    // 两条一起投
+    expect(SHELL_CC).toContain("handles.concat(files)");
+    // 有超时兜底：handle 不兑现时仍要把 files 发出去
+    expect(SHELL_CC).toContain("files-timeout");
+
+    // 目录判定不能只靠 get_Kind
+    expect(SHELL_CODE).toContain("FILE_ATTRIBUTE_DIRECTORY");
+    // 主路与兜底路各一处
+    const attrCalls = SHELL_CODE.split("GetFileAttributesW(").length - 1;
+    expect(attrCalls).toBe(2);
+
+    // shell-msg 必须带 dirs 字段
+    expect(SHELL_CODE).toContain('\\"dirs\\":[');
+
+    // 宿主无论如何都要回报：取不到路径也要发一条带 ok/err 的消息
+    expect(SHELL_CODE).toContain('\\"ok\\":');
+    expect(SHELL_CODE).toContain("AdditionalObjects is empty");
+
+    // 去重：handles+files 会给同一载体两条相同路径
+    expect(SHELL_CODE).toContain("seen.push_back(path)");
+});
+
 test("键盘处理挂在两个窗口过程的共用前置，不各写一份", () => {
     // 两份会漂移：无边框模式能用、带边框模式不能用（或反之）
     const calls = SHELL_CC.split("handle_input_message(hwnd, msg, wp, lp, &handled)").length - 1;

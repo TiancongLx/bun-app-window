@@ -522,7 +522,16 @@ window.addEventListener("shell-msg", (e) => {
 });
 ```
 
-Files are forwarded by a script the shell injects, so the page does **not** need its own `drop` handler — `paths` holds **absolute** paths (from `ICoreWebView2File::get_Path`).
+Files **and folders** are forwarded by a script the shell injects, so the page does **not** need its own `drop` handler. Every entry is an **absolute path** (from `ICoreWebView2File::get_Path`), and `dirs` tells you which of them are directories:
+
+```js
+window.addEventListener("shell-msg", (e) => {
+  if (e.detail.t !== "drop") return;
+  for (const p of e.detail.paths) {
+    console.log(e.detail.dirs.includes(p) ? "folder" : "file", p);
+  }
+});
+```
 
 When running in an elevated administrator process (High Integrity Level) while Explorer runs at Medium Integrity Level, the shell automatically whitelists drop messages across UIPI via `ChangeWindowMessageFilterEx`.
 

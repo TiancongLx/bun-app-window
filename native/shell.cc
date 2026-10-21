@@ -1429,37 +1429,134 @@ class DropMessageHandler final : public ICoreWebView2WebMessageReceivedEventHand
     if (SUCCEEDED(args2->get_AdditionalObjects(&objects)) && objects) {
       UINT count = 0;
       if (SUCCEEDED(objects->get_Count(&count)) && count > 0) {
-        std::string json = "{\"t\":\"drop\",\"paths\":[";
-        bool any = false;
+        std::string paths;
+        std::string dirs;
+        bool anyPath = false;
+        bool anyDir = false;
+        // 已收路径（去重用）。数量是个位到几十，线性查比建哈希表划算。
+        std::vector<std::wstring> seen;
+        // 诊断计数。**无论成功与否都要回报**——「取不到路径就什么都不发」是这一族
+        // 故障里最贵的一个：页面在等，宿主沉默，两边都没有线索（pitfalls 2.16）。
+        UINT nFile = 0;
+        UINT nHandle = 0;
+        UINT nNoPath = 0;
         for (UINT i = 0; i < count; ++i) {
           IUnknown *item = nullptr;
           if (FAILED(objects->GetValueAtIndex(i, &item)) || !item) {
+            ++nNoPath;
             continue;
           }
+
+          // 两条路，缺一条就有一类对象拿不到路径：
+          //
+          //   `ICoreWebView2File`             —— `dataTransfer.files` 里的 File
+          //   `ICoreWebView2FileSystemHandle` —— `getAsFileSystemHandle()` 的产物
+          //
+          // **目录只能从第二条来**（`FileSystemDirectoryHandle`），而它没有
+          // `ICoreWebView2File`；反过来普通文件两条都可能命中，先试 File 更省。
+          // `get_Kind` 是唯一可靠的「这是不是目录」判据——`File` 的 `size === 0`
+          // 区分不了空文件与目录。
+          LPWSTR raw = nullptr;
+          bool isDir = false;
           ICoreWebView2File *file = nullptr;
           if (SUCCEEDED(item->QueryInterface(IID_ICoreWebView2File,
                                              reinterpret_cast<void **>(&file))) &&
               file) {
-            LPWSTR raw = nullptr;
-            if (SUCCEEDED(file->get_Path(&raw)) && raw) {
-              if (any) {
-                json.push_back(',');
-              }
-              append_json_string(json, std::wstring(raw));
-              any = true;
-              CoTaskMemFree(raw);
+            ++nFile;
+            if (FAILED(file->get_Path(&raw))) {
+              raw = nullptr;
             }
             file->Release();
+          } else {
+            ICoreWebView2FileSystemHandle *handle = nullptr;
+            if (SUCCEEDED(item->QueryInterface(
+                    IID_ICoreWebView2FileSystemHandle,
+                    reinterpret_cast<void **>(&handle))) &&
+                handle) {
+              ++nHandle;
+              COREWEBVIEW2_FILE_SYSTEM_HANDLE_KIND kind =
+                  COREWEBVIEW2_FILE_SYSTEM_HANDLE_KIND_FILE;
+              if (SUCCEEDED(handle->get_Kind(&kind))) {
+                isDir = kind == COREWEBVIEW2_FILE_SYSTEM_HANDLE_KIND_DIRECTORY;
+              }
+              if (FAILED(handle->get_Path(&raw))) {
+                raw = nullptr;
+              }
+              handle->Release();
+            }
           }
           item->Release();
+
+          if (!raw) {
+            ++nNoPath;
+            continue;
+          }
+          const std::wstring path(raw);
+          CoTaskMemFree(raw);
+
+          // 去重：注入脚本把 handles 与 files 一起传，同一个载体可能给两条相同路径。
+          bool dup = false;
+          for (size_t d = 0; d < seen.size(); ++d) {
+            if (seen[d] == path) {
+              dup = true;
+              break;
+            }
+          }
+          if (dup) {
+            continue;
+          }
+          seen.push_back(path);
+
+          // `get_Kind` 只对 `ICoreWebView2FileSystemHandle` 有效。实测（2026-10-21）
+          // 目录的 handle 到宿主时是 null（集合里数得出 1 项，但两个 QI 都不成立），
+          // 于是目录只能以 `dataTransfer.files` 里的 File 身份到达——那条路没有
+          // kind。所以文件系统属性是**必须**的第二个判据，不是冗余。
+          if (!isDir) {
+            const DWORD attrs = GetFileAttributesW(path.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES &&
+                (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+              isDir = true;
+            }
+          }
+
+          if (anyPath) {
+            paths.push_back(',');
+          }
+          append_json_string(paths, path);
+          anyPath = true;
+
+          if (isDir) {
+            if (anyDir) {
+              dirs.push_back(',');
+            }
+            append_json_string(dirs, path);
+            anyDir = true;
+          }
         }
         objects->Release();
-        if (any) {
-          json += "]}";
-          post_json(json);
+        // 一次投递要么给出路径，要么给出**为什么没有**。`ok`/`err` 就是那个交代：
+        // 页面与探针都靠它判断断在哪一环，而不是盯着空数组猜。
+        std::string json = "{\"t\":\"drop\",\"paths\":[";
+        json += paths;
+        json += "],\"dirs\":[";
+        json += dirs;
+        json += "],\"nFile\":";
+        json += std::to_string(nFile);
+        json += ",\"nHandle\":";
+        json += std::to_string(nHandle);
+        json += ",\"nNoPath\":";
+        json += std::to_string(nNoPath);
+        json += ",\"ok\":";
+        json += anyPath ? "true" : "false";
+        if (!anyPath) {
+          json += ",\"err\":\"additional objects carried no usable path\"";
         }
+        json += "}";
+        post_json(json);
       } else {
         objects->Release();
+        post_json("{\"t\":\"drop\",\"paths\":[],\"dirs\":[],\"ok\":false,"
+                  "\"err\":\"AdditionalObjects is empty\"}");
       }
     }
     args2->Release();
@@ -1524,7 +1621,10 @@ void handle_drop(HDROP hd) {
     return;
   }
   const UINT count = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
-  std::string json = "{\"t\":\"drop\",\"paths\":[";
+  std::string paths;
+  std::string dirs;
+  bool anyPath = false;
+  bool anyDir = false;
   for (UINT i = 0; i < count; ++i) {
     const UINT len = DragQueryFileW(hd, i, nullptr, 0);
     if (len == 0) {
@@ -1535,16 +1635,35 @@ void handle_drop(HDROP hd) {
       continue;
     }
     path.resize(len);
-    if (json[json.size() - 1] != '[') {
-      json.push_back(',');
+
+    if (anyPath) {
+      paths.push_back(',');
     }
-    append_json_string(json, path);
+    append_json_string(paths, path);
+    anyPath = true;
+
+    // 兜底路径要靠文件系统属性判目录：`WM_DROPFILES` 只给路径，没有 kind。
+    // 主路（`AdditionalObjects`）用的是 `get_Kind`，两者判据不同但**输出形状必须
+    // 一致**——否则同一个 `shell-msg` 会因命中哪条路而字段不同，消费者没法写。
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+      if (anyDir) {
+        dirs.push_back(',');
+      }
+      append_json_string(dirs, path);
+      anyDir = true;
+    }
   }
-  json += "]}";
   DragFinish(hd);
-  if (count > 0) {
-    post_json(json);
+  if (!anyPath) {
+    return;
   }
+  std::string json = "{\"t\":\"drop\",\"paths\":[";
+  json += paths;
+  json += "],\"dirs\":[";
+  json += dirs;
+  json += "]}";
+  post_json(json);
 }
 
 // ---- 键盘快捷键：订阅 WebView2 的 AcceleratorKeyPressed ----
@@ -2488,36 +2607,124 @@ DWORD WINAPI ui_thread(LPVOID param) {
   // `chrome.webview.postMessageWithAdditionalObjects` content API.」两者是配对的，
   // `AdditionalObjects` 只承载第二个参数里的 DOM 对象。
   //
-  // 所以第一个参数只放自己的标记，`File` 一律走第二个参数。见 `pitfalls` 2.16。
+  // 所以第一个参数只放自己的标记，DOM 对象一律走第二个参数。见 `pitfalls` 2.16。
+  //
+  // ## 目录为什么要走 `getAsFileSystemHandle()`
+  //
+  // WebView2 支持的 DOM 对象只有两种（`WebMessageObjects.md`）：`File` 与
+  // `FileSystemHandle`。**目录不是 `File`**，它只能以
+  // `FileSystemDirectoryHandle`（`FileSystemHandle` 的子类）身份过桥，宿主侧
+  // 落到 `ICoreWebView2FileSystemHandle`，由 `get_Kind` 区分文件/目录
+  // （`FILE = 0` / `DIRECTORY = 1`）。
+  //
+  // 而 `dataTransfer.files` 对目录**不一定**给 entry，所以：
+  //
+  //   - `dataTransfer.items[i].getAsFileSystemHandle()` —— 主路，文件和目录都能拿
+  //   - `dataTransfer.files` —— 回退，只在 handles 全失败时才用
+  //
+  // 两者都空时**必须报出来**，不能像上一版那样静默 return（`pitfalls` 2.16 第 4 关）。
+  //
+  // `getAsFileSystemHandle()` 返回 Promise，必须在 `drop` 处理器里**同步调用**
+  // （`dataTransfer` 在事件返回后即失效），拿到 Promise 之后再 await。
+  //
+  // ## 为什么必须有超时兜底
+  //
+  // 那个 Promise **可能永远不兑现**（实测 2026-10-21：拖文件进来 `files=1
+  // items=1`，两次 drop 都没有任何投递，页面一直停在「等待宿主回报」）。
+  // 若直接在 `.then()` 里投递，Promise 不兑现就等于**什么都不发**，表现与「注入
+  // 脚本没跑」完全一致——又是同一类静默失效。
+  //
+  // 现在的写法是「先到先投，之后作废」：`settled` 一置位，晚到的 handles 结果不再
+  // 投递。超时那条路只能用 `files`（拿不到目录），但它保证**总有东西发出**；`via`
+  // 字段如实记录走了哪条路（`handles` / `files` / `files-timeout` / `files-error`），
+  // 诊断不再靠猜。
+  //
+  // 传不支持的对象给 `postMessageWithAdditionalObjects` 会**抛异常且消息不发出**
+  // （spec 明文），所以 `post` 里必须有 try/catch，且失败后要能退回 `files`。
   static const char *kDropInit =
       "(function(){"
       "  if (!window.chrome || !window.chrome.webview) { return; }"
+      "  var wv = window.chrome.webview;"
       "  window.__shellDropReady = 1;"
       "  window.__shellDropPosted = 0;"
+      "  window.__shellDropVia = '';"
       "  window.__shellDropError = '';"
       "  function allow(e) {"
       "    e.preventDefault();"
       "    if (e.dataTransfer) { e.dataTransfer.dropEffect = 'copy'; }"
       "  }"
+      "  function post(via, objs) {"
+      "    try {"
+      "      wv.postMessageWithAdditionalObjects({ __shellDrop: 1, via: via }, objs);"
+      "      window.__shellDropPosted = 1;"
+      "      window.__shellDropVia = via;"
+      "      return true;"
+      "    } catch (err) {"
+      "      window.__shellDropError = via + ': ' + String(err && err.message ? err.message : err);"
+      "      return false;"
+      "    }"
+      "  }"
       "  window.addEventListener('dragenter', allow, true);"
       "  window.addEventListener('dragover', allow, true);"
       "  window.addEventListener('drop', function (e) {"
       "    var dt = e.dataTransfer;"
-      "    if (!dt || !dt.files || dt.files.length === 0) { return; }"
+      "    if (!dt) { return; }"
       "    e.preventDefault();"
-      "    var files = [];"
-      "    for (var i = 0; i < dt.files.length; i++) { files.push(dt.files[i]); }"
-      "    var wv = window.chrome.webview;"
       "    if (!wv.postMessageWithAdditionalObjects) {"
       "      window.__shellDropError = 'postMessageWithAdditionalObjects unavailable';"
       "      return;"
       "    }"
-      "    try {"
-      "      wv.postMessageWithAdditionalObjects({ __shellDrop: 1 }, files);"
-      "      window.__shellDropPosted = 1;"
-      "    } catch (err) {"
-      "      window.__shellDropError = String(err && err.message ? err.message : err);"
+      // 同步抓取：await 之后 dataTransfer 就失效了，所有读取必须在事件里做完
+      "    var files = [];"
+      "    if (dt.files) {"
+      "      for (var i = 0; i < dt.files.length; i++) { files.push(dt.files[i]); }"
       "    }"
+      "    var pending = [];"
+      "    if (dt.items) {"
+      "      for (var j = 0; j < dt.items.length; j++) {"
+      "        var it = dt.items[j];"
+      "        if (it.kind !== 'file') { continue; }"
+      "        if (it.getAsFileSystemHandle) {"
+      "          try { pending.push(it.getAsFileSystemHandle()); } catch (_) {}"
+      "        }"
+      "      }"
+      "    }"
+      "    var settled = false;"
+      "    function settle(via, objs) {"
+      "      if (settled) { return false; }"
+      "      settled = true;"
+      "      return post(via, objs);"
+      "    }"
+      "    if (!pending.length) {"
+      // 没有 handles 这条路（老运行时）：只能用 files
+      "      if (files.length) { settle('files', files); }"
+      "      else { window.__shellDropError = 'drop had no files and no items'; }"
+      "      return;"
+      "    }"
+      "    setTimeout(function () {"
+      "      if (!settled) {"
+      "        if (!window.__shellDropError) {"
+      "          window.__shellDropError = 'getAsFileSystemHandle did not settle';"
+      "        }"
+      "        if (files.length) { settle('files-timeout', files); }"
+      "      }"
+      "    }, 800);"
+      "    Promise.all(pending).then(function (list) {"
+      "      var handles = [];"
+      "      for (var k = 0; k < list.length; k++) { if (list[k]) { handles.push(list[k]); } }"
+      // handles 与 files 一起传：目录的 handle 到宿主可能是 null（spec：不支持的
+      // DOM 对象以 null 传递），而 `files` 里目录会以一个 File 出现——两条都带上，
+      // 宿主按「能取到 path 的那个」用，并对重复路径去重。
+      "      var both = handles.concat(files);"
+      "      if (both.length) { settle('handles+files', both); }"
+      "      else if (!window.__shellDropError) {"
+      "        window.__shellDropError = 'no handle and no file could be posted';"
+      "      }"
+      "    })['catch'](function (err) {"
+      "      window.__shellDropError = 'getAsFileSystemHandle: ' +"
+      "        String(err && err.message ? err.message : err);"
+      "      if (files.length) { settle('files-error', files); }"
+      "    });"
       "  }, true);"
       "})();";
 

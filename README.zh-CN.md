@@ -504,7 +504,16 @@ window.addEventListener("shell-msg", (e) => {
 });
 ```
 
-落进窗口的文件由壳层注入的脚本自动转发，页面**不需要**自己监听 `drop` —— `paths` 里是**绝对路径**（来源 `ICoreWebView2File::get_Path`）。
+落进窗口的**文件与文件夹**都由壳层注入的脚本自动转发，页面**不需要**自己监听 `drop`。每条都是**绝对路径**（来源 `ICoreWebView2File::get_Path`），而 `dirs` 告诉你其中哪些是目录：
+
+```js
+window.addEventListener("shell-msg", (e) => {
+  if (e.detail.t !== "drop") return;
+  for (const p of e.detail.paths) {
+    console.log(e.detail.dirs.includes(p) ? "文件夹" : "文件", p);
+  }
+});
+```
 
 针对管理员提权场景（High 完整性级别进程接收来自 Medium 级别资源管理器的消息），底层已通过 `ChangeWindowMessageFilterEx` 自动放行 UIPI 消息过滤。
 
