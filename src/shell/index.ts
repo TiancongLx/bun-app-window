@@ -201,7 +201,7 @@ export type Shell = {
    * 恢复窗口矩形。savedDpi 是保存时的 DPI，用于跨缩放比例换算；
    * 原生侧还会校验矩形是否仍在某块屏上，不在则居中。
    *
-   * 一般不需要直接调用——用 bun-app-window/state 的 estorePlacement()。
+   * 一般不需要直接调用——用 bun-app-window/state 的 restorePlacement()。
    */
   restoreBounds(
     x: number,
