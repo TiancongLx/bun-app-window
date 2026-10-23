@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-23
+
+### Fixed
+
+- **`src/shell/index.ts` is a text file again — a stray `0x0D` byte had made git treat it as binary.** The comment above `Shell.restoreBounds()` carried `␍estorePlacement()`: the `r` was written as `0x0D` (CR) instead of `0x72`. One control byte was enough for git to sniff the whole file as `-text`, and `git ls-files --eol` skips binary entries outright — so the end-of-line check never covered this file, and the damage sat there unnoticed.
+
+    The repair is a single byte at offset 8374 (`0x0D` → `0x72`). The file length is unchanged at 14,213 B and no other byte moved.
+
+    It surfaced only once the EOL gate got stricter: it used to parse the `i/crlf` / `w/crlf` substrings out of `ls-files --eol`, and now classifies by raw file bytes — which sees `0x0D` wherever it appears, including inside a comment.
+
+### Note
+
+- **Nothing changes at runtime.** `dist/libshell.dll` is byte-identical to 0.6.1, no exported symbol, flag or type moved, and the packed file allow-list is unchanged. Upgrading only replaces the published source of `src/shell/index.ts`.
+- Work landed in the same window but **outside** this package: three additions to `docs/pitfalls.md` (2.22 on screen-coordinate probes, 5.11 on redaction, 1.2 on z-order locking). `docs/` is not in the published file allow-list, so none of it ships.
+
 ## [0.6.1] - 2026-10-22
 
 ### Added
@@ -630,7 +645,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.0...v0.5.1
