@@ -10,9 +10,9 @@
 ### 1.2 窗口被遮挡时 topmost 也不生效
 
 - **症状**：窗口存在、`IsWindowVisible=true`、DWM 扩展边框正确，但截图里看不到它，z 序显示在其它窗口下方。调用 `SetWindowPos(hwnd, HWND_TOPMOST, ...)` 与 `SetWindowLong(GWL_EXSTYLE, ... | WS_EX_TOPMOST)` 都返回成功（`ok=True, err=0`），但 `exstyle` 与 z 序完全不变。
-- **原因**：本机存在 z 序锁定策略（实测无法从外部改变任何窗口的 topmost 标志）。`SetWindowPos` 返回 TRUE 并不代表 z 序真的改变了。
-- **修法**：**不要试图移动窗口**。改用 `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT=2)` 做离屏捕获，它能拿到被完全遮挡的 WebView2 内容（见 1.3）。只在本人就在机器前需要肉眼确认时，才手动最小化遮挡窗口。
-- **证据**：`实测`。控制实验中 `SetWindowPos` / `SetWindowLong` / `BringWindowToTop` 三种方式全部无效，exstyle 恒为 `0x00000100`。
+- **原因**：~~本机存在 z 序锁定策略（实测无法从外部改变任何窗口的 topmost 标志）。~~ **本机存在 z 序锁定策略，但它只约束「别的进程」的窗口。**（补正：`echoes-of-the-eye` 的 ADR-0014）对**本进程自己创建**的窗口，`SetWindowPos(HWND_NOTOPMOST)` → `SetWindowPos(HWND_TOPMOST)` 两步有效：`WS_EX_TOPMOST` 由 false 变 true、exstyle `0x00000100` → `0x00000108`、z 序位置前移，同一点上的 `WindowFromPoint` 随后命中目标。仍然拿不到的是「前台」——`SetForegroundWindow` 照样被拒（返回 false，前台窗口不变）。而注入只需要「可见」，不需要「前台」。`SetWindowPos` 返回 TRUE 并不代表 z 序真的改变了，这一点仍然成立，要复核。
+- **修法**：**对别的进程的窗口，不要试图移动它**——改用 `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT=2)` 做离屏捕获，它能拿到被完全遮挡的 WebView2 内容（见 1.3）。若是**自己创建的窗口**，先置顶再谈别的：`bringToFront()` 那两步之后，屏幕像素判据才可信。只在本人就在机器前需要肉眼确认时，才手动最小化遮挡窗口。
+- **证据**：`实测`。控制实验中 `SetWindowPos` / `SetWindowLong` / `BringWindowToTop` 三种方式全部无效，exstyle 恒为 `0x00000100`——**那组实验的对象是别的进程的窗口**。同进程窗口的对照读数：`0x00000100` → `0x00000108`，且置顶前后 `WindowFromPoint` 在窗口内一点上由「命中别人」变为「命中目标」。
 
 ### 1.3 `PrintWindow` 的 flag 决定能否拿到 WebView2 内容
 
