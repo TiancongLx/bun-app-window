@@ -6,7 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Note
+## [0.8.0] - 2026-10-25
+
+### Added
+
+- **Page-side errors are now reported to the host.** An injected listener captures `error` and
+  `unhandledrejection` and posts them to the host over HTTP — deliberately not over the WebSocket,
+  which does not exist yet when a page script fails during evaluation, and that is the case worth
+  observing most. Pass `onPageError` to receive a `PageError`; without a callback the host prints
+  them to stderr rather than discarding them.
+
+    Measured on a real window: a page script that throws at module evaluation used to produce a
+    blank window and a single "window ready" line in the host log. It now produces
+    `kind=error message=Uncaught Error: … source=…/page.js:1:7` in the host log within the same
+    startup.
+
+- **`emit()` accepts `{ sticky: true }`.** A page loads after the window is created, so anything
+  broadcast between `createApp` returning and the page's WebSocket opening is delivered to zero
+  connections and never replayed — a page that reads its initial state from events alone stays
+  empty, with no error at either end. Sticky events keep the last payload per event name and replay
+  it in `attach()`. It is opt-in: a notification-shaped event that turns sticky gives late
+  connections one stale message that reads like a fresh one.
+
+### Changed
+
+- **BREAKING: `createIpcServer` throws when the service table contains a reserved client name.**
+  `on` / `off` / `close` / `connected` / `pending` / `then` resolve to the IPC client's own members,
+  so a service method under one of those names is unreachable and neither end reports anything.
+  Measured before this change: `client.close()` returned `undefined` — not a Promise — and the
+  server-side method was invoked zero times, with no exception raised, because `await undefined` is
+  a legal expression. The check runs at creation and names the offending keys. Pass
+  `{ rejectReservedNames: false }` only when the table is generated from external input and
+  validated elsewhere.
+
+- **`createApp` validates `html` against `page`.** Supplying one without the other produced a window
+  that rendered normally, loaded no script, and responded to nothing, with an empty host log.
+  Both directions now throw before the server starts; a reference that lacks `type="module"`
+  produces a warning instead, because the legal ways to write a `<script>` tag are too varied for a
+  string match to justify blocking startup.
 
 - **Release verification split into two points around the irreversible step.** A release writes three carriers: the git commit, the GitHub tag + release, and the npm tarball. The first three actions can all be undone; `bun publish` cannot — the version number is spent permanently. Verification therefore now happens on both sides of it.
 
@@ -14,6 +51,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     - `release-verify.ts`, run after publish: the core check is a single comparison — `tag → git archive → bun pm pack → sha1` against the tarball downloaded from npm. When that matches, every file inside is identical, so no per-file or per-paragraph assertion is needed. `bun pm pack` was measured to be deterministic: repacking the `v0.7.0` tree reproduced the sha1 npm had already published, byte for byte.
 
 - **The pre-release sentinel went from sixteen checks to six.** Eight of them duplicated `tests/version.test.ts` and `tests/readme-contract.test.ts` verbatim, and the three package-size checks stated one fact three times. What remains is exactly what `bun test` structurally cannot do: CHANGELOG section, CHANGELOG links, empty `Unreleased`, clean working tree, unoccupied tag, and the declared package size against the real tarball. Duplication costs more than a few milliseconds — two implementations drift, and then a person bypasses whichever one is stricter, which is usually the one nobody maintains.
+
+### Note
+
+- The four changes above share one design criterion: **a legal action that puts the system into an
+  unusable state must be observable by someone.** Two of them now stop at creation; two are exposed
+  through the host log. The rationale, the measurements behind each, and the rejected alternatives
+  are in `ADR 0020` (repository-local).
 
 ## [0.7.0] - 2026-10-25
 
@@ -701,7 +745,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.0...v0.6.1

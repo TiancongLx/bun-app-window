@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### 包内包含什么
 
-发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 22 个文件（0.48 MB，解包后 1.39 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
+发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 22 个文件（0.49 MB，解包后 1.41 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
 
 ## 快速开始
 
@@ -217,6 +217,12 @@ await api.greet("Ada");
 - `stop()` 有序且幂等：`shell.stop()` → 等 `EVENT_CLOSED`（带 5 秒上限）→ `server.stop()`。
 - 起一个窗口事件泵并且只起一个：`app.events`。它同时承担「等窗口关闭」，
   所以是唯一的事件消费者；`attachPlacementStore` 要用它时传 `{ events: app.events }`。
+- 把页面侧的异常回传给宿主。未捕获异常与未处理的 Promise 拒绝由注入的监听脚本捕获，
+  经 HTTP 上报——不走 WebSocket：页面脚本在求值阶段崩溃时通道尚未建立，而那正是最需要
+  观测的情形。传 `onPageError` 接收；不传时输出到宿主的 stderr，而不是丢弃。
+- 启动前校验 `html` 与 `page` 的一致性。只给其中一个属于配置错误，唯一症状是窗口正常渲染
+  但任何交互都无响应，因此直接抛错。引用存在但缺少 `type="module"` 时只告警：`<script>`
+  的合法写法不止一种，字符串匹配的置信度不足以阻断启动。
 - 启动失败不留半启动状态：`openShell` 抛错时，已绑定的端口会被释放。
 
 注意事项：
@@ -269,6 +275,21 @@ serveOnSafePort({
 ipc.emit("windowState", { maximized: false });   // 向页面主动推送事件
 ```
 
+#### 迟连接的状态投递
+
+页面在窗口创建**之后**才加载。宿主从 `createApp` 返回、到页面的 WebSocket 建立之间发出的
+任何事件，都投递给了零个连接，也不会被回放——只从事件读取初始状态的页面会一直是空值，
+而两端都不报错。
+
+把「状态类」事件标为粘性，服务端就会在每次连接建立时回放最后一份载荷：
+
+```ts
+ipc.emit("windowState", { maximized: false }, { sticky: true });   // attach() 时回放
+```
+
+粘性是**显式开启**的，且每个事件名只保留一份载荷，不是历史队列。语义上是「通知」而非
+「状态」的事件不应开启：迟到的连接会额外收到一条读起来像新消息的旧消息。
+
 ```ts
 // 页面端
 import { connect } from "bun-app-window/ipc";
@@ -318,6 +339,10 @@ const api = await connect<Api, Events>({ timeoutMs: 0 });
 
 Symbol 键同样保留。给服务方法换个名字（`winClose` 而不是 `close`），在页面侧映射回去 ——
 见下面的标题栏一节。
+
+上述失效在运行期完全不可观测，因此 `createIpcServer` 在**创建时就会抛错**：服务表里出现这些
+名字即终止，错误信息指出冲突的键并给出替代命名。只有当服务表由外部输入生成、且已用其他手段
+校验过时，才应传 `{ rejectReservedNames: false }` 关闭本检查。
 
 ### `bun-app-window/titlebar` — Windows 11 风格标题栏
 

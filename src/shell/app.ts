@@ -35,6 +35,27 @@ import { FLAG_CENTER, FLAG_RESIZABLE, type ShellOptions } from "./types";
 import { debugOf, type ShellDebug } from "./debug";
 import { attachPlacementStore, type PlacementStore } from "./state";
 
+/**
+ * 页面侧异常。由骨架注入的监听脚本捕获后回传宿主。
+ *
+ * 回传走 HTTP POST 而非 IPC 通道：页面脚本在求值阶段抛出异常时，WebSocket 尚未
+ * 建立，任何依赖该通道的上报都无法送达，而这正是最需要观测的情形（ADR 0020）。
+ */
+export type PageError = {
+    /** 来源：全局 `error` 事件，或未处理的 Promise 拒绝 */
+    kind: "error" | "unhandledrejection";
+    /** 错误消息。浏览器未提供时为固定占位文本，不会是空串 */
+    message: string;
+    /** 抛出位置的文件 URL（仅 `kind === "error"`，且浏览器提供时存在） */
+    source?: string;
+    /** 行号（同上） */
+    line?: number;
+    /** 列号（同上） */
+    column?: number;
+    /** 堆栈。跨源脚本可能为空 */
+    stack?: string;
+};
+
 /** 骨架起出来的东西。`shell` 是完整的内核对象，骨架只是帮它把周边接好 */
 export type App = {
     /** 内核对象。标题、缩放、全屏、原生菜单、位置持久化都从这里拿 */
@@ -171,6 +192,18 @@ export type AppOptions = {
      * 从磁盘读静态资源、代理上游 API 这类事情写在这里。
      */
     routes?: (req: Request) => Response | undefined | Promise<Response | undefined>;
+    /**
+     * 页面侧未捕获异常的回调。
+     *
+     * 骨架会在页面注入最小监听：`error` 事件与 `unhandledrejection` 都会回传，
+     * 后者覆盖异步代码的失败，前者覆盖脚本求值阶段的失败（模块加载失败、
+     * 顶层引用错误等）。回传走 HTTP POST，不依赖 WebSocket——脚本在求值时崩溃时
+     * 通道尚未建立，而那是最需要观测的情形。
+     *
+     * 未提供时骨架将错误打印到宿主 stderr。不提供即静默，会让「窗口空白但进程正常」
+     * 这一状态无法归因，因此默认行为是输出而不是丢弃。
+     */
+    onPageError?: (error: PageError) => void;
     /** 窗口建好、服务就绪后调用一次 */
     onReady?: (app: App) => void;
 };
@@ -229,6 +262,148 @@ export const PAGE_JS_PATH = "/page.js";
 const PAGE_JS_CONTENT_TYPE = "text/javascript; charset=utf-8";
 
 /**
+ * 页面异常回传路径。
+ *
+ * 独立于 `/ws`：页面脚本在求值阶段崩溃时 IPC 通道尚未建立，依赖通道的上报
+ * 无法送达，而那正是最需要观测的情形。HTTP POST 不要求任何前置连接。
+ *
+ * 以 `/__shell-` 为前缀，与调用方自定义路由的常规命名区分。
+ */
+const PAGE_ERROR_PATH = "/__shell-page-error";
+
+/**
+ * 页面异常回传的体积上限（字节）。
+ *
+ * 过大的载荷通常是堆栈里嵌入了序列化后的对象，对定位没有额外价值。
+ * 截断而不拒绝：诊断信息宁可少，不可因体积超限而整条丢失。
+ */
+const PAGE_ERROR_MAX_BYTES = 8 * 1024;
+
+/**
+ * 注入页面的异常监听脚本。
+ *
+ * 必须是普通脚本而非模块：模块脚本的执行时机晚于解析，无法捕获在其之前发生的
+ * 求值错误。同样必须位于页面自身脚本之前，因此插入点是 `<head>` 的开头。
+ *
+ * 上报失败一律静默：监听器自身抛错会造成递归，而递归的后果比丢一条日志严重。
+ */
+function pageErrorRelayScript(): string {
+    return `<script>(function(){try{
+var send=function(p){try{
+var t=new URLSearchParams(location.search).get("t")||"";
+fetch(${JSON.stringify(PAGE_ERROR_PATH)}+"?t="+encodeURIComponent(t),{
+method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(p)
+}).catch(function(){});}catch(e){}};
+window.addEventListener("error",function(e){
+send({kind:"error",message:e.message||"(no message)",
+source:e.filename||"",line:e.lineno||0,column:e.colno||0,
+stack:e.error&&e.error.stack?String(e.error.stack):""});});
+window.addEventListener("unhandledrejection",function(e){
+var r=e.reason;
+send({kind:"unhandledrejection",
+message:r&&r.message?String(r.message):String(r),
+stack:r&&r.stack?String(r.stack):""});});
+}catch(e){}})();</script>`;
+}
+
+/**
+ * 把监听脚本插入 HTML。
+ *
+ * 插入点优先 `<head>` 开头：监听器需要早于页面自身的任何脚本。没有 `<head>` 时
+ * 退到 `<html>` 之后，再无则置于最前。三种情况都保持原文不变，只做插入。
+ */
+export function injectPageErrorRelay(html: string): string {
+    const script = pageErrorRelayScript();
+    const head = /<head[^>]*>/i.exec(html);
+    if (head) {
+        const at = head.index + head[0].length;
+        return html.slice(0, at) + script + html.slice(at);
+    }
+    const root = /<html[^>]*>/i.exec(html);
+    if (root) {
+        const at = root.index + root[0].length;
+        return html.slice(0, at) + script + html.slice(at);
+    }
+    return script + html;
+}
+
+/**
+ * 把回传的原始载荷归一成 `PageError`。
+ *
+ * 载荷由页面产生，字段不可信：类型不符的字段被丢弃而不是抛错。`message` 缺失时
+ * 填入固定占位文本，保证调用方拿到的对象始终有可读消息——一条消息为空的上报
+ * 与被丢弃没有区别。
+ */
+export function parsePageError(raw: unknown): PageError | null {
+    if (!raw || typeof raw !== "object") {
+        return null;
+    }
+    const o = raw as Record<string, unknown>;
+    const kind = o.kind === "unhandledrejection" ? "unhandledrejection" : "error";
+    const out: PageError = {
+        kind,
+        message: typeof o.message === "string" && o.message ? o.message : "(no message)",
+    };
+    if (typeof o.source === "string" && o.source) {
+        out.source = o.source;
+    }
+    if (typeof o.line === "number" && Number.isFinite(o.line) && o.line > 0) {
+        out.line = o.line;
+    }
+    if (typeof o.column === "number" && Number.isFinite(o.column) && o.column > 0) {
+        out.column = o.column;
+    }
+    if (typeof o.stack === "string" && o.stack) {
+        out.stack = o.stack;
+    }
+    return out;
+}
+
+/**
+ * 校验 `html` 与 `page` 的一致性。
+ *
+ * 两者由调用方分别提供，而三种不一致的组合都不会报错：页面照常渲染，脚本不执行，
+ * 所有交互无响应，宿主日志为空（ADR 0020）。前两种可以静态判定，因此直接终止；
+ * 第三种依赖 `<script>` 的具体写法，判定置信度不足，只输出警告。
+ */
+export function assertPageWiring(html: string, page: string | undefined): void {
+    const referenced = html.includes(PAGE_JS_PATH);
+
+    if (page !== undefined && !referenced) {
+        throw new Error(
+            `createApp: 提供了 page，但 html 中未引用 ${PAGE_JS_PATH}。\n` +
+                `页面脚本不会被加载，所有交互都不会有响应，且不会有任何报错。\n` +
+                `请在 html 中加入 <script type="module" src="${PAGE_JS_PATH}"></script>，或移除 page 参数。`,
+        );
+    }
+
+    if (page === undefined && referenced) {
+        throw new Error(
+            `createApp: html 引用了 ${PAGE_JS_PATH}，但未提供 page 参数。\n` +
+                `该路径将返回 404，页面脚本加载失败，所有交互都不会有响应。\n` +
+                `请传入打包后的页面脚本，或从 html 中移除该引用。`,
+        );
+    }
+
+    if (!referenced) {
+        return;
+    }
+
+    // 只检查引用了页面脚本的那一个标签，避免被 HTML 中其他 <script> 干扰。
+    // PAGE_JS_PATH 是固定常量（/page.js），需要转义的只有其中的点号。
+    const escaped = PAGE_JS_PATH.replace(/\./g, "\\.");
+    const tag = new RegExp(`<script\\b[^>]*${escaped}[^>]*>`, "i").exec(html)?.[0];
+    if (tag !== undefined && !/\btype\s*=\s*["']module["']/i.test(tag)) {
+        // 不抛出：`<script>` 的合法写法不止一种，字符串判定的置信度不足以阻断启动。
+        console.warn(
+            `createApp: ${PAGE_JS_PATH} 的 <script> 标签缺少 type="module"。\n` +
+                `页面脚本是 ES 模块，以经典脚本加载会解析失败，脚本一行都不会执行，` +
+                `而页面仍会正常渲染。请补上 type="module"。`,
+        );
+    }
+}
+
+/**
  * `/ws` 请求的处置结论。
  *
  * 抽成纯函数是因为这是整个骨架里**唯一有分支的判据**，而它有三个容易写反的点：
@@ -265,6 +440,13 @@ export async function createApp(opts: AppOptions): Promise<App> {
     if (!opts.html || typeof opts.html !== "string") {
         throw new Error("createApp: html is required (import it with { type: \"text\" })");
     }
+
+    // html 与 page 分别由调用方提供，两者的不一致不会产生任何运行时错误，
+    // 只会得到一个「渲染正常、交互全无」的窗口（ADR 0020）。
+    assertPageWiring(opts.html, opts.page);
+
+    // 注入只做一次：每次请求重新拼接会让 /  的响应内容随时间变化
+    const html = injectPageErrorRelay(opts.html);
 
     const token = crypto.randomUUID();
     const ipc = opts.service
@@ -311,6 +493,47 @@ export async function createApp(opts: AppOptions): Promise<App> {
                 break;
         }
 
+        // 页面异常回传。放在调用方路由之前：这是骨架自身的诊断通道，
+        // 不应被消费者的 catch-all 路由吞掉。
+        if (url.pathname === PAGE_ERROR_PATH) {
+            if (req.method !== "POST") {
+                return new Response("method not allowed", { status: 405 });
+            }
+            // 与 `/ws` 同一套 token：本地回环上的任何进程都能 POST 到该端口，
+            // 不加约束会让无关流量进入宿主日志。
+            if (url.searchParams.get("t") !== token) {
+                return new Response(null, { status: 403 });
+            }
+            let body = "";
+            try {
+                const text = await req.text();
+                body = text.length > PAGE_ERROR_MAX_BYTES ? text.slice(0, PAGE_ERROR_MAX_BYTES) : text;
+            } catch {
+                return new Response(null, { status: 400 });
+            }
+            let parsed: PageError | null = null;
+            try {
+                parsed = parsePageError(JSON.parse(body));
+            } catch {
+                parsed = null;
+            }
+            if (parsed === null) {
+                return new Response(null, { status: 400 });
+            }
+            if (opts.onPageError !== undefined) {
+                try {
+                    opts.onPageError(parsed);
+                } catch {
+                    // 回调自身抛错不应影响页面：错误处理的失败路径不能比原错误更响
+                }
+            } else {
+                // 未提供回调时输出而不是丢弃。默认静默会让「窗口空白但进程正常」
+                // 无法归因，而这正是引入该通道要解决的问题。
+                console.error(`[page] ${parsed.kind}: ${parsed.message}`);
+            }
+            return new Response(null, { status: 204 });
+        }
+
         // 调用方的路由优先，能覆盖 `/`（自绘入口页、SPA fallback 都靠这条）
         const custom = await opts.routes?.(req);
         if (custom) {
@@ -326,7 +549,7 @@ export async function createApp(opts: AppOptions): Promise<App> {
         }
 
         if (url.pathname === "/") {
-            return new Response(opts.html, {
+            return new Response(html, {
                 headers: { "content-type": "text/html; charset=utf-8" },
             });
         }

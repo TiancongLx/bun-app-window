@@ -65,17 +65,53 @@ export type IpcServerOptions = {
     service: ServiceMethods;
     /** 错误里是否回传 stack。开发期有用，生产应保持关闭 */
     exposeStack?: boolean;
+    /**
+     * 服务表出现客户端保留名时报错。默认 `true`。
+     *
+     * 保留名的表现是：服务端注册成功，客户端调用时解析为客户端自身成员，
+     * 请求不会发出，两端都不产生任何错误。默认终止启动的原因见 ADR 0020。
+     *
+     * 关闭此项仅应在服务表由外部输入动态生成、且已用别的手段校验时使用。
+     */
+    rejectReservedNames?: boolean;
+};
+
+/**
+ * IPC 客户端自身占用的属性名。
+ *
+ * 客户端是一个 Proxy，这些名字在 `get` 陷阱中解析为客户端成员，不会派发为远程调用。
+ * 服务表中同名的项因此永远不会被调用，而 `await client.close()` 也不会抛错
+ * （`await undefined` 是合法表达式），调用方无法区分「执行完毕」与「未派发」。
+ *
+ * 这份清单与客户端代理的拦截分支必须一致。`tests/ipc.test.ts` 中有一条断言逐名
+ * 验证「该名字不派发为远程调用」，两者分叉时该断言失败。
+ */
+export const RESERVED_CLIENT_KEYS = ["on", "off", "close", "connected", "pending", "then"] as const;
+
+/** 广播事件的选项 */
+export type EmitOptions = {
+    /**
+     * 保留最后一次载荷，在连接建立时向该连接回放一次。
+     *
+     * 用途是状态同步。宿主通常在 `createApp` 返回后立即广播一次窗口状态，而此刻
+     * 页面仍在加载、WebSocket 尚未建立，广播投递给零个连接且不回放，页面据此
+     * 获取的初始状态将永远为空。粘性事件使新连接在 `attach` 时立即获得当前值。
+     *
+     * 默认关闭。逐条通知类的事件若开启粘性，新连接会额外收到一条历史消息，
+     * 与「只推变化」的预期不符。
+     */
+    sticky?: boolean;
 };
 
 export type IpcServer = {
     /** 处理一条来自连接的原始消息。非 IPC 消息会被静默忽略 */
     handle(peer: IpcPeer, raw: string | Buffer | Uint8Array): Promise<void>;
-    /** 登记连接，`emit` 才会送到它 */
+    /** 登记连接，`emit` 才会送到它。粘性事件在此同步回放 */
     attach(peer: IpcPeer): void;
     /** 注销连接。close 时必须调，否则 emit 会向死连接写入 */
     detach(peer: IpcPeer): void;
     /** 广播事件给所有已登记连接。返回实际投递数 */
-    emit(event: string, payload?: unknown): number;
+    emit(event: string, payload?: unknown, options?: EmitOptions): number;
     /** 服务暴露的方法名（创建时的快照）。用于自检与文档 */
     readonly methods: readonly string[];
     /** 当前登记连接数 */
@@ -122,6 +158,28 @@ export function createIpcServer(opts: IpcServerOptions): IpcServer {
     const connected = new Set<IpcPeer>();
     // 创建时快照：之后往 service 上挂东西不会改变对外声明
     const methods = Object.keys(service);
+
+    // 保留名冲突在创建时终止，而不是留到首次调用。
+    // 该冲突的既有表现是「调用成功、返回 undefined、服务端未执行」，
+    // 既无异常也无日志，只能靠阅读客户端实现才能定位（ADR 0020）。
+    if (opts.rejectReservedNames !== false) {
+        const conflicts = methods.filter((m) => (RESERVED_CLIENT_KEYS as readonly string[]).includes(m));
+        if (conflicts.length > 0) {
+            throw new Error(
+                `IPC 服务表包含客户端保留名：${conflicts.join(", ")}。\n` +
+                    `这些名字由 bun-app-window/ipc 的客户端自身占用，同名服务方法永远不会被调用，` +
+                    `且调用方不会收到任何错误。请改用其他名字（例如 close 改为 winClose）。\n` +
+                    `若服务表由外部输入生成且已另行校验，可传入 { rejectReservedNames: false } 关闭本检查。`,
+            );
+        }
+    }
+
+    /**
+     * 粘性事件的最后一次载荷。
+     *
+     * 每个事件名只保留一条，不累计：粘性的语义是「当前值」，不是「历史」。
+     */
+    const stickyEvents = new Map<string, IpcEventMessage>();
 
     const send = (peer: IpcPeer, msg: IpcMessage): void => {
         try {
@@ -187,14 +245,27 @@ export function createIpcServer(opts: IpcServerOptions): IpcServer {
 
         attach(peer): void {
             connected.add(peer);
+            // 粘性事件在登记后同步回放：`attach` 返回时，新连接已收到全部当前值。
+            // 不引入定时器，避免「回放尚未到达」这一中间态。
+            for (const msg of stickyEvents.values()) {
+                try {
+                    peer.send(JSON.stringify(msg));
+                } catch {
+                    // 与 emit 一致：写入失败不中断其余回放
+                }
+            }
         },
 
         detach(peer): void {
             connected.delete(peer);
         },
 
-        emit(event, payload): number {
+        emit(event, payload, options): number {
             const msg: IpcEventMessage = { t: "ipc:evt", e: event, p: payload ?? null };
+            if (options?.sticky === true) {
+                // 同名事件覆盖上一次：粘性表示「当前值」，不是历史队列
+                stickyEvents.set(event, msg);
+            }
             const body = JSON.stringify(msg);
             let delivered = 0;
             for (const peer of connected) {

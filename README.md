@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### What the tarball contains
 
-The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 22 files, 0.48 MB packed (1.39 MB unpacked). The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
+The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 22 files, 0.49 MB packed (1.41 MB unpacked). The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
 
 ## Quick Start
 
@@ -225,6 +225,14 @@ What it does for you:
   `server.stop()`.
 - Starts exactly one window-event pump: `app.events`. It is also what waits for close, so it is
   the single consumer. Pass `{ events: app.events }` when you need `attachPlacementStore`.
+- Reports page-side errors back to the host. Uncaught exceptions and unhandled rejections are
+  captured by an injected listener and posted over HTTP — not over the WebSocket, which does not
+  exist yet when a page script fails during evaluation. Pass `onPageError` to receive them; without
+  a callback they go to the host's stderr rather than being discarded.
+- Checks `html` against `page` before starting. Supplying one without the other is a configuration
+  error whose only symptom is a window that renders and responds to nothing, so it throws. A
+  reference without `type="module"` produces a warning instead: the legal ways to write a
+  `<script>` tag are too varied for a string match to justify blocking startup.
 - Startup failures leave nothing half-started: if `openShell` throws, the bound port is released.
 
 Notes:
@@ -282,6 +290,22 @@ serveOnSafePort({
 ipc.emit("windowState", { maximized: false });   // Push event to connected pages
 ```
 
+#### Delivering state to late connections
+
+A page loads *after* the window is created. Anything the host emits between `createApp` returning
+and the page's WebSocket opening is delivered to zero connections and is not replayed — so a page
+that reads its initial state from events alone stays empty, with no error on either side.
+
+Mark state-shaped events as sticky and the server replays the last payload to each new connection:
+
+```ts
+ipc.emit("windowState", { maximized: false }, { sticky: true });   // Replayed on attach()
+```
+
+Sticky is **opt-in** and keeps one payload per event name, not a history. Events that are
+notifications rather than state should stay non-sticky: a late connection would otherwise receive
+one stale message that reads like a fresh one.
+
 ```ts
 // Page
 import { connect } from "bun-app-window/ipc";
@@ -329,6 +353,11 @@ unreachable** — the page calls the client's own member instead, and neither en
 
 Symbol keys are reserved as well. Pick a different service name (`winClose` instead of `close`) and
 map it back on the page side — see the title bar section below.
+
+Because the failure above is invisible at runtime, `createIpcServer` **throws at creation time** when
+the service table contains any of these names. The error names the offending keys and suggests a
+replacement. Pass `{ rejectReservedNames: false }` only when the table is generated from external
+input and validated by other means.
 
 ### `bun-app-window/titlebar` — Windows 11 Title Bar
 

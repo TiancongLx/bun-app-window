@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### 套件內容包含什麼
 
-發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 22 個檔案（0.48 MB，解包後 1.39 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
+發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 22 個檔案（0.49 MB，解包後 1.41 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
 
 ## 快速開始
 
@@ -216,6 +216,12 @@ await api.greet("Ada");
 - `stop()` 有序且冪等：`shell.stop()` → 等 `EVENT_CLOSED`（帶 5 秒上限）→ `server.stop()`。
 - 起一個視窗事件泵並且只起一個：`app.events`。它同時承擔「等視窗關閉」，
   所以是唯一的事件消費者；`attachPlacementStore` 要用它時傳 `{ events: app.events }`。
+- 把頁面端的例外回傳給宿主。未捕捉例外與未處理的 Promise 拒絕由注入的監聽腳本捕捉，
+  經 HTTP 上報——不走 WebSocket：頁面腳本在求值階段崩潰時通道尚未建立，而那正是最需要
+  觀測的情形。傳 `onPageError` 接收；不傳時輸出到宿主的 stderr，而不是丟棄。
+- 啟動前校驗 `html` 與 `page` 的一致性。只給其中一個屬於設定錯誤，唯一症狀是視窗正常繪製
+  但任何互動都無回應，因此直接拋錯。引用存在但缺少 `type="module"` 時只警告：`<script>`
+  的合法寫法不只一種，字串比對的置信度不足以阻斷啟動。
 - 啟動失敗不留半啟動狀態：`openShell` 拋錯時，已綁定的埠會被釋放。
 
 注意事項：
@@ -268,6 +274,21 @@ serveOnSafePort({
 ipc.emit("windowState", { maximized: false });   // 向頁面主動推播事件
 ```
 
+#### 遲連線的狀態投遞
+
+頁面在視窗建立**之後**才載入。宿主從 `createApp` 回傳、到頁面的 WebSocket 建立之間發出的
+任何事件，都投遞給零個連線，也不會被重播——只從事件讀取初始狀態的頁面會一直是空值，
+而兩端都不會報錯。
+
+把「狀態類」事件標為黏性，服務端就會在每次連線建立時重播最後一份酬載：
+
+```ts
+ipc.emit("windowState", { maximized: false }, { sticky: true });   // attach() 時重播
+```
+
+黏性是**明確開啟**的，且每個事件名稱只保留一份酬載，不是歷史佇列。語意上是「通知」而非
+「狀態」的事件不應開啟：遲到的連線會額外收到一條讀起來像新訊息的舊訊息。
+
 ```ts
 // 頁面端
 import { connect } from "bun-app-window/ipc";
@@ -317,6 +338,10 @@ const api = await connect<Api, Events>({ timeoutMs: 0 });
 
 Symbol 鍵同樣保留。給服務方法換個名稱（`winClose` 而不是 `close`），在頁面端映射回去 ——
 見下方的標題列一節。
+
+上述失效在執行期完全不可觀測，因此 `createIpcServer` 在**建立時就會拋錯**：服務表裡出現這些
+名稱即終止，錯誤訊息指出衝突的鍵並給出替代命名。只有當服務表由外部輸入產生、且已用其他手段
+驗證過時，才應傳 `{ rejectReservedNames: false }` 關閉本檢查。
 
 ### `bun-app-window/titlebar` — Windows 11 風格標題列
 
