@@ -120,7 +120,7 @@ export function packArgs(opts: PackOptions): PackPlan {
         // 版本号必须是字面量且紧随 --windows-version：bump-version.ts 原地改写它，
         // version.test.ts 静态读取它。排版不限（同行或另起一行都可）。
         "--windows-version",
-        "0.9.0.0",
+        "0.8.0.0",
     ];
 
     let warning: string | null = null;
