@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-25
+
+### Added
+
+- **`setFrameless()` switches the window form at runtime; `isFrameless()` reports the current one.** `FLAG_FRAMELESS` had been a creation-time flag since 0.3, so comparing a frameless window against a framed one meant restarting the process. That is a real cost for acceptance: the form check has three branches (`frameless` + restored, `frameless` + maximized, `framed`), one run only ever proves one of them — and a restart throws away the event ring, the zoom factor and the restored geometry, which are exactly the state that makes "is the geometry consistent across a switch" testable. Consumers can now also expose a title-bar toggle instead of shipping two builds.
+
+    **The creation path and the behaviour predicates are now two variables.** `g_frameless` decides *which window creation path runs* — our own `webview_shell` window (embedded `webview_create(1, hwnd)`, full `shell_wnd_proc`) versus the window the webview library creates (`toplevel_proc` subclassing only). That is fixed the moment `CreateWindowExW` / `webview_create` returns and cannot change. `g_frameless_live` decides *behaviour*: whether `WM_NCCALCSIZE` intercepts, whether resize borders and caption buttons take part in hit-testing, whether `fit_widget` reserves the title-bar strip, and what `push_state` reports as `frameless`. Five predicates moved to the live variable; the creation path stayed where it was.
+
+    **Switching does not touch the style bits.** `create_own_window` already passes `WS_OVERLAPPEDWINDOW` — the caption, border and sizing frame are all there. Frameless is achieved by `WM_NCCALCSIZE` returning 0, which erases the non-client area; it is not achieved by removing style bits. So going back to framed takes two steps: let `WM_NCCALCSIZE` fall through, then `SetWindowPos(SWP_FRAMECHANGED)` to force the system to recompute. Assembling `WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` by hand would give five chances to produce a window that cannot be dragged or has no system menu; `WM_NCCALCSIZE` just hands the system back the answer it would have computed anyway.
+
+    **Three refusals, each with a concrete reason.** (1) No window yet. (2) Created framed — that window belongs to the webview library and we only subclass it, so `WM_NCCALCSIZE` is not ours to answer; switching that direction needs `shell_close` + a fresh `shell_start_ex`, a different route not taken here. (3) Currently fullscreen — `toggle_fullscreen` caches the pre-fullscreen style bits and rect, and changing form mid-flight makes the restore produce a window with one form's style bits and the other form's geometry. **Note the scope: only a frameless-created window can switch**, and framed is the default, so this is narrower than the name suggests. It is stated in the interface docs and in ADR 0019 rather than left to be discovered.
+
+    The state push after a switch uses `PushMode::BypassAll`: `PushedState`'s change detection has no `frameless` bit, and the client area can come out the same size in both forms at some window sizes — the normal path would be absorbed as "nothing changed" and the page would never learn to mount or unmount its own title bar.
+
+    Verified on a real window at 200% DPI (`scripts/probe-frameless-toggle.ts`, 10 assertions, all passing): frameless `win=1800x1200 client=1800x1200`; framed `client=1774x1129` — 26×50 physical pixels handed back, consistent with the `border=13x13` on the same line once you add the title bar; switching back restores the client area pixel for pixel. The load-bearing assertion is **"client area matches the initial reading after switching back"**, not "`win == client`" — the latter stays green if both sides shrink together.
+
+### Note
+
+- **`dist/libshell.dll` changed** — `shell.cc` gained the two exports and the `g_frameless_live` predicates (`1,026,560 B`). The declared symbol count grew by two, tracked in `tests/native-surface.test.ts`. Three pre-existing static assertions in `tests/nav-guard.test.ts` were widened from `g_frameless` to `g_frameless(_live)?`; each carries a comment saying why the live variant satisfies the original intent. The caption-ordering assertion also moved its anchor off `WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET`, which appears in three other functions and was a substring trap waiting to misfire.
+
 ## [0.6.2] - 2026-10-23
 
 ### Fixed
@@ -645,7 +665,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.5.1...v0.6.0
