@@ -17,6 +17,8 @@ import {
     main,
     normalizeArg,
     parseGateArgs,
+    fmtVerdict,
+    parseFmtFileCount,
     parsePackSummary,
     parseTestCounts,
     parseTestFileCount,
@@ -71,6 +73,7 @@ describe("parseGateArgs", () => {
             clean: false,
             keepClone: false,
             skipTest: false,
+            skipFmt: false,
             skipPack: false,
             verbose: false,
             help: false,
@@ -83,6 +86,13 @@ describe("parseGateArgs", () => {
         expect(pascal).toEqual(kebab);
         expect(kebab.clean).toBe(true);
         expect(kebab.skipPack).toBe(true);
+    });
+
+    test("--skip-fmt 与 -SkipFmt 都识别", () => {
+        expect(parseGateArgs(["--skip-fmt"]).skipFmt).toBe(true);
+        expect(parseGateArgs(["-SkipFmt"]).skipFmt).toBe(true);
+        // 与 skipPack 互不牵连
+        expect(parseGateArgs(["--skip-fmt"]).skipPack).toBe(false);
     });
 
     test("--help 与 -Help 都识别", () => {
@@ -154,6 +164,56 @@ describe("parseTestFileCount", () => {
     test("取不到返回 0（摘要里就不显示这一段，不编造）", () => {
         expect(parseTestFileCount({ code: 0, out: "", err: "" })).toBe(0);
         expect(parseTestFileCount({ code: 1, out: "boom", err: "" })).toBe(0);
+    });
+});
+
+describe("parseFmtFileCount", () => {
+    test("成功措辞：All N files are formatted", () => {
+        const res: RunResult = { code: 0, out: "", err: "All 92 files are formatted." };
+        expect(parseFmtFileCount(res)).toBe(92);
+    });
+
+    test("失败措辞：N files need formatting", () => {
+        const res: RunResult = { code: 1, out: "", err: "1 file needs formatting. Run bun fmt to fix it." };
+        expect(parseFmtFileCount(res)).toBe(1);
+        expect(parseFmtFileCount({ code: 1, out: "", err: "100 files need formatting." })).toBe(100);
+    });
+
+    test("单数 is / file 也认", () => {
+        expect(parseFmtFileCount({ code: 0, out: "", err: "All 1 file is formatted." })).toBe(1);
+    });
+
+    test("**反向**：两种措辞都取不到时返回 0 —— 门禁据此判失败", () => {
+        // 这是「.prettierignore 写歪成 * 之后命令照样 exit 0」的那条防线：
+        // 取到 0 就不能当通过，否则判据等于没看任何文件。
+        expect(parseFmtFileCount({ code: 0, out: "", err: "" })).toBe(0);
+        expect(parseFmtFileCount({ code: 0, out: "no files matched", err: "" })).toBe(0);
+    });
+});
+
+describe("fmtVerdict", () => {
+    test("退出码 0 且确认了文件数 → 通过", () => {
+        const v = fmtVerdict({ code: 0, out: "", err: "All 92 files are formatted." });
+        expect(v.ok).toBe(true);
+        expect(v.detail).toBe("92 files");
+    });
+
+    test("退出码非 0 → 失败，并报出待格式化数量", () => {
+        const v = fmtVerdict({ code: 1, out: "", err: "3 files need formatting." });
+        expect(v.ok).toBe(false);
+        expect(v.detail).toContain("3");
+    });
+
+    test("**反向**：退出码 0 但取不到文件数 → 判失败（防满分答卷）", () => {
+        // 摘掉这条守卫时，测试全绿——本轮反向验证实测到的缺口，故抽成纯函数来守。
+        const v = fmtVerdict({ code: 0, out: "", err: "" });
+        expect(v.ok).toBe(false);
+        expect(v.detail).toContain("prettierignore");
+    });
+
+    test("**反向**：文件数为 0 也不能通过，即使措辞是 All 0 files", () => {
+        const v = fmtVerdict({ code: 0, out: "", err: "All 0 files are formatted." });
+        expect(v.ok).toBe(false);
     });
 });
 
@@ -237,24 +297,33 @@ describe("planStages", () => {
         clean: false,
         keepClone: false,
         skipTest: false,
+        skipFmt: false,
         skipPack: false,
         verbose: false,
     };
 
-    test("默认三个阶段，顺序固定", () => {
-        expect(planStages(base)).toEqual(["check", "test", "pack"]);
+    test("默认四个阶段，顺序固定：check → test → fmt → pack", () => {
+        expect(planStages(base)).toEqual(["check", "test", "fmt", "pack"]);
     });
 
-    test("--skip-test 连带跳过 pack（行为层的两段一起走）", () => {
-        expect(planStages({ ...base, skipTest: true })).toEqual(["check"]);
+    test("--skip-test 连带跳过 pack（行为层的两段一起走），但保留 fmt", () => {
+        expect(planStages({ ...base, skipTest: true })).toEqual(["check", "fmt"]);
+    });
+
+    test("--skip-fmt 只砍掉 fmt，其余不动", () => {
+        expect(planStages({ ...base, skipFmt: true })).toEqual(["check", "test", "pack"]);
     });
 
     test("--skip-pack 只砍掉最后一段", () => {
-        expect(planStages({ ...base, skipPack: true })).toEqual(["check", "test"]);
+        expect(planStages({ ...base, skipPack: true })).toEqual(["check", "test", "fmt"]);
+    });
+
+    test("--skip-test 与 --skip-fmt 同时给，只剩 check 与 pack 之间的那层不存在的段", () => {
+        expect(planStages({ ...base, skipTest: true, skipFmt: true })).toEqual(["check"]);
     });
 
     test("--clean 不影响阶段组成（它改的是运行位置）", () => {
-        expect(planStages({ ...base, clean: true })).toEqual(["check", "test", "pack"]);
+        expect(planStages({ ...base, clean: true })).toEqual(["check", "test", "fmt", "pack"]);
     });
 });
 
@@ -350,6 +419,7 @@ function fakeDeps(
             runner: {
                 check: make("check"),
                 test: make("test"),
+                fmt: make("fmt"),
                 pack: make("pack"),
             },
         },
@@ -360,45 +430,58 @@ const ALL_ON: GateOptions = {
     clean: false,
     keepClone: false,
     skipTest: false,
+    skipFmt: false,
     skipPack: false,
     verbose: false,
 };
 
 describe("runGate 的短路", () => {
-    test("全绿时三个阶段都跑到，返回 true", async () => {
+    test("全绿时四个阶段都跑到，返回 true", async () => {
         const { deps, calls } = fakeDeps({});
         expect(await runGate("/x", ALL_ON, deps)).toBe(true);
-        expect(calls).toEqual(["check", "test", "pack"]);
+        expect(calls).toEqual(["check", "test", "fmt", "pack"]);
     });
 
-    test("check 失败 → 后面两个阶段一个都不跑", async () => {
+    test("check 失败 → 后面三个阶段一个都不跑", async () => {
         const { deps, calls } = fakeDeps({ check: stageFail("check") });
         expect(await runGate("/x", ALL_ON, deps)).toBe(false);
         expect(calls).toEqual(["check"]);
     });
 
-    test("test 失败 → pack 不跑", async () => {
+    test("test 失败 → fmt 与 pack 都不跑", async () => {
         const { deps, calls } = fakeDeps({ test: stageFail("test") });
         expect(await runGate("/x", ALL_ON, deps)).toBe(false);
         expect(calls).toEqual(["check", "test"]);
     });
 
+    test("fmt 失败 → pack 不跑", async () => {
+        const { deps, calls } = fakeDeps({ fmt: stageFail("fmt") });
+        expect(await runGate("/x", ALL_ON, deps)).toBe(false);
+        expect(calls).toEqual(["check", "test", "fmt"]);
+    });
+
     test("pack 失败 → 返回 false", async () => {
         const { deps, calls } = fakeDeps({ pack: stageFail("pack") });
         expect(await runGate("/x", ALL_ON, deps)).toBe(false);
-        expect(calls).toEqual(["check", "test", "pack"]);
+        expect(calls).toEqual(["check", "test", "fmt", "pack"]);
     });
 
     test("--skip-pack 时 pack 根本不被调用", async () => {
         const { deps, calls } = fakeDeps({});
         expect(await runGate("/x", { ...ALL_ON, skipPack: true }, deps)).toBe(true);
-        expect(calls).toEqual(["check", "test"]);
+        expect(calls).toEqual(["check", "test", "fmt"]);
     });
 
-    test("--skip-test 时 test 与 pack 都不被调用", async () => {
+    test("--skip-fmt 时 fmt 根本不被调用", async () => {
+        const { deps, calls } = fakeDeps({});
+        expect(await runGate("/x", { ...ALL_ON, skipFmt: true }, deps)).toBe(true);
+        expect(calls).toEqual(["check", "test", "pack"]);
+    });
+
+    test("--skip-test 时 test 与 pack 都不被调用，fmt 仍然跑", async () => {
         const { deps, calls } = fakeDeps({});
         expect(await runGate("/x", { ...ALL_ON, skipTest: true }, deps)).toBe(true);
-        expect(calls).toEqual(["check"]);
+        expect(calls).toEqual(["check", "fmt"]);
     });
 
     test("不是包根目录时直接判失败，一个阶段都不跑", async () => {
@@ -410,6 +493,13 @@ describe("runGate 的短路", () => {
     test("被跳过的阶段必须在日志里留痕", async () => {
         const { deps, lines } = fakeDeps({});
         await runGate("/x", { ...ALL_ON, skipPack: true }, deps);
+        expect(lines.some((l) => l.includes("--skip-pack"))).toBe(true);
+    });
+
+    test("--skip-fmt 也要留痕，三个跳过各自独立一行", async () => {
+        const { deps, lines } = fakeDeps({});
+        await runGate("/x", { ...ALL_ON, skipFmt: true, skipPack: true }, deps);
+        expect(lines.some((l) => l.includes("--skip-fmt"))).toBe(true);
         expect(lines.some((l) => l.includes("--skip-pack"))).toBe(true);
     });
 });
@@ -522,5 +612,43 @@ describe("仓库里没有 .ps1（第二段退役的前提）", () => {
     test("全仓 .ps1 数量为 0", () => {
         const relative = findPs1(REPO).map((p) => p.slice(REPO.length + 1).replaceAll("\\", "/"));
         expect(relative).toEqual([]);
+    });
+});
+
+// ---- fmt 阶段必须带 --no-script ----------------------------------------------
+
+describe("fmt 阶段的命令行形状（元测试）", () => {
+    /**
+     * 这条守的是一个**只在将来才会暴露**的失效。
+     *
+     * `bun fmt --check` 在 `package.json` 里存在 `fmt` script 时，会把整条命令
+     * 转交给那个 script 并原样返回它的退出码——实测：script 只 `console.log` 一行，
+     * `bun fmt --check` 就 exit 0 并输出那行字，一个文件都没检查。
+     * 也就是说判据会静默退化成「那个 script 成功了吗」。
+     *
+     * 本仓当前没有 `fmt` script，所以现在去掉 `--no-script` 也照样是绿的。
+     * 这正是必须用静态断言钉住它的理由：判据的失效点不在今天，
+     * 在「某天有人加了一个 fmt script」的那一刻，而那时不会有任何东西变红。
+     */
+    test("runFmt 的 argv 含 --check 与 --no-script", async () => {
+        const src = await Bun.file(join(REPO, "scripts", "gate.ts")).text();
+
+        // 定位 runFmt 函数体：从 `async function runFmt` 到下一个顶层 async function
+        const start = src.indexOf("async function runFmt");
+        expect(start).toBeGreaterThan(-1);
+        const rest = src.slice(start);
+        const end = rest.indexOf("async function runPack");
+        expect(end).toBeGreaterThan(-1);
+        const body = rest.slice(0, end);
+
+        expect(body).toContain('"fmt"');
+        expect(body).toContain('"--check"');
+        expect(body).toContain('"--no-script"');
+    });
+
+    test("**反向**：该判据能看见真实差异（拿一段去掉 --no-script 的样本自检）", () => {
+        // 如果上面的断言对任何字符串都成立，它就等于没写。
+        const stripped = 'await spawn([BUN, "fmt", "--check"], cwd);';
+        expect(stripped.includes('"--no-script"')).toBe(false);
     });
 });

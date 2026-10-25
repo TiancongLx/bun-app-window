@@ -45,6 +45,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **The gate gains a third stage: `bun fmt --check --no-script`.** Four stages now — `check` →
+  `test` → `fmt` → `pack`. The formatting check costs about 50 ms on 92 files, and it sits before
+  the consumer acceptance stage because a formatting problem is local code quality, not a
+  distribution question. `--skip-fmt` exists for the same reason `--skip-pack` does; `--skip-test`
+  does **not** skip it, since formatting and tests have no dependency between them.
+
+    Two criteria this stage depends on, each measured rather than assumed:
+
+    **`--no-script` is mandatory.** When `package.json` has a `fmt` script, `bun fmt --check` hands
+    the whole command to that script and returns its exit code verbatim. Measured with a script that
+    only prints one line: `bun fmt --check` exited 0 and printed that line, having inspected no files
+    at all. The criterion would silently degrade to "did that script succeed". This repository has no
+    `fmt` script today, so the flag changes nothing right now — which is exactly why it needs a
+    static assertion: the failure point is the day someone adds the script, and nothing would turn
+    red then.
+
+    **The file count has to be checked.** If `.prettierignore` is ever written as `*`, the command
+    exits 0 and reports everything compliant while having looked at nothing. `fmtVerdict()` therefore
+    treats "exit 0 but no file count parsed" as a failure, the same way `bun check` treats "checked 0
+    files".
+
+    **The judgement is a pure function because it had no guard.** Reverse verification ran before
+    this was written: removing "non-zero exit means failure" and removing the "count below 1" guard
+    each left the entire suite green — `runFmt` can only be reached by spawning a real subprocess,
+    and the short-circuit tests use a fake runner. The logic was lifted into `fmtVerdict()` so both
+    defences have cases; removing either now turns the corresponding assertion red, verified in both
+    directions.
+
 - **The declared toolchain baseline is Bun 1.4.4.** `engines.bun` is `>=1.4.4` and `@types/bun` is
   `^1.4.4`; the three READMEs, the requirement table and the badge follow. The declaration is backed
   by the gate run recorded at the end of this entry, not inherited from an earlier release.

@@ -80,7 +80,7 @@ import { isEntrypoint } from "./lib/entrypoint";
 
 export type RunResult = { code: number; out: string; err: string };
 
-export type Stage = "check" | "test" | "pack";
+export type Stage = "check" | "test" | "fmt" | "pack";
 
 export type StageResult = {
     stage: Stage;
@@ -100,6 +100,7 @@ export type GateOptions = {
     clean: boolean;
     keepClone: boolean;
     skipTest: boolean;
+    skipFmt: boolean;
     skipPack: boolean;
     /** 回放每个阶段的完整输出；默认只在失败时回放 */
     verbose: boolean;
@@ -123,6 +124,7 @@ export type GateDeps = {
 export const LABELS: Record<Stage, string> = {
     check: "bun check",
     test: "bun test",
+    fmt: "bun fmt",
     pack: "pack verification",
 };
 
@@ -145,6 +147,7 @@ export function parseGateArgs(argv: readonly string[]): GateOptions & { help: bo
             clean: { type: "boolean", default: false },
             "keep-clone": { type: "boolean", default: false },
             "skip-test": { type: "boolean", default: false },
+            "skip-fmt": { type: "boolean", default: false },
             "skip-pack": { type: "boolean", default: false },
             verbose: { type: "boolean", default: false },
             help: { type: "boolean", default: false },
@@ -156,6 +159,7 @@ export function parseGateArgs(argv: readonly string[]): GateOptions & { help: bo
         clean: parsed.values.clean === true,
         keepClone: parsed.values["keep-clone"] === true,
         skipTest: parsed.values["skip-test"] === true,
+        skipFmt: parsed.values["skip-fmt"] === true,
         skipPack: parsed.values["skip-pack"] === true,
         verbose: parsed.values.verbose === true,
         help: parsed.values.help === true,
@@ -203,6 +207,50 @@ export function parsePackSummary(res: RunResult): string {
 export function parseTestFileCount(res: RunResult): number {
     const m = /Ran \d+ tests? across (\d+) files?/i.exec(`${res.out}\n${res.err}`);
     return m?.[1] ? Number(m[1]) : 0;
+}
+
+/**
+ * 从 `bun fmt --check` 的输出里取「参与格式化的文件数」。
+ *
+ * 成功时 stderr 是 `All 92 files are formatted.`，失败时是
+ * `1 file needs formatting. Run bun fmt to fix it.` —— 两种措辞都要认。
+ *
+ * 取这个数不是为了好看，是为了挡住满分答卷：`.prettierignore` 写歪成 `*`
+ * 之后，`bun fmt --check` 会正常退出 0 并报告「全部合规」，而它一个文件都没看。
+ * 这与 `bun check` 那条「检查了 0 个文件」是同一类失败：判据自己瞎了，
+ * 却报绿。取到 0 一律判失败。
+ */
+export function parseFmtFileCount(res: RunResult): number {
+    const combined = `${res.out}\n${res.err}`;
+    const ok = /All (\d+) files? (?:is|are) formatted/i.exec(combined);
+    if (ok?.[1]) {
+        return Number(ok[1]);
+    }
+    const bad = /(\d+) files? needs? formatting/i.exec(combined);
+    return bad?.[1] ? Number(bad[1]) : 0;
+}
+
+/**
+ * `fmt` 阶段的判定，抽成纯函数以便单测。
+ *
+ * 抽出来的原因是一次反向验证：把 `runFmt` 里「退出码非 0 即失败」与
+ * 「取到 0 个文件即失败」这两条分别摘掉，测试全绿——因为 `runFmt` 只能
+ * 通过真跑子进程来触达，而门禁的短路用例走的是假 runner。
+ * 也就是说**判定逻辑当时没有任何判据守着**。这里改成纯函数后，
+ * 两条防线各自有用例，摘掉哪条都会红。
+ */
+export function fmtVerdict(res: RunResult): { ok: boolean; detail: string } {
+    const files = parseFmtFileCount(res);
+    if (res.code !== 0) {
+        return { ok: false, detail: `${files} file(s) need formatting` };
+    }
+    if (files < 1) {
+        return {
+            ok: false,
+            detail: "退出码为 0 但没能确认检查了多少文件——.prettierignore 可能把一切都排除了",
+        };
+    }
+    return { ok: true, detail: `${files} files` };
 }
 
 /** Bun 的测试结果行带 SGR 色码，摘取前必须剥掉，否则 startsWith 匹配不到 */
@@ -271,14 +319,21 @@ export function replayOutput(raw: RawOutput, io: GateIO): void {
  *
  * `--skip-test` 连带跳过消费方验收——它与 `bun test` 同属「行为层」，
  * 单独留下的价值很低，且原版就是这个语义，不在这里改。
+ *
+ * `fmt` 排在 `test` 之后、`pack` 之前：它约 60 ms，比 pack 便宜得多，
+ * 而格式问题属于本地代码质量，应当在打包前就失败。`--skip-test` 不连带
+ * 跳过它——格式与测试没有从属关系，想跳过请显式写 `--skip-fmt`。
  */
 export function planStages(opts: GateOptions): Stage[] {
     const stages: Stage[] = ["check"];
     if (!opts.skipTest) {
         stages.push("test");
-        if (!opts.skipPack) {
-            stages.push("pack");
-        }
+    }
+    if (!opts.skipFmt) {
+        stages.push("fmt");
+    }
+    if (!opts.skipTest && !opts.skipPack) {
+        stages.push("pack");
     }
     return stages;
 }
@@ -345,7 +400,11 @@ export async function runGate(workDir: string, opts: GateOptions, deps: GateDeps
     // 被跳过的阶段要留痕，否则「门禁通过」这句话的覆盖面是模糊的
     if (opts.skipTest) {
         deps.io.log("bun test skipped (--skip-test)");
-    } else if (opts.skipPack) {
+    }
+    if (opts.skipFmt) {
+        deps.io.log("bun fmt skipped (--skip-fmt)");
+    }
+    if (!opts.skipTest && opts.skipPack) {
         deps.io.log("pack verification skipped (--skip-pack)");
     }
 
@@ -437,6 +496,29 @@ async function runTest(cwd: string): Promise<StageResult> {
     };
 }
 
+/**
+ * 格式化检查。
+ *
+ * **必须带 `--no-script`。** `bun fmt --check` 在 `package.json` 有 `fmt`
+ * script 时会把命令整个转交给那个 script，然后原样返回它的退出码——
+ * 实测：script 里只打一行日志，`bun fmt --check` 就 exit 0 并输出那行日志。
+ * 也就是说判据会静默变成「那个 script 成功了吗」，与格式无关。
+ * 本仓当前没有 `fmt` script，所以不加也「碰巧」能跑；但这是一条
+ * 一旦加了脚本就失效的形状，不能靠运气。
+ *
+ * 同理必须取文件数：`.prettierignore` 写歪成 `*` 之后，命令会正常
+ * exit 0 并报告全部合规，而它一个文件都没看。
+ */
+async function runFmt(cwd: string): Promise<StageResult> {
+    const started = performance.now();
+    const res = await spawn([BUN, "fmt", "--check", "--no-script"], cwd);
+    const ms = performance.now() - started;
+    const base = { stage: "fmt" as const, rc: res.code, ms, out: res.out, err: res.err };
+
+    const verdict = fmtVerdict(res);
+    return { ...base, ok: verdict.ok, detail: verdict.detail };
+}
+
 async function runPack(cwd: string): Promise<StageResult> {
     const started = performance.now();
     // 直接 `bun <path>` 而不是 `bun run <path>`：`run` 子命令在某些 cwd 大小写
@@ -459,6 +541,7 @@ async function runPack(cwd: string): Promise<StageResult> {
 const REAL_RUNNER: StageRunner = {
     check: runCheck,
     test: runTest,
+    fmt: runFmt,
     pack: runPack,
 };
 
@@ -598,7 +681,8 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
                    干净副本没有它们，tests/agents-doc.test.ts 的整组断言会 skip，
                    连带 docs/pitfalls.md 的路径引用检查也不跑。每次运行都会提示。
   --keep-clone   与 --clean 同用，保留副本供排查
-  --skip-test    只跑类型检查，跳过行为测试与消费方验收
+  --skip-test    只跑类型检查与格式化，跳过行为测试与消费方验收
+  --skip-fmt     跳过格式化检查（bun fmt --check --no-script）
   --skip-pack    跳过消费方验收（只在改门禁自身时用）
   --verbose      回放每个阶段的完整输出（默认只报结论，失败时才回放）
   -h, --help     显示本帮助`);
@@ -609,6 +693,7 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
         clean: parsed.clean,
         keepClone: parsed.keepClone,
         skipTest: parsed.skipTest,
+        skipFmt: parsed.skipFmt,
         skipPack: parsed.skipPack,
         verbose: parsed.verbose,
     };
