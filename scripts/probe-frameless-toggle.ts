@@ -67,7 +67,6 @@ function parseMetrics(raw: string): Metrics {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const server = serveOnSafePort({
-    port: 0,
     hostname: "127.0.0.1",
     fetch: () => new Response(HTML, { headers: { "content-type": "text/html;charset=utf-8" } }),
 });
