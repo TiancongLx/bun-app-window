@@ -1,7 +1,7 @@
 # bun-app-window
 
 [![npm version](https://img.shields.io/npm/v/bun-app-window?color=cb3837&logo=npm)](https://www.npmjs.com/package/bun-app-window)
-[![Bun](https://img.shields.io/badge/Bun-%3E%3D1.4.3-f472b6?logo=bun&logoColor=white)](https://bun.sh)
+[![Bun](https://img.shields.io/badge/Bun-%3E%3D1.4.4-f472b6?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-%3E%3D7.0.2-3178C6?logo=typescript&logoColor=white)](#系统要求与设计边界)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6?logo=windows&logoColor=white)](#系统要求与设计边界)
 [![WebView2](https://img.shields.io/badge/WebView2-System%20Runtime-008080)](#系统要求与设计边界)
@@ -29,7 +29,7 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 | 维度 | 限制与说明 |
 | --- | --- |
 | 仅支持 Windows x64 | `package.json` 中的 `os` 与 `cpu` 字段已做硬性限制，拒绝在其他平台安装（包名保持平台中立仅为预留命名空间）。预编译动态库 `libshell.dll` 随包分发，无需在安装期编译 |
-| 仅支持 Bun 运行时 | 包内直接发布 TypeScript 源码，要求 Bun ≥ 1.4.3。Node.js 环境虽可完成包安装，但无法直接运行 |
+| 仅支持 Bun 运行时 | 包内直接发布 TypeScript 源码，要求 Bun ≥ 1.4.4。Node.js 环境虽可完成包安装，但无法直接运行 |
 | 类型检查要求 TypeScript ≥ 7.0.2 | API 在 TypeScript 7.0.2 下设计与检查，`devDependencies` 中精确锁版；不为更旧的编译器做兼容。高于 7.0.2 的结果未作断言——`bun-types` 只在那一侧才打开 `typesVersions: ">= 7.1"` 门控，`with { type: "text" }` 的解析结果会随之改变 |
 | 类型检查需自备 `@types/bun` | 包内是 `.ts` 源文件，消费方的 `bun check` 会一并编译它们。需执行 `bun add -d @types/bun`，否则类型检查会在 `node_modules` 内报 `TS2868: Cannot find name 'Bun'` |
 | 基于 `bun:ffi` 构建 | `bun:ffi` 在 Bun 中仍标记为实验性特性（Experimental）。官方建议生产环境优先采用 Node-API，本项目选择 `bun:ffi` 是为了换取零第三方依赖的轻量架构 |
@@ -738,7 +738,7 @@ bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 
 ## 开发与验证
 
-本项目工具链基于 Bun 1.4.3 与 TypeScript 7.0.2 构建，`tsconfig.json` 开启全量严格模式检查。
+本项目工具链基于 Bun 1.4.4 与 TypeScript 7.0.2 构建，`tsconfig.json` 开启全量严格模式检查。
 
 **本项目不使用远端 CI。** 该账户的 GitHub Actions 因 billing lock 无法分配 runner；而项目本身是单平台、单人开发、零外部服务依赖的依赖包，远端 CI 的边际价值低于其维护成本，因此质量门禁改为本地执行。推荐入口：
 

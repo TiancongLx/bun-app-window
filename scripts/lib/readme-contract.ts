@@ -180,7 +180,7 @@ export function forbiddenReferences(fileName: string, text: string): ForbiddenRe
  * 写进正文等于给自己埋一个必然过期的数字。需要版本时让读者看 `package.json`
  * 或 `libInfo.version`。
  *
- * 第三方依赖的版本（Bun `1.4.3`、WebView2 `1.0.4258.31`）不在禁止之列——它们是
+ * 第三方依赖的版本（Bun `1.4.4`、WebView2 `1.0.4258.31`）不在禁止之列——它们是
  * 契约的一部分，且升级时是显式动作。
  */
 export function selfVersionLiterals(fileName: string, text: string, version: string): Array<{ file: string; line: number; text: string }> {

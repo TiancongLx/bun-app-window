@@ -45,6 +45,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Toolchain baseline moved from Bun 1.4.3 to 1.4.4.** `engines.bun` is now `>=1.4.4` and
+  `@types/bun` is `^1.4.4`; the three READMEs, the requirement table and the badge follow. The
+  previous `>=1.4.3` claim was not backed by measurement — this package had never been exercised on
+  1.4.3 since the 1.4.4 release, so the declaration was wider than the evidence.
+
+    Two behaviours were re-measured on 1.4.4 rather than assumed unchanged:
+
+    | Probe | Result on 1.4.4 |
+    | --- | --- |
+    | `FFIType.buffer` as `args` / `returns` | throws `invalid ABI type`, same as 1.4.3 |
+    | `"buffer"` string literal as `args` | accepted |
+
+    So the `bun:ffi` constraint in `AGENTS.md` §5.1 stands unchanged — only its version number
+    moved.
+
+    `bun-types@1.4.4` still gates its import-attribute declarations behind
+    `typesVersions: { ">=7.1": ... }`, and its root `index.d.ts` is byte-identical to 1.4.3's
+    (1,306 B, no `import-attributes` reference). The TypeScript 7.0.2 limitation documented in the
+    requirements table therefore still holds; nothing about it changed with this bump.
+
+    Full regression on 1.4.4: `bun check` 80 files, `bun test` 683 pass / 0 fail across 36 files,
+    `VERIFY-PACK PASSED` (7 checks), consumer probe 70 checks with `source=package`.
+
 - **`alias` is implemented by this package, not passed through.** The plan was to forward it like
   the other three fields; measurement said otherwise. Bun 1.4.4's `BuildConfig` has no `alias`
   property, and passing one is not an error — it is silently ignored. Four forms were tried
