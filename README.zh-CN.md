@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### 包内包含什么
 
-发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 22 个文件（0.48 MB，解包后 1.37 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
+发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 22 个文件（0.48 MB，解包后 1.39 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
 
 ## 快速开始
 
@@ -79,6 +79,8 @@ shell.setTitle("Doing work…");
 
 ## 核心 API
 
+`ackOf(shell, rc)` 把裸状态码转成 `{ rc, err }`，并且**只在失败时才读 `lastError()`**——原生错误槽不会被成功调用清空，成功之后再读会拿到上一条残留，看起来像新的失败。
+
 ### 实例方法与属性
 
 | 成员 | 说明 |
@@ -97,6 +99,7 @@ shell.setTitle("Doing work…");
 | `post(json)` | 宿主向页面单向投递 JSON 消息，异步发送且不等待返回结果 |
 | `setZoom(f)` / `getZoom()` | 设置或获取页面缩放比例（有效范围 `0.25`–`3.0`，越界值自动钳制） |
 | `reload()` / `openDevTools()` / `toggleFullscreen()` | 页面重载、打开开发者工具、切换全屏（分别对应 `Ctrl+R` / `F12` / `F11`） |
+| `setFrameless(frameless)` / `isFrameless()` | 运行时切换窗口形态并读取当前形态。只有**创建时**给了 `FLAG_FRAMELESS` 的窗口能切；带边框起点的窗口返回 `rc=-1`，理由在 `lastError()`。详见下文「窗口标志位」 |
 | `setBrowserUi(mask)` | 禁用指定的浏览器默认行为，传入 `BROWSER_UI_*` 标志位的按位或组合 |
 | `showContextMenu(x, y, items)` | 在指定屏幕坐标弹出 Win32 原生上下文菜单（详见下文用法） |
 | `pickFolder(title?)` | 调用原生文件夹选择对话框（同步阻塞当前调用线程；**经 IPC 暴露时务必配 `timeoutMs: 0`**，见下文） |
@@ -109,7 +112,7 @@ shell.setTitle("Doing work…");
 
 | 标志位 | 作用说明 |
 | --- | --- |
-| `FLAG_FRAMELESS` | 无边框窗口模式，移除系统默认标题栏，交由前端页面自行绘制 |
+| `FLAG_FRAMELESS` | 无边框窗口模式，移除系统默认标题栏，交由前端页面自行绘制。以这种方式创建的窗口可在运行时用 `setFrameless(false)` 切回带边框 |
 | `FLAG_RESIZABLE` | 允许用户调整窗口大小 |
 | `FLAG_CENTER` | 启动时在当前显示器工作区居中显示（有边框与无边框模式均生效） |
 | `FLAG_TOPMOST` | 窗口始终置顶 |
@@ -117,6 +120,8 @@ shell.setTitle("Doing work…");
 | `FLAG_ACCEPT_DROP` | 允许窗口接收外部文件或文件夹拖放事件 |
 | `FLAG_START_MAXIMIZED` | 窗口首次显示即处于最大化状态，避免从普通尺寸跳变到最大化的中间闪烁帧 |
 | `FLAG_ALLOW_EXTERNAL_NAV` | 放弃外部导航拦截——用于本身就是浏览器的应用 |
+| `FLAG_TITLEBAR_RESERVE` | 无边框模式下把网页内容整体下移一个标题栏高度，让顶部那条归原生窗口。**已被 `FLAG_NATIVE_CAPTIONS` 取代**：caption 命中区固定在客户区 `y ∈ [0, 32)`，这条路会把页面自绘的标题栏放到与点击真正落点相差 32 px 的位置 |
+| `FLAG_NATIVE_CAPTIONS` | 无边框模式下，由壳层自己的 layered 子窗口绘制三个 caption 按钮并在那里应答 `HTMAXBUTTON`。这是 Snap Layouts 唯一能触发的途径：WebView2 的渲染子窗口在另一个进程里，恒回 `HTCLIENT`。必须与 `mountTitleBar({ captions: "native" })` 配套，页面才会留出 `46 × 3` 而不是自己画一套 |
 
 ### 外部导航默认被拦截
 
@@ -188,7 +193,7 @@ const { code } = await bundlePage({ entry: "src/ui/page.ts" });
 const app = await createApp({ html, page: code, service });
 ```
 
-`App` 上另有两个成员，各替我省一次调用和一条子路径导入：
+`App` 上另有两个成员，各能省掉一次调用和一条子路径导入：
 
 - `app.debug` —— 与 `debugOf(app.shell)` 返回同一个对象。同样不在稳定性承诺范围内。
 - `app.attachPlacement(file)` —— 把位置持久化接到骨架的**唯一**事件泵上。自己调
@@ -353,7 +358,9 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 实现细节：
 
 - 原生拖拽体验：拖拽操作通过调用 `shell.drag()` 交由底层发送 `WM_NCLBUTTONDOWN`（`HTCAPTION`）消息处理，完整保留 Windows 11 贴边分屏（Snap Layouts）与双击最大化等系统级行为。
-- 样式定制与图标方案：颜色与尺寸均通过 CSS 变量（`--ws-tb-*`）控制，覆盖变量即可实现换肤。按钮图标默认采用兼容性更好的几何矢量符号；若配置 `icons: "fluent"` 则切换为 `Segoe Fluent Icons` 字体渲染（注意：若目标系统缺失该字体，按钮将回退显示为缺字方框）。
+- 样式定制：颜色与尺寸均通过 CSS 变量（`--ws-tb-*`）控制，覆盖变量即可实现换肤。若需要自己注入样式表而不是让 `mountTitleBar` 注入一次，可单独调用导出的 `titleBarCss()`。
+- 字形选择：默认走 `detectIconSet()`，它向 `document.fonts` 询问 `Segoe Fluent Icons`（Win 11）或 `Segoe MDL2 Assets`（Win 10），有一个在就用 `fluent`——两套字体的码位相同，一张表覆盖两代系统。只有两个字体都探测不到时才退回 `unicode` 几何符号（`─ □ ❐ ✕`）。要覆盖探测结果就显式传 `icons: "unicode" | "fluent"`。
+- 交给壳层画按钮：传 `captions: "native"`，组件**一个按钮都不渲染**，只在右侧留出 `46 × 3` 给壳层的 layered 子窗口。必须与 `FLAG_NATIVE_CAPTIONS` 配套——只开一半的结果是两套按钮叠在一起，或者一条点不到的空区。注意这三个按钮上的鼠标点击走**非客户区**消息，所以 `bridge.minimize` / `toggleMaximize` / `close` 在鼠标这条路上不会被调用，动作由壳层自己执行；键盘 Tab + Enter 仍然经过 bridge。
 
 ### `bun-app-window/state` — 窗口位置与尺寸持久化
 
@@ -445,8 +452,7 @@ d.hittest(x, y);
 
 ### `bun-app-window/types` — 常量面，浏览器安全
 
-一个零依赖模块，承载全部常量：`FLAG_*`、`BROWSER_UI_*`、`RESIZE_EDGE`、`RESIZE_INDEX`、
-`ZOOM_LADDER`、`ZOOM_MIN`、`ZOOM_MAX`、`STATE_*` 及相关类型。
+一个零依赖模块，承载全部常量：`FLAG_*`（十个全在，含 `FLAG_TITLEBAR_RESERVE` 与 `FLAG_NATIVE_CAPTIONS`）、`BROWSER_UI_*`、`RESIZE_EDGE`、`RESIZE_INDEX`、`resizeIndex`、`ZOOM_LADDER`、`ZOOM_MIN`、`ZOOM_MAX`、`STATE_MAXIMIZED` / `STATE_MINIMIZED` / `STATE_FOCUSED`，以及 caption 几何三件套 `CAPTION_BAR_HEIGHT`（32）/ `CAPTION_BUTTON_WIDTH`（46）/ `CAPTION_BUTTONS`——最后这个的顺序是「从右往左 close、maximize、minimize」，而这个顺序是有承重的：页面画的按钮顺序若与 `caption_button_at()` 的报告顺序不一致，点「关闭」会变成最大化。
 
 **页面侧请用这个子路径。** 主入口经 `./native` 引入 `bun:ffi`，浏览器打包器解析不了它——
 所以在页面代码里写 `import { BROWSER_UI_ALL } from "bun-app-window"` 会在打包期失败。

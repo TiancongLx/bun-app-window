@@ -24,7 +24,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Note
 
+- **The three READMEs were brought back in line with the code.** They had drifted in six places, and the drift was the kind that costs a reader time rather than merely looking untidy:
+
+    | Drift | Before | Now |
+    | --- | --- | --- |
+    | `FLAG_TITLEBAR_RESERVE` (256) and `FLAG_NATIVE_CAPTIONS` (512) | **absent from the flag table entirely** | documented, including why the first is superseded by the second |
+    | `ackOf()` | never mentioned, despite being a main-entry export | one paragraph in Core API, with the reason `lastError()` is only read on failure |
+    | `titleBarCss()` / `detectIconSet()` / `captions: "native"` | never mentioned | documented under the title bar section |
+    | Default glyph set | "buttons default to geometric glyphs; setting `icons: \"fluent\"` switches to Segoe Fluent Icons" — **backwards since 0.6.1** | `detectIconSet()` runs by default and picks `fluent` whenever either icon font is present; `unicode` is the fallback |
+    | `types` subpath constant list | `STATE_*` only | names `STATE_MAXIMIZED` / `STATE_MINIMIZED` / `STATE_FOCUSED` and the `CAPTION_*` geometry trio, plus why the caption order is load-bearing |
+    | Tarball size | 1.37 MB unpacked | 1.39 MB — measured, not estimated |
+
+    The glyph row was the worst of the six: a reader following it would set `icons: "fluent"` to *get* the Win 11 glyphs, when that had been the default since 0.6.1 and the documented behaviour was the opposite of what the code did.
+
+- **Two first-person phrasings removed** from the Chinese READMEs (`各替我省一次调用` → `各能省掉一次调用`). Everything else in those files was already impersonal; the audit that found these two covered every occurrence of 我 / 咱 / 俺 and `I` / `my` / `we` across all three files.
+
 - **`dist/libshell.dll` changed** — `shell.cc` gained the two exports and the `g_frameless_live` predicates (`1,026,560 B`). The declared symbol count grew by two, tracked in `tests/native-surface.test.ts`. Three pre-existing static assertions in `tests/nav-guard.test.ts` were widened from `g_frameless` to `g_frameless(_live)?`; each carries a comment saying why the live variant satisfies the original intent. The caption-ordering assertion also moved its anchor off `WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET`, which appears in three other functions and was a substring trap waiting to misfire.
+
+    Note the self-reference: editing the READMEs changes the tarball they describe. `1.39 MB` is the figure after these edits, measured by packing and unpacking; the digits were changed last, and since `1.38` and `1.39` are the same byte length the measurement stays put.
 
 ## [0.6.2] - 2026-10-23
 

@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### 套件內容包含什麼
 
-發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 22 個檔案（0.48 MB，解包後 1.37 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
+發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 22 個檔案（0.48 MB，解包後 1.39 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
 
 ## 快速開始
 
@@ -79,6 +79,8 @@ shell.setTitle("Doing work…");
 
 ## 核心 API
 
+`ackOf(shell, rc)` 把裸狀態碼轉成 `{ rc, err }`，並且**只在失敗時才讀 `lastError()`**——原生錯誤槽不會被成功呼叫清空，成功之後再讀會拿到上一條殘留，看起來像新的失敗。
+
 ### 實例方法與屬性
 
 | 成員 | 說明 |
@@ -97,6 +99,7 @@ shell.setTitle("Doing work…");
 | `post(json)` | 宿主向頁面單向投遞 JSON 訊息，非同步發送且不等待回傳結果 |
 | `setZoom(f)` / `getZoom()` | 設定或取得頁面縮放比例（有效範圍 `0.25`–`3.0`，越界值自動鉗制） |
 | `reload()` / `openDevTools()` / `toggleFullscreen()` | 頁面重新載入、開啟開發人員工具、切換全螢幕（分別對應 `Ctrl+R` / `F12` / `F11`） |
+| `setFrameless(frameless)` / `isFrameless()` | 執行時期切換視窗形態並讀取目前形態。只有**建立時**給了 `FLAG_FRAMELESS` 的視窗能切；帶邊框起點的視窗回傳 `rc=-1`，理由在 `lastError()`。詳見下文「視窗旗標」 |
 | `setBrowserUi(mask)` | 停用指定的瀏覽器預設行為，傳入 `BROWSER_UI_*` 旗標的按位元 OR 組合 |
 | `showContextMenu(x, y, items)` | 於指定螢幕座標彈出 Win32 原生右鍵快顯功能表（詳見下文用法） |
 | `pickFolder(title?)` | 呼叫原生資料夾選擇對話方塊（同步阻塞目前呼叫執行緒；**經 IPC 暴露時務必搭配 `timeoutMs: 0`**，見下文） |
@@ -109,7 +112,7 @@ shell.setTitle("Doing work…");
 
 | 旗標 | 作用說明 |
 | --- | --- |
-| `FLAG_FRAMELESS` | 無邊框視窗模式，移除系統預設標題列，交由前端頁面自行繪製 |
+| `FLAG_FRAMELESS` | 無邊框視窗模式，移除系統預設標題列，交由前端頁面自行繪製。以這種方式建立的視窗可在執行時期用 `setFrameless(false)` 切回帶邊框 |
 | `FLAG_RESIZABLE` | 允許使用者調整視窗大小 |
 | `FLAG_CENTER` | 啟動時於目前顯示器工作區置中顯示（有邊框與無邊框模式均生效） |
 | `FLAG_TOPMOST` | 視窗保持最上層顯示 |
@@ -117,6 +120,8 @@ shell.setTitle("Doing work…");
 | `FLAG_ACCEPT_DROP` | 允許視窗接收外部檔案或資料夾拖放事件 |
 | `FLAG_START_MAXIMIZED` | 視窗首次顯示即處於最大化狀態，避免從一般尺寸跳變至最大化的中間閃爍畫格 |
 | `FLAG_ALLOW_EXTERNAL_NAV` | 放棄外部導覽攔截——用於本身就是瀏覽器的應用程式 |
+| `FLAG_TITLEBAR_RESERVE` | 無邊框模式下把網頁內容整體下移一個標題列高度，讓頂端那一條歸原生視窗。**已被 `FLAG_NATIVE_CAPTIONS` 取代**：caption 命中區固定在客戶區 `y ∈ [0, 32)`，這條路會把頁面自繪的標題列放到與點擊真正落點相差 32 px 的位置 |
+| `FLAG_NATIVE_CAPTIONS` | 無邊框模式下，由殼層自己的 layered 子視窗繪製三個 caption 按鈕並在那裡應答 `HTMAXBUTTON`。這是 Snap Layouts 唯一能觸發的途徑：WebView2 的渲染子視窗在另一個處理序裡，恆回 `HTCLIENT`。必須與 `mountTitleBar({ captions: "native" })` 搭配，頁面才會留出 `46 × 3` 而不是自己畫一套 |
 
 ### 外部導覽預設被攔截
 
@@ -187,7 +192,7 @@ const { code } = await bundlePage({ entry: "src/ui/page.ts" });
 const app = await createApp({ html, page: code, service });
 ```
 
-`App` 上另有兩個成員，各替我省一次呼叫和一條子路徑匯入：
+`App` 上另有兩個成員，各能省掉一次呼叫和一條子路徑匯入：
 
 - `app.debug` —— 與 `debugOf(app.shell)` 回傳同一個物件。同樣不在穩定性承諾範圍內。
 - `app.attachPlacement(file)` —— 把位置持久化接到骨架的**唯一**事件泵上。自己呼叫
@@ -352,7 +357,9 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 實作細節：
 
 - 原生拖曳體驗：拖曳操作透過呼叫 `shell.drag()` 交由底層發送 `WM_NCLBUTTONDOWN`（`HTCAPTION`）訊息處理，完整保留 Windows 11 貼齊版面配置（Snap Layouts）與連按兩下最大化等系統級行為。
-- 樣式自訂與圖示方案：色彩與尺寸均透過 CSS 變數（`--ws-tb-*`）控制，覆寫變數即可實作佈景主題切換。按鈕圖示預設採用相容性較佳的幾何向量符號；若設定 `icons: "fluent"` 則切換為 `Segoe Fluent Icons` 字型渲染（注意：若目標系統缺少該字型，按鈕將退回顯示為缺字方框）。
+- 樣式自訂：色彩與尺寸均透過 CSS 變數（`--ws-tb-*`）控制，覆寫變數即可實作佈景主題切換。若需自行注入樣式表而不是讓 `mountTitleBar` 注入一次，可單獨呼叫匯出的 `titleBarCss()`。
+- 字形選擇：預設走 `detectIconSet()`，它向 `document.fonts` 詢問 `Segoe Fluent Icons`（Win 11）或 `Segoe MDL2 Assets`（Win 10），有一個在就用 `fluent`——兩套字型的碼位相同，一張表涵蓋兩代系統。只有兩個字型都探測不到時才退回 `unicode` 幾何符號（`─ □ ❐ ✕`）。要覆寫探測結果就明確傳 `icons: "unicode" | "fluent"`。
+- 交給殼層繪製按鈕：傳 `captions: "native"`，元件**一個按鈕都不渲染**，只在右側留出 `46 × 3` 給殼層的 layered 子視窗。必須與 `FLAG_NATIVE_CAPTIONS` 搭配——只開一半的結果是兩套按鈕疊在一起，或者一條點不到的空白區。注意這三個按鈕上的滑鼠點擊走**非客戶區**訊息，所以 `bridge.minimize` / `toggleMaximize` / `close` 在滑鼠這條路上不會被呼叫，動作由殼層自己執行；鍵盤 Tab + Enter 仍然經過 bridge。
 
 ### `bun-app-window/state` — 視窗位置與尺寸持久化
 
@@ -445,8 +452,7 @@ d.hittest(x, y);
 
 ### `bun-app-window/types` — 常數面，瀏覽器安全
 
-一個零依賴模組，承載全部常數：`FLAG_*`、`BROWSER_UI_*`、`RESIZE_EDGE`、`RESIZE_INDEX`、
-`ZOOM_LADDER`、`ZOOM_MIN`、`ZOOM_MAX`、`STATE_*` 及相關型別。
+一個零依賴模組，承載全部常數：`FLAG_*`（十個全在，含 `FLAG_TITLEBAR_RESERVE` 與 `FLAG_NATIVE_CAPTIONS`）、`BROWSER_UI_*`、`RESIZE_EDGE`、`RESIZE_INDEX`、`resizeIndex`、`ZOOM_LADDER`、`ZOOM_MIN`、`ZOOM_MAX`、`STATE_MAXIMIZED` / `STATE_MINIMIZED` / `STATE_FOCUSED`，以及 caption 幾何三件套 `CAPTION_BAR_HEIGHT`（32）/ `CAPTION_BUTTON_WIDTH`（46）/ `CAPTION_BUTTONS`——最後這個的順序是「從右往左 close、maximize、minimize」，而這個順序是有承重的：頁面畫的按鈕順序若與 `caption_button_at()` 的回報順序不一致，點「關閉」會變成最大化。
 
 **頁面側請用這個子路徑。** 主入口經 `./native` 引入 `bun:ffi`，瀏覽器打包器解析不了它——
 所以在頁面程式碼裡寫 `import { BROWSER_UI_ALL } from "bun-app-window"` 會在打包期失敗。

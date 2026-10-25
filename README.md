@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### What the tarball contains
 
-The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 22 files, 0.48 MB packed (1.37 MB unpacked). The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
+The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 22 files, 0.48 MB packed (1.39 MB unpacked). The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
 
 ## Quick Start
 
@@ -79,6 +79,10 @@ Note: `createShell(opts)` only resolves and loads the native DLL without opening
 
 ## Core API
 
+`ackOf(shell, rc)` turns a bare status code into `{ rc, err }` and only reads `lastError()` on
+failure — the native error slot is not cleared by a successful call, so reading it afterwards
+returns a stale message that looks like a fresh failure.
+
 ### Instance Methods & Properties
 
 | Member | Description |
@@ -97,6 +101,7 @@ Note: `createShell(opts)` only resolves and loads the native DLL without opening
 | `post(json)` | Sends a fire-and-forget JSON message from the host to the web page |
 | `setZoom(f)` / `getZoom()` | Gets or sets the page zoom factor (clamped automatically to `0.25`–`3.0`) |
 | `reload()` / `openDevTools()` / `toggleFullscreen()` | Equivalent to `Ctrl+R`, `F12`, and `F11` respectively |
+| `setFrameless(frameless)` / `isFrameless()` | Switches the window form at runtime and reports the current one. Only a window **created** with `FLAG_FRAMELESS` can switch; a framed-created window refuses with `rc=-1` and a reason in `lastError()`. See "Window Flags" below |
 | `setBrowserUi(mask)` | Disables specific default browser behaviors using a bitwise OR of `BROWSER_UI_*` flags |
 | `showContextMenu(x, y, items)` | Displays a native Win32 context menu at the specified screen coordinates (see below) |
 | `pickFolder(title?)` | Opens a native folder selection dialog (synchronously blocks the calling thread; **when exposed over IPC, pair it with `timeoutMs: 0`**, see below) |
@@ -109,7 +114,7 @@ Combine via bitwise OR (`|`) and pass to `opts.flags`:
 
 | Flag | Description |
 | --- | --- |
-| `FLAG_FRAMELESS` | Creates a frameless window without the default system title bar, delegating title bar rendering to the web UI |
+| `FLAG_FRAMELESS` | Creates a frameless window without the default system title bar, delegating title bar rendering to the web UI. A window created this way can switch back to framed at runtime with `setFrameless(false)` |
 | `FLAG_RESIZABLE` | Allows user resizing |
 | `FLAG_CENTER` | Centers the window within the active monitor work area on startup (works in both standard and frameless modes) |
 | `FLAG_TOPMOST` | Keeps the window always on top |
@@ -117,6 +122,8 @@ Combine via bitwise OR (`|`) and pass to `opts.flags`:
 | `FLAG_ACCEPT_DROP` | Enables native file and folder drag-and-drop from Windows Explorer |
 | `FLAG_START_MAXIMIZED` | Opens the window directly in a maximized state without an intermediate normal-sized frame flash |
 | `FLAG_ALLOW_EXTERNAL_NAV` | Opts out of external-navigation interception — for apps that genuinely are browsers |
+| `FLAG_TITLEBAR_RESERVE` | In frameless mode, shifts the web content down by one title-bar height so the top strip belongs to the native window. Superseded by `FLAG_NATIVE_CAPTIONS`: the caption hit zone is pinned to client `y ∈ [0, 32)`, so this variant puts the page's own title bar 32 px away from where clicks are actually routed |
+| `FLAG_NATIVE_CAPTIONS` | In frameless mode, draws the three caption buttons on a layered child window owned by the shell and answers `HTMAXBUTTON` there. This is the only way Snap Layouts can trigger: the WebView2 render child lives in another process and always returns `HTCLIENT`. Pair it with `mountTitleBar({ captions: "native" })` so the page reserves `46 × 3` instead of drawing its own buttons |
 
 ### External navigation is blocked by default
 
@@ -362,7 +369,9 @@ api.on("windowState", (s) => bar.setMaximized(s.maximized));
 Implementation notes:
 
 - Native dragging: Calling `shell.drag()` dispatches a native `WM_NCLBUTTONDOWN` (`HTCAPTION`) message, preserving Windows 11 Snap Layouts and double-click maximize behavior.
-- Theming & icons: Colors and dimensions are controlled via CSS custom properties (`--ws-tb-*`). Window control buttons default to geometric glyphs for universal compatibility; setting `icons: "fluent"` switches to `Segoe Fluent Icons` (note: missing fonts on older systems will render as missing-glyph boxes).
+- Theming: Colors and dimensions are controlled via CSS custom properties (`--ws-tb-*`). `titleBarCss()` is exported if you need to inject the stylesheet yourself instead of letting `mountTitleBar` do it once.
+- Glyphs: the default is `detectIconSet()`, which asks `document.fonts` for `Segoe Fluent Icons` (Win 11) or `Segoe MDL2 Assets` (Win 10) and picks `fluent` when either is present — the same code points exist in both fonts, so one table covers both systems. It only falls back to the `unicode` geometric set (`─ □ ❐ ✕`) when neither font is found. Pass `icons: "unicode" | "fluent"` to override the probe.
+- Let the shell draw the buttons: pass `captions: "native"` and the component renders **no** buttons at all, reserving `46 × 3` on the right for the shell's own layered child window. Pair it with `FLAG_NATIVE_CAPTIONS` — enabling only one of the two gives you either two overlapping button sets or an empty strip that cannot be clicked. Note that clicks on those buttons arrive as non-client messages, so `bridge.minimize` / `toggleMaximize` / `close` are not called on the mouse path; the shell performs the action itself. Keyboard Tab + Enter still goes through the bridge.
 
 ### `bun-app-window/state` — Window Placement Persistence
 
@@ -462,8 +471,13 @@ must; do not put a parser in production code, because the layout is not part of 
 
 ### `bun-app-window/types` — Constants, Safe for the Browser
 
-A zero-dependency module holding the whole constant surface: `FLAG_*`, `BROWSER_UI_*`, `RESIZE_EDGE`,
-`RESIZE_INDEX`, `ZOOM_LADDER`, `ZOOM_MIN`, `ZOOM_MAX`, `STATE_*`, and the related types.
+A zero-dependency module holding the whole constant surface: `FLAG_*` (all ten, including
+`FLAG_TITLEBAR_RESERVE` and `FLAG_NATIVE_CAPTIONS`), `BROWSER_UI_*`, `RESIZE_EDGE`, `RESIZE_INDEX`,
+`resizeIndex`, `ZOOM_LADDER`, `ZOOM_MIN`, `ZOOM_MAX`, `STATE_MAXIMIZED` / `STATE_MINIMIZED` /
+`STATE_FOCUSED`, and the caption geometry trio `CAPTION_BAR_HEIGHT` (32) / `CAPTION_BUTTON_WIDTH` (46)
+/ `CAPTION_BUTTONS` — the last of which is ordered `close`, `maximize`, `minimize` from right to left,
+and that order is load-bearing: if a page draws its buttons in a different order than
+`caption_button_at()` reports them, clicking "close" maximizes the window.
 
 **Use this subpath on the page side.** The main entry imports `bun:ffi` through `./native`, which a
 browser bundle cannot resolve — so `import { BROWSER_UI_ALL } from "bun-app-window"` inside page code
