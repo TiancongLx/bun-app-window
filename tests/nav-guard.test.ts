@@ -255,7 +255,11 @@ test("TITLEBAR_RESERVE 只在 frameless 时生效（带边框模式的标题栏�
     // 上一版就是后者，而反向验证（把条件改成 `if (false && …)`）**没有变红**——
     // 子串还在，判据被短路写法骗过去了。这正是 `pitfalls` 2.12 那一族：
     // 判据要守意图，不能守标识符相邻。
-    expect(body).toMatch(/if\s*\(\s*g_frameless\s*&&\s*g_titlebar_reserve\s*\)/);
+    //
+    // 允许 `g_frameless_live`（ADR 0019）：行为判据必须走 live 变体，否则运行时
+    // 切回带边框之后 widget 仍按「要让位」算，页面内容会被系统标题栏压住。
+    // 创建期两者相等，所以这里两种写法都满足意图。
+    expect(body).toMatch(/if\s*\(\s*g_frameless(_live)?\s*&&\s*g_titlebar_reserve\s*\)/);
 });
 
 test("TITLEBAR_RESERVE 在 ui_thread 与 shell_start_ex 两处都被解析", () => {
@@ -289,8 +293,9 @@ test("caption 子窗口只在 frameless + NATIVE_CAPTIONS 时创建", () => {
     expect(end).toBeGreaterThan(at);
     const body = SHELL_CODE.slice(at, end);
 
-    // 带边框模式的标题栏由系统画，盖一层自己的按钮会变成两套
-    expect(body).toMatch(/if\s*\(\s*!g_frameless\s*\|\|\s*!g_native_captions\s*\)/);
+    // 带边框模式的标题栏由系统画，盖一层自己的按钮会变成两套。
+    // 同样允许 `_live`（ADR 0019）：切回带边框时必须不再建/显示 caption。
+    expect(body).toMatch(/if\s*\(\s*!g_frameless(_live)?\s*\|\|\s*!g_native_captions\s*\)/);
     // 必须是 layered：rest 状态没有背板，普通子窗口会盖出一块色块
     expect(body).toContain("WS_EX_LAYERED");
     // 必须是顶层窗口的 child，否则跟随移动与销毁都要另写一套
@@ -298,9 +303,15 @@ test("caption 子窗口只在 frameless + NATIVE_CAPTIONS 时创建", () => {
 });
 
 test("caption 子窗口在 widget 之后创建并显式置顶（两者是兄弟窗口）", () => {
-    const widgetAt = SHELL_CODE.indexOf("WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET");
-    const createAt = SHELL_CODE.search(/^\s*create_caption\(\);/m);
+    // 锚点从 `WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET` 换成**取 widget 的那次赋值**：
+    // 前者在 `core_webview()` / `install_accelerator_handler()` 里都出现过，是子串陷阱；
+    // 后者只有 ui_thread 那一处。锚错了的症状是「判据看起来在跑，其实比的是两段无关代码」。
+    const widgetAt = SHELL_CODE.indexOf("g_widget = static_cast<HWND>(");
     expect(widgetAt).toBeGreaterThan(0);
+    // 同样按**位置**而不是「第一次出现」找 create_caption()：
+    // ADR 0019 之后 `apply_frameless_live()` 里也调它一次（运行时切回无边框时补建），
+    // 那次发生在 ui_thread 之前，用 firstIndexOf 会拿到它、判据就假红了。
+    const createAt = SHELL_CODE.indexOf("create_caption();", widgetAt);
     expect(createAt).toBeGreaterThan(widgetAt);
 
     // 定位时用 HWND_TOP：`fit_widget()` 是 SWP_NOZORDER（不动 z 序），

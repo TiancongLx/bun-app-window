@@ -226,6 +226,22 @@ export type Shell = {
   openDevTools(): number;
   /** 切换全屏（等同 F11）；全屏与最大化不同，连边框与任务栏一起让出 */
   toggleFullscreen(): number;
+
+  /**
+   * 运行时切换窗口形态（ADR 0019）。`frameless = false` 让系统标题栏回来。
+   *
+   * **只在创建期给了 `FLAG_FRAMELESS` 时可用**：带边框起点是 webview 自建的窗口，
+   * 我们没有它的 `WM_NCCALCSIZE` 控制权。那种情况下返回 -1，理由在 `lastError()`。
+   *
+   * 生效是异步的（投到 UI 线程）。确认方式两条：`isFrameless()` 读缓存，或页面
+   * 监听 `shell-msg` 的 `win` 消息——它的 `frameless` 字段会在切换后推一次。
+   * 全屏期间调用会被拒：`toggleFullscreen` 自带样式位与矩形的缓存，两者同时改
+   * 会让退出全屏还原成一个混合体。
+   */
+  setFrameless(frameless: boolean): number;
+  /** 当前运行时形态。读缓存，无窗口调用；未启动时回创建期形态 */
+  isFrameless(): boolean;
+
   /** 停止并释放窗口（可重复调用） */
   stop(): void;
 
@@ -336,6 +352,8 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
     reload: () => symbols.shell_reload(),
     openDevTools: () => symbols.shell_devtools(),
     toggleFullscreen: () => symbols.shell_toggle_fullscreen(),
+    setFrameless: (frameless) => symbols.shell_set_frameless(frameless ? 1 : 0),
+    isFrameless: () => symbols.shell_is_frameless() !== 0,
 
     stop() {
       if (stopped) return;

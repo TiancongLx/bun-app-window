@@ -10,8 +10,9 @@ import type { Pointer } from "bun:ffi";
 /**
  * 打开 libshell.dll。
  *
- * 导出面说明：DLL 实际导出 34 个符号，其中 `shell_start` 是 1.x 遗留入口，
- * TS 侧不声明、也不对外承诺（故下方声明 33 个）；`shell_debug_*` / `shell_self_*` 属排障面。
+ * 导出面说明：`shell_start` 是 1.x 遗留入口，TS 侧不声明、也不对外承诺；
+ * `shell_debug_*` / `shell_self_*` 属排障面。声明总数由
+ * `tests/native-surface.test.ts` 的 `DECLARED` 钉住——本文不写数字，避免随增删漂移。
  */
 export function openNativeLib(path: string) {
   return dlopen(path, {
@@ -57,6 +58,10 @@ export function openNativeLib(path: string) {
     shell_reload: { args: [], returns: FFIType.i32 },
     shell_devtools: { args: [], returns: FFIType.i32 },
     shell_toggle_fullscreen: { args: [], returns: FFIType.i32 },
+    // 运行时形态切换（ADR 0019）。只在创建期给了 SHELL_FLAG_FRAMELESS 时可用，
+    // 否则 set 返回 -1 并把理由写进 shell_error_text；is 恒回创建期形态。
+    shell_set_frameless: { args: [FFIType.i32], returns: FFIType.i32 },
+    shell_is_frameless: { args: [], returns: FFIType.i32 },
 
     // 排障面：不进稳定契约
     shell_debug_hittest: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },

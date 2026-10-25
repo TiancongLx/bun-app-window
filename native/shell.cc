@@ -145,7 +145,7 @@ enum ShellEdge : int {
   SHELL_EDGE_BOTTOMRIGHT = 7,
 };
 
-enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize, show, zoom, reload, devtools, fullscreen, restore_bounds, browser_ui, app_menu };
+enum class cmd_kind { eval, title, minimize, maximize_toggle, close, drag, resize, show, zoom, reload, devtools, fullscreen, restore_bounds, browser_ui, app_menu, frameless };
 
 struct cmd {
   cmd_kind kind;
@@ -160,6 +160,15 @@ WNDPROC g_toplevel_orig = nullptr;  // 仅带边框模式：webview 自建窗口
 HANDLE g_ready = nullptr;
 
 bool g_frameless = false;
+// 运行时形态（ADR 0019）。创建期由 `g_frameless` 初始化，之后可被 `shell_set_frameless` 改写。
+//
+// **两者必须分开。** `g_frameless` 决定走哪条窗口创建路径（自有 `webview_shell` 窗口 vs
+// webview 自建窗口），那条路在 `CreateWindowExW` / `webview_create` 那一刻就定死了，改不了；
+// `g_frameless_live` 只决定「客户区占不占满窗口」「缩放边框与 caption 按钮参不参与命中」
+// 这些**行为**，它们随时能改。
+//
+// 用 atomic 的理由同 `g_round_state`：UI 线程写、宿主线程经 `shell_is_frameless()` 读。
+std::atomic<bool> g_frameless_live{false};
 std::atomic<bool> g_shown{false};  // 是否已完成首次显示（忽略创建期 WM_DPICHANGED 建议矩形；跨线程读）
 std::atomic<int> g_round_state{-1};  // 圆角状态缓存：-1 未知 / 0 直角 / 1 圆角（跨线程读）
 bool g_resizable = true;
@@ -633,7 +642,9 @@ int caption_button_at(const RECT &client, POINT pt) {
 //
 // **但 caption button 不在「跳过」之列**：它先判，且不受 resizable / zoomed 影响。
 LRESULT hit_test_client(HWND hwnd, POINT pt) {
-  if (!g_frameless) {
+  // 判 `_live` 而不是 `g_frameless`：运行中切回带边框之后，缩放边框与 caption
+  // 命中都必须让给系统，否则会出现「系统画了标题栏，但点上去仍按无边框处理」。
+  if (!g_frameless_live) {
     return HTCLIENT;
   }
   RECT rc{};
@@ -695,7 +706,7 @@ void fit_widget() {
   const int h = rc.bottom - rc.top;
 
   int top = 0;
-  if (g_frameless && g_titlebar_reserve) {
+  if (g_frameless_live && g_titlebar_reserve) {
     const int bar = MulDiv(kCaptionBarHeight, static_cast<int>(current_dpi()), 96);
     // 只在还有余量时才让：窗口比标题栏还矮时（极小尺寸）让位会把 widget 压成
     // 负高度，SetWindowPos 收到负值的行为没有保证。宁可不让位也不给畸形尺寸。
@@ -1102,7 +1113,7 @@ void caption_update() {
   if (!g_caption || !g_hwnd) {
     return;
   }
-  if (!g_frameless || !g_native_captions || g_fullscreen) {
+  if (!g_frameless_live || !g_native_captions || g_fullscreen) {
     ShowWindow(g_caption, SW_HIDE);
     return;
   }
@@ -1131,7 +1142,7 @@ void create_caption() {
   if (g_caption || !g_hwnd) {
     return;
   }
-  if (!g_frameless || !g_native_captions) {
+  if (!g_frameless_live || !g_native_captions) {
     return;
   }
   static bool registered = false;
@@ -1402,7 +1413,7 @@ void push_state(PushMode mode = PushMode::None) {
             "\"dpi\":%u,\"frameless\":%s,\"dark\":%s}",
             maxed ? "true" : "false", minned ? "true" : "false",
             focused ? "true" : "false", css_w, css_h, px_w, px_h, dpi,
-            g_frameless ? "true" : "false", dark ? "true" : "false");
+            g_frameless_live ? "true" : "false", dark ? "true" : "false");
   post_json(buf);
 }
 
@@ -2770,10 +2781,15 @@ LRESULT CALLBACK shell_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   }
   switch (msg) {
   case WM_NCCALCSIZE:
-    if (g_frameless && wp == TRUE) {
+    if (g_frameless_live && wp == TRUE) {
       // 客户区占满窗口。最大化时直接钉到工作区：
       // 系统给最大化窗口的矩形会带不可见边框，只做等差回缩依赖 SM_* 猜测；
       // 直接以 rcWork 覆盖更确定，也不受 DWM 边框宽度变化影响。
+      //
+      // 判 `_live` 而不是 `g_frameless`：运行时切回带边框时，这条必须**不再拦截**，
+      // 让系统按窗口样式位算出非客户区（标题栏 + 边框）。这是整个运行时切换的实现基础
+      // ——`create_own_window` 用的是 `WS_OVERLAPPEDWINDOW`，样式位本来就在，
+      // 无边框只是把非客户区抹成零。见 ADR 0019。
       if (IsZoomed(hwnd)) {
         auto *params = reinterpret_cast<NCCALCSIZE_PARAMS *>(lp);
         MONITORINFO mi{};
@@ -3028,6 +3044,62 @@ void subclass_toplevel() {
                         reinterpret_cast<LONG_PTR>(toplevel_proc)));
 }
 
+// 运行时切换形态（ADR 0019）。**仅限创建期是 frameless 的窗口**——那条路我们
+// 自己建窗口、自己握完整窗口过程；带边框起点是 webview 自建的窗口，改不了。
+//
+// ## 为什么不需要改样式位
+//
+// `create_own_window` 用的是 `WS_OVERLAPPEDWINDOW`——标题栏、边框、缩放框的样式位
+// **本来就在**。无边框是靠 `WM_NCCALCSIZE` 返回 0 把非客户区抹成零实现的，不是靠
+// 删样式位。所以切回带边框只需要两件事：让 `WM_NCCALCSIZE` 不再拦截（它判
+// `g_frameless_live`），再用 `SWP_FRAMECHANGED` 强制系统重算一次非客户区。
+//
+// 这个取法不是省事，是**唯一不需要重建窗口的路**：改样式位反而要自己拼
+// `WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`，
+// 猜错一位就得到一个拖不动或没有系统菜单的窗口，而 `WM_NCCALCSIZE` 只是把系统
+// 本来就会算的结果还给它。
+//
+// ## caption 子窗口为什么是「隐藏」而不是「销毁」
+//
+// 带边框时系统标题栏在非客户区，而 caption 子窗口是客户区坐标的 `WS_CHILD`，
+// 两者不冲突。`caption_update()` 内部按 `g_frameless_live` 决定显隐，切回来时
+// 直接复用同一个子窗口——省掉一次注册/建窗，也避免 layered surface 重建
+// （那一次重建要重新给 `psize`，见 `caption_paint` 里那条实测）。
+//
+// ## 圆角为什么要跟着重算
+//
+// 无边框 + 还原时窗口自带 DWM 圆角；最大化时必须是直角（pitfalls 2.8），
+// 否则四角会露出桌面。切形态会改变 `IsZoomed` 与客户区的关系，所以按当前
+// 最大化状态重算一次，而不是沿用切之前的缓存。
+void apply_frameless_live(bool frameless) {
+  if (!g_hwnd) {
+    return;
+  }
+  if (g_frameless_live.load() == frameless) {
+    return;
+  }
+  g_frameless_live = frameless;
+
+  // 这一句是切换能否立刻生效的唯一开关：少了它，`WM_NCCALCSIZE` 的新判据
+  // 要等到下一次尺寸变化才被问一次，用户看到的是「点了没反应，拖一下才变」。
+  SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                   SWP_FRAMECHANGED);
+
+  if (frameless) {
+    create_caption();
+  }
+  caption_update();
+  fit_widget();
+  apply_round_corners(g_hwnd, frameless && !IsZoomed(g_hwnd));
+
+  // 必须 BypassAll：`PushedState` 的变化检测**不含** frameless 位，而客户区尺寸
+  // 在两种形态下可能恰好相等（边框宽度与窗口尺寸的整数巧合）。走常规路径会被
+  // 「状态没变」拦掉，页面于是永远不知道形态变了、也就不会挂/卸标题栏。
+  push_state(PushMode::BypassAll);
+  emit_state_event();
+}
+
 // ---- UI 线程 ----
 
 void drain(webview_t /*w*/, void * /*arg*/) {
@@ -3117,6 +3189,9 @@ void drain(webview_t /*w*/, void * /*arg*/) {
       }
       break;
     }
+    case cmd_kind::frameless:
+      apply_frameless_live(std::atoi(c.arg.c_str()) != 0);
+      break;
     }
   }
 }
@@ -3192,6 +3267,9 @@ DWORD WINAPI ui_thread(LPVOID param) {
   const int flags = static_cast<int>(reinterpret_cast<INT_PTR>(param));
 
   g_frameless = (flags & SHELL_FLAG_FRAMELESS) != 0;
+  // 运行时形态从创建期形态起步。**必须在 create_caption / fit_widget 之前**设好：
+  // 那两个函数都按 `g_frameless_live` 判，留空会让首次创建走错分支。
+  g_frameless_live = g_frameless;
   g_resizable = (flags & SHELL_FLAG_RESIZABLE) != 0;
   g_defer_show = (flags & SHELL_FLAG_DEFER_SHOW) != 0;
   g_accept_drop = (flags & SHELL_FLAG_ACCEPT_DROP) != 0;
@@ -3768,6 +3846,46 @@ __declspec(dllexport) int shell_toggle_fullscreen(void) {
   if (!g_webview) return -1;
   enqueue(cmd_kind::fullscreen);
   return 0;
+}
+
+// 运行时切换窗口形态（ADR 0019）。`on != 0` → 无边框；`on == 0` → 带边框。
+//
+// 返回 0 = 已投递（异步，等 `shell_is_frameless()` 或页面的 `win` 消息确认生效）；
+// -1 = 不可能，理由写进 `shell_error_text()`。
+//
+// 三条拒绝都不是防御性编程，是**这条路走不通的三种情形**：
+//
+//   1. 窗口没起 —— 没有 hwnd 可切。
+//   2. 创建期不是 frameless —— 带边框起点是 webview 自建的窗口，我们只通过
+//      子类化挂了少量消息处理，没有 `WM_NCCALCSIZE` 的控制权；要换形态只能
+//      重建窗口（`shell_close` + 重新 `shell_start_ex`），那是另一条路。
+//   3. 正在全屏 —— `toggle_fullscreen` 自己接管了 `GWL_STYLE` 并缓存了进入前的
+//      样式位与矩形。此刻改形态会让退出全屏时还原成两个形态的混合体：
+//      样式位是进全屏前的（frameless），几何却是按带边框算的。
+__declspec(dllexport) int shell_set_frameless(int on) {
+  if (!g_webview) {
+    set_err("window is not running");
+    return -1;
+  }
+  if (!g_frameless) {
+    set_err("runtime toggle requires SHELL_FLAG_FRAMELESS at creation");
+    return -1;
+  }
+  if (g_fullscreen) {
+    set_err("cannot toggle frameless while fullscreen");
+    return -1;
+  }
+  enqueue(cmd_kind::frameless, on ? "1" : "0");
+  return 0;
+}
+
+// 查询运行时形态。1 = 无边框，0 = 带边框。
+//
+// 读的是缓存而不是窗口状态位：窗口样式位在两种形态下**是同一份**
+// （`WS_OVERLAPPEDWINDOW` 从头到尾没变过，变的只是 `WM_NCCALCSIZE` 的应答），
+// 拿它反推形态必然错。未启动时回创建期形态。
+__declspec(dllexport) int shell_is_frameless(void) {
+  return g_frameless_live.load() ? 1 : 0;
 }
 
 // 同步查询系统深浅色。页面侧也会收到 win 推送里的 dark 字段；

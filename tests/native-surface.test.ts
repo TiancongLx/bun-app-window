@@ -40,6 +40,9 @@ const DECLARED = [
     "shell_reload",
     "shell_devtools",
     "shell_toggle_fullscreen",
+    // 运行时形态（ADR 0019）
+    "shell_set_frameless",
+    "shell_is_frameless",
     // 排障面
     "shell_debug_hittest",
     "shell_debug_metrics",
@@ -66,15 +69,16 @@ test("libshell.dll 是合法 PE 映像", async () => {
     expect(bytes[lfanew + 1]).toBe(0x45); // E
 });
 
-test("dlopen 成功且 33 个声明符号全部存在", async () => {
+test("dlopen 成功且每个声明符号都存在", async () => {
     const info = await resolveNativeLib();
     const lib = openNativeLib(info.path);
     const keys = new Set(Object.keys(lib.symbols));
 
     const missing = DECLARED.filter((name) => !keys.has(name));
     expect(missing).toEqual([]);
-    // 与 native.ts 的声明数、DLL 的 34 个导出（含遗留 shell_start）保持一致
-    expect(DECLARED.length).toBe(33);
+    // 与 native.ts 的声明数、DLL 的导出数（多一个遗留 shell_start）保持一致。
+    // 数字写在**一处**：改了这里就是改了契约，加符号时必须连 DECLARED 一起动。
+    expect(DECLARED.length).toBe(35);
 
     lib.close();
 });
