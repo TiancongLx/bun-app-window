@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### 包内包含什么
 
-发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 22 个文件（0.49 MB，解包后 1.41 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
+发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 22 个文件（0.50 MB，解包后 1.44 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
 
 ## 快速开始
 
@@ -223,6 +223,11 @@ await api.greet("Ada");
 - 启动前校验 `html` 与 `page` 的一致性。只给其中一个属于配置错误，唯一症状是窗口正常渲染
   但任何交互都无响应，因此直接抛错。引用存在但缺少 `type="module"` 时只告警：`<script>`
   的合法写法不止一种，字符串匹配的置信度不足以阻断启动。
+- 用 `assets` 服务额外的静态文件。编译型框架通常产出不止一个产物（典型是脚本 + 样式表），
+  `assets` 是一张「路径 → 文本」的映射，`content-type` 由扩展名推断。此前每个消费者都要
+  手写一段 `routes` 回调来服务样式表，而最常见的错法（MIME 类型写错）会让浏览器静默丢弃
+  样式。未识别的扩展名回退到 `application/octet-stream` 而不是猜测。调用方的 `routes`
+  仍然优先，未登记的路径返回 404。
 - 启动失败不留半启动状态：`openShell` 抛错时，已绑定的端口会被释放。
 
 注意事项：
@@ -508,6 +513,56 @@ await writePageBundle({ entry: "src/ui/page.ts", out: "src/ui/page.bundle.txt" }
 `target: "browser"` 与 `format: "esm"` 是固定的，不可配——页面脚本就是这两者。
 `bytes` 是 UTF-8 字节数，不是 `string.length`；源码里只要有非 ASCII 文本两者就不同，
 而一个「看起来对」的体积读数比没有读数更糟。
+
+#### 编译型框架：`plugins`、`define`、`loader`
+
+这三个字段原样交给 `Bun.build`，与任何具体框架无关，本包不自带任何插件。
+
+```ts
+const built = await bundlePage({
+  entry: "src/main.ts",
+  plugins: [myFrameworkPlugin()],              // .vue / .svelte / .tsx —— 插件能编译什么就传什么
+  define: { __VUE_OPTIONS_API__: "false" },    // 编译期常量
+  loader: { ".thing": "ts" },                  // 自定义扩展名
+});
+```
+
+#### `alias` 由本包实现，因为 Bun 没有这个选项
+
+Bun 1.4.4 的 `BuildConfig` 没有 `alias` 属性，而且传进去不会报错——它被静默忽略。
+四种写法都试过，全部解析失败。因此本包用自带的 `onResolve` 插件支撑 `alias`：
+
+```ts
+await bundlePage({ entry, alias: { "@": "./src", "lib": "./src/lib" } });
+```
+
+| 模块说明符 | 是否重写 |
+| --- | --- |
+| 与某个键相等，或以 `键/` 为前缀 | 是 |
+| 以 `.` 或 `/` 开头 | 否 |
+| 带 `scheme:` 前缀 | 否 |
+
+**默认是空的。** `$lib` 是 SvelteKit 的约定，`@/` 是某些项目自己的 `tsconfig` 别名，
+两者都不属于本包。别名与调用方的插件是合并关系而非替换，且只在传入 `alias` 时才注册该插件。
+
+#### 多产物
+
+编译型框架经常产出不止一个产物——脚本加样式表是常见形态。`outputs` 列出全部，每项带
+`path` / `kind` / `code` / `bytes`，而 `code` 与 `bytes` 特指 `entry-point` 那一个
+（不是 `outputs[0]`，输出顺序不构成契约）。
+
+`writePageBundle` 写出每一个产物：入口写到 `out`，其余写到同目录并替换扩展名。
+所以 `page.bundle.txt` 会得到 `page.bundle.css`，**不是** `main.css`——入口的文件名不该
+渗进一个 HTML 与 `assets` 会引用的路径。它返回 `written: Array<{ path, bytes }>`，
+便于清理时删掉自己产生的每一个文件。
+
+```text
+$ bun run bundle:page
+109,888 B  dist/page.bundle.txt     ← 入口产物
+    133 B  dist/page.bundle.css     ← 附带产物
+```
+
+其余文件用 `createApp({ assets })` 服务——见上文的 `app` 小节。
 
 失败时抛错并带上 Bun 的完整诊断。两种形态都覆盖了：编译期问题以
 `{ success: false, logs }` 返回，而入口本身不可达时**抛 `AggregateError`**，

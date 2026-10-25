@@ -6,6 +6,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-25
+
+### Added
+
+- **`bundlePage` passes `plugins`, `define` and `loader` through to `Bun.build`.** These are the
+  generic fields a compiling frontend framework needs; before this release `BundlePageOptions` had
+  only `entry` and `minify`, so Svelte and Vue could only be built by calling `Bun.build` directly
+  and giving up the failure diagnostics and byte accounting this module exists to provide.
+
+    Measured on a real Svelte 5 component (`bun-plugin-svelte` 0.0.6): 109,888 B entry script plus a
+    133 B stylesheet, with the component's render code present in the output.
+
+- **`PageBundle` now reports every output, and `writePageBundle` writes them all.** `outputs` lists
+  each artifact with its `path` / `kind` / `code` / `bytes`; `code` and `bytes` keep their previous
+  meaning and now come from the `entry-point` artifact rather than `outputs[0]` — output order is
+  not a contract, and stylesheets can sort first.
+
+    The second artifact used to be dropped silently. The symptom was a page that rendered correctly
+    with no styling, and nothing anywhere reported a missing file. `writePageBundle` now returns
+    `written: Array<{ path, bytes }>` so a caller's cleanup can remove every file it produced, not
+    just the entry one.
+
+    Placement rule: the entry artifact goes to `out`; every other artifact goes to the same
+    directory with its extension substituted. `page.bundle.txt` therefore yields
+    `page.bundle.css`, not `main.css` — the entry's filename is an implementation detail and must
+    not leak into a path that HTML and `assets` reference.
+
+- **`createApp({ assets })` serves extra static files.** A path-to-text map with `content-type`
+  inferred from the extension. Multiple artifacts meant every consumer had to hand-write a `routes`
+  callback to serve the stylesheet, and the usual mistake — a wrong MIME type — makes the browser
+  drop the stylesheet silently. Unrecognised extensions fall back to `application/octet-stream`
+  rather than guessing: a wrong MIME type means the file is not executed, while a fallback means it
+  is downloaded, and the latter is immediately visible.
+
+    A caller's `routes` still wins, and paths that are not registered are 404 — `assets` is a
+    convenience, not a catch-all.
+
+### Changed
+
+- **`alias` is implemented by this package, not passed through.** The plan was to forward it like
+  the other three fields; measurement said otherwise. Bun 1.4.4's `BuildConfig` has no `alias`
+  property, and passing one is not an error — it is silently ignored. Four forms were tried
+  (absolute path to a file, relative path to a file, relative path to a directory, trailing-slash
+  key) and all four failed to resolve, each reporting only `Bundle failed`.
+
+    It is now backed by a small `onResolve` plugin with a specified boundary: a specifier equal to a
+    key or prefixed by `key/` is rewritten; relative paths, absolute paths and `scheme:` specifiers
+    are left alone. The plugin is only registered when `alias` is supplied, so its hook does not sit
+    in every resolution path. When the alias target cannot be resolved, the candidate path is
+    handed back unchanged so Bun reports its own error rather than a rewritten one.
+
+    Aliases merge with, rather than replace, the caller's plugins — the two are orthogonal, and
+    replacing would make "using alias means you cannot use a framework plugin" a hidden rule.
+
+### Note
+
+- **`alias` defaults to empty, deliberately.** `$lib` is a SvelteKit convention and `@/` is some
+  project's `tsconfig` alias; neither belongs to this package. Presetting either would mean choosing
+  an ecosystem on the consumer's behalf.
+
+- **Neutrality is now enforced by tests, not by convention.** `tests/pack-neutrality.test.ts` asserts
+  that `dependencies` / `peerDependencies` / `optionalDependencies` are all empty, that no frontend
+  framework name appears in a non-comment line of `src/shell/`, and that no alias is preset.
+  Rationale and rejected alternatives are in `ADR 0021` (repository-local).
+
+- The three READMEs gain a subsection on multi-artifact output; package size re-measured as
+  22 files / 0.50 MB packed / 1.44 MB unpacked.
+
 ## [0.8.0] - 2026-10-25
 
 ### Added
@@ -745,7 +813,8 @@ First public release.
 - Not yet verified in managed environments that enforce AppLocker, WDAC, or third-party EDR behaviour blocking.
 - No commercially trusted code signing: only a self-signed certificate has been exercised end to end.
 
-[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/TiancongLx/bun-app-window/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/TiancongLx/bun-app-window/compare/v0.6.1...v0.6.2

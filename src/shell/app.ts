@@ -30,6 +30,7 @@
 import { createIpcServer, type IpcServer, type ServiceMethods } from "./ipc";
 import { EVENT_CLOSED, attachEventPump, type EventPump } from "./events";
 import { openShell, type Shell } from "./index";
+import { contentTypeFor } from "./pack";
 import { serveOnSafePort } from "./port";
 import { FLAG_CENTER, FLAG_RESIZABLE, type ShellOptions } from "./types";
 import { debugOf, type ShellDebug } from "./debug";
@@ -192,6 +193,25 @@ export type AppOptions = {
      * 从磁盘读静态资源、代理上游 API 这类事情写在这里。
      */
     routes?: (req: Request) => Response | undefined | Promise<Response | undefined>;
+    /**
+     * 静态资源：请求路径 → 文本内容。
+     *
+     * ```ts
+     * const built = await bundlePage({ entry, plugins: [myPlugin()] });
+     * const css = built.outputs.find((o) => o.path.endsWith(".css"));
+     * const app = await createApp({ html, page: built.code, assets: { "/app.css": css?.code ?? "" } });
+     * ```
+     *
+     * 纯字符串到字符串的映射，不含框架语义。解决的问题是「打包产生了多个产物，宿主需要
+     * 把它们都服务出去」——此前每个消费者要自己写一段 `routes` 回调，四行，但每次都容易
+     * 写错 `content-type`，而错误的表现是样式静默不生效。
+     *
+     * `content-type` 由扩展名推断（见 `contentTypeFor`），未识别的扩展名回退到
+     * `application/octet-stream` 而不是猜测。
+     *
+     * 调用方的 `routes` 优先于本项：`assets` 是便利设施，不是拦截层。
+     */
+    assets?: Record<string, string>;
     /**
      * 页面侧未捕获异常的回调。
      *
@@ -538,6 +558,16 @@ export async function createApp(opts: AppOptions): Promise<App> {
         const custom = await opts.routes?.(req);
         if (custom) {
             return custom;
+        }
+
+        // 静态资源。放在 routes 之后：assets 是便利设施，不是拦截层。
+        // 打包产生多个产物时（例如脚本 + 独立样式），调用方把非脚本产物放这里，
+        // content-type 由扩展名推断，避免每处各写一遍且写错的方式各不相同。
+        const asset = opts.assets?.[url.pathname];
+        if (asset !== undefined) {
+            return new Response(asset, {
+                headers: { "content-type": contentTypeFor(url.pathname) },
+            });
         }
 
         // 页面脚本。给了 `page` 才有这一条；不给时该路径落到底部的 404，

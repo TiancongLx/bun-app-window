@@ -133,6 +133,29 @@ test("/page.js 的 content-type 是 text/javascript", () => {
     expect(APP_CODE).toContain("PAGE_JS_CONTENT_TYPE");
 });
 
+/**
+ * `assets` 的位置约束（ADR 0021）。
+ *
+ * 顺序上只有一条要求：**在 `routes` 之后**。`assets` 是便利设施，调用方的显式路由
+ * 必须能覆盖它——反过来会让「我写了路由却被 assets 抢先」变成一条难查的规则。
+ *
+ * 与 `/page.js` 的先后不构成契约：`/page.js` 只由 `page` 参数提供，正常配置下
+ * `assets` 里不会出现该路径。
+ */
+test("handle 里 assets 的处理在 routes 之后", () => {
+    const routesAt = APP_CODE.indexOf("opts.routes?.(");
+    const assetsAt = APP_CODE.indexOf("opts.assets?.[");
+
+    expect(routesAt).toBeGreaterThan(0);
+    expect(assetsAt).toBeGreaterThan(0);
+    expect(assetsAt).toBeGreaterThan(routesAt);
+});
+
+test("assets 的 content-type 来自扩展名推断，不是写死的 text/plain", () => {
+    // 写死会让样式表以错误 MIME 送达，浏览器静默不应用——正是 assets 要消除的那类问题
+    expect(APP_CODE).toContain("contentTypeFor(url.pathname)");
+});
+
 test("PAGE_JS_PATH 固定为 /page.js", () => {
     // 路径与调用方 HTML 里的 `<script src>` 必须一致，所以不给它留配置项。
     expect(PAGE_JS_PATH).toBe("/page.js");

@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### What the tarball contains
 
-The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 22 files, 0.49 MB packed (1.41 MB unpacked). The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
+The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 22 files, 0.50 MB packed (1.44 MB unpacked). The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
 
 ## Quick Start
 
@@ -233,6 +233,12 @@ What it does for you:
   error whose only symptom is a window that renders and responds to nothing, so it throws. A
   reference without `type="module"` produces a warning instead: the legal ways to write a
   `<script>` tag are too varied for a string match to justify blocking startup.
+- Serves extra static files with `assets`. A compiling framework usually emits more than one
+  artifact — typically a script plus a stylesheet — and `assets` is a path-to-text map with the
+  `content-type` inferred from the extension. Before this, every consumer hand-wrote a `routes`
+  callback for the stylesheet, and the usual mistake (a wrong MIME type) makes the browser drop the
+  stylesheet silently. Unrecognised extensions fall back to `application/octet-stream` rather than
+  guessing. A caller's `routes` still wins, and unregistered paths are 404.
 - Startup failures leave nothing half-started: if `openShell` throws, the bound port is released.
 
 Notes:
@@ -539,6 +545,60 @@ await writePageBundle({ entry: "src/ui/page.ts", out: "src/ui/page.bundle.txt" }
 `target: "browser"` and `format: "esm"` are fixed, not configurable — that is what a page script is.
 `bytes` is a UTF-8 byte count, not `string.length`; the two differ on any source containing non-ASCII
 text, and a reported size that only looks right is worse than no reported size.
+
+#### Compiling frameworks: `plugins`, `define`, `loader`
+
+These three are passed straight through to `Bun.build`; nothing about them is specific to any
+framework, and this package ships no plugins of its own.
+
+```ts
+const built = await bundlePage({
+  entry: "src/main.ts",
+  plugins: [myFrameworkPlugin()],              // .vue / .svelte / .tsx — whatever your plugin handles
+  define: { __VUE_OPTIONS_API__: "false" },    // compile-time constants
+  loader: { ".thing": "ts" },                  // custom extensions
+});
+```
+
+#### `alias` is implemented here, because Bun has no such option
+
+`BuildConfig` in Bun 1.4.4 has no `alias` property, and passing one is not an error — it is silently
+ignored. Four forms were tried and all failed to resolve. So this package backs `alias` with its own
+`onResolve` plugin:
+
+```ts
+await bundlePage({ entry, alias: { "@": "./src", "lib": "./src/lib" } });
+```
+
+| Specifier | Rewritten? |
+| --- | --- |
+| equal to a key, or prefixed by `key/` | yes |
+| starts with `.` or `/` | no |
+| has a `scheme:` prefix | no |
+
+**The default is empty.** `$lib` is a SvelteKit convention and `@/` is some project's `tsconfig`
+alias; neither belongs here. Aliases merge with your plugins rather than replacing them, and the
+plugin is only registered when you pass `alias`.
+
+#### Multiple outputs
+
+A compiling framework often produces more than one artifact — a script plus a stylesheet is the
+common shape. `outputs` lists all of them with `path` / `kind` / `code` / `bytes`, and `code` /
+`bytes` refer to the `entry-point` artifact specifically (not `outputs[0]`, because output order is
+not a contract).
+
+`writePageBundle` writes every artifact: the entry to `out`, the rest to the same directory with the
+extension substituted. `page.bundle.txt` therefore yields `page.bundle.css`, **not** `main.css` — the
+entry's filename must not leak into a path that HTML and `assets` reference. It returns
+`written: Array<{ path, bytes }>` so cleanup removes every file it created.
+
+```text
+$ bun run bundle:page
+109,888 B  dist/page.bundle.txt     ← entry-point
+    133 B  dist/page.bundle.css     ← asset
+```
+
+Serve the extra files with `createApp({ assets })` — see the `app` section above.
 
 Failure throws with Bun's full diagnostics. Both shapes are handled: compile-time problems come back
 as `{ success: false, logs }`, while an unreachable entry point **throws an `AggregateError`** whose
