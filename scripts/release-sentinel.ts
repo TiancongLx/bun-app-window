@@ -1,38 +1,39 @@
 #!/usr/bin/env bun
 /**
- * release-sentinel.ts — 发版原子性哨兵
+ * release-sentinel.ts — 发版前的**本地**一致性哨兵
  *
- * ## 它要解决的问题
+ * ## 它只守 `bun test` 守不了的那部分
  *
- * 一次发版要往**六个载体**写同一件事：`package.json` 的 version、`build-pack.ts` 的
- * PE 版本、`CHANGELOG.md` 的版本段落、三份 README 的包体积。六处任何一处漏改，
- * 都不会有编译错误、不会有测试失败——只会得到一个「半发布」状态。而半发布只在
- * 被人打开 npm 页面或解压 tarball 时才被发现，那时版本号已经永久占用。
+ * 一次发版要往六个载体写同一件事。其中两类**已经在每次提交时被守住了**：
+ * `tests/version.test.ts` 管 `package.json` ↔ `build-pack.ts` 的两处版本号，
+ * `tests/readme-contract.test.ts` 管三份 README 的结构同构、标志位/子路径覆盖、
+ * 不引用发布面之外的文件、无自身版本字面量。那些判据在正常开发中不会合法地失败，
+ * 所以它们的位置是门禁。
  *
- * 所以这个脚本的存在意义只有一条：**在 `git push` / `bun publish` 之前，把「六个载体
- * 是否说同一件事」变成一个可判定的命题**。任一处不一致就红，并直接指出该改哪里。
+ * 剩下的三类**在正常开发中会合法地失败**，因此不能进 `bun test`：
  *
- * ## 与 `tests/version.test.ts` 的分工
+ *   - **实测型**：包体积要真打包解包才知道，而 `bun test` 不该依赖打包
+ *   - **git 态型**：工作区是否干净、本版 tag 是否已占用，只在发版瞬间有意义
+ *   - **CHANGELOG 型**：那一版段落还没写是常态；`version.test.ts` 的注释已明确
+ *     把它排除在断言之外
  *
- * 那个文件守 package.json ↔ build-pack.ts 两处，每次 `bun test` 都跑。本脚本是它的
- * 超集，但**不重复实现**那两条判据的语义：它额外引入 `version.test.ts` 结构上做不到
- * 的三类检查——
+ * 本脚本**只做这三类**，不重复实现测试已经守过的判据。两份实现必然会出现
+ * 「测试说合格、哨兵说不合格」，那时人只会绕过更严的那个——而更严的那个
+ * 恰好是没人维护的那个。
  *
- *   - **实测型**：包体积要打包解包才知道，而 `bun test` 不该依赖打包
- *   - **git 态型**：工作区是否干净、tag 是否已存在，只在发版瞬间有意义
- *   - **CHANGELOG 型**：`version.test.ts` 的注释明确写了「CHANGELOG 不在断言范围」，
- *     理由是「给人读的叙述无法在提交时稳定校验」。本脚本接受这个前提但要补上：
- *     它只在**发版时**跑，那时「CHANGELOG 有没有这一版」就是可判定的事实。
+ * ## 它不是原子性的全部
  *
- * ## 为什么不做成第七个门禁阶段
+ * 本脚本只管**本地**六载体一致，它回答不了「远端发生了什么」。跨载体的原子性
+ * 由 `scripts/release-verify.ts` 承担：`git push` / `tag` / `gh release create`
+ * 之后、`bun publish` 之前跑一次（`--pre-publish`），`bun publish` 之后再跑一次
+ * （无参数）。
  *
- * `gate.ts` 的每个阶段都要求「失败 = 代码有问题」。本脚本有两条会在日常开发中
- * 合法地失败（工作区脏、CHANGELOG 还没写这一版）——把这种判据塞进每次提交都跑的
- * 门禁，只会育人「看到红就 `--skip`」。它的正确位置是发版流程里的一个**阻断步骤**。
+ * 分界只有一条：`push` → `tag` → `release` 三步都可回退，`publish` 不可回退。
+ * 所以不可回退那一步必须由「前三步已落地」来授权，而不是由本脚本授权。
  *
  * ## 退出码
  *
- * 0 = 可以发版；1 = 有阻塞项；2 = 环境问题（打包失败、读不到文件）
+ * 0 = 本地就绪；1 = 有阻塞项；2 = 环境问题（打包失败、读不到文件）
  *
  * ## 用法
  *
@@ -41,64 +42,29 @@
  * bun run scripts/release-sentinel.ts --no-pack    # 跳过实测（快速预检）
  * bun run scripts/release-sentinel.ts --allow-dirty # 允许工作区有未提交改动
  * ```
+ *
+ * **前提**：`bun test` 已绿。本脚本不替你验证 README 契约与双处版本号。
  */
 
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { createRunner, type Check } from "./lib/check-runner";
 import { isEntrypoint } from "./lib/entrypoint";
-import {
-    README_FILES,
-    forbiddenReferences,
-    headingCount,
-    mentionedFlags,
-    declaredFlags,
-    declaredBrowserUiBits,
-    documentedSubpaths,
-    parsePackageSize,
-    selfVersionLiterals,
-    type DeclaredPackageSize,
-} from "./lib/readme-contract";
+import { README_FILES, parsePackageSize, type DeclaredPackageSize } from "./lib/readme-contract";
 
 const ROOT = resolve(import.meta.dir, "..");
 
 // ---- 判定原语 ---------------------------------------------------------------
 
-type Check = {
-    /** 稳定标识，`--only` 与日志按它定位 */
-    id: string;
-    /** 一句话结论 */
-    title: string;
-    run: () => Promise<{ ok: boolean; detail: string }> | { ok: boolean; detail: string };
-};
-
-const rows: Array<{ id: string; title: string; ok: boolean; detail: string }> = [];
-
-async function runCheck(check: Check): Promise<boolean> {
-    let result: { ok: boolean; detail: string };
-    try {
-        result = await check.run();
-    } catch (err) {
-        result = { ok: false, detail: `检查自身抛错：${err instanceof Error ? err.message : String(err)}` };
-    }
-    rows.push({ id: check.id, ...result, title: check.title });
-    const mark = result.ok ? "PASS" : "FAIL";
-    console.log(`${mark}  ${check.title.padEnd(38)} ${result.detail}`);
-    return result.ok;
-}
+const runner = createRunner();
 
 const read = (rel: string) => Bun.file(join(ROOT, rel)).text();
 
 // ---- 载体读取 ---------------------------------------------------------------
 
-const PKG = (await Bun.file(join(ROOT, "package.json")).json()) as {
-    version: string;
-    files: string[];
-    exports: Record<string, unknown>;
-    engines?: { bun?: string };
-    devDependencies?: Record<string, string>;
-};
+const PKG = (await Bun.file(join(ROOT, "package.json")).json()) as { version: string };
 const VERSION = PKG.version;
 
 const READMES = new Map<string, string>();
@@ -169,44 +135,21 @@ const opts = {
     allowDirty: process.argv.includes("--allow-dirty"),
 };
 
+/**
+ * 打包实测只做一次，且**推迟到真的需要时**。
+ *
+ * 不用模块顶层 await：那样任何 `import` 本文件的行为（测试、`--only` 查单条）
+ * 都会付一次打包的代价。用闭包缓存，代价与调用次数对齐。
+ */
+let measured: Awaited<ReturnType<typeof measureTarball>> | null | undefined;
+async function getMeasured(): Promise<Awaited<ReturnType<typeof measureTarball>> | null> {
+    if (measured === undefined) {
+        measured = opts.noPack ? null : await measureTarball();
+    }
+    return measured;
+}
+
 const checks: Check[] = [];
-
-checks.push({
-    id: "version-semver",
-    title: "package.json version 是合法 semver",
-    run: () => {
-        const ok = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(VERSION);
-        return { ok, detail: VERSION };
-    },
-});
-
-checks.push({
-    id: "version-pe",
-    title: "PE 版本与 package.json 同源",
-    run: async () => {
-        const src = await read("native/build-pack.ts");
-        let pe: string | null = null;
-        for (const raw of src.split(/\r?\n/)) {
-            const line = raw.trim();
-            // 跳过注释：`build-pack.ts` 的文档注释里提到过这个参数名，
-            // 非锚定匹配会先命中注释（`version.test.ts` 记录过这次事故）。
-            if (line.startsWith("//") || line.startsWith("*") || line.startsWith("/*")) continue;
-            const m = /["']--windows-version["']\s*,\s*["']([^"']+)["']/.exec(line);
-            if (m?.[1]) {
-                pe = m[1];
-                break;
-            }
-        }
-        if (pe === null) return { ok: false, detail: "build-pack.ts 里定位不到 --windows-version" };
-        const parts = VERSION.split(/[.+-]/);
-        const expected = `${parts[0]}.${parts[1]}.${parts[2]}.0`;
-        const ok = pe === expected;
-        return {
-            ok,
-            detail: ok ? `${pe} == ${expected}` : `pe=${pe} 期望 ${expected}（跑 bump-version.ts）`,
-        };
-    },
-});
 
 checks.push({
     id: "changelog-section",
@@ -241,110 +184,17 @@ checks.push({
     },
 });
 
-// 包体积的三条判据**不放进 checks**：它们共用一次打包实测的读数，由 `main()`
-// 统一处理。放进这个数组会让同一份 tarball 被 pack/unpack 三遍。
-
 checks.push({
-    id: "readme-structure",
-    title: "三份 README 结构同构",
-    run: () => {
-        const counts = README_FILES.map((n) => ({ n, c: headingCount(READMES.get(n) ?? "") }));
-        const base = counts[0]?.c ?? 0;
-        const off = counts.filter((x) => x.c !== base);
-        return {
-            ok: off.length === 0,
-            detail:
-                off.length === 0
-                    ? `三份均为 ${base} 个标题`
-                    : `标题数不一致：${counts.map((x) => `${x.n}=${x.c}`).join(" ")}`,
-        };
-    },
-});
-
-checks.push({
-    id: "readme-flags",
-    title: "README 覆盖全部 FLAG_*",
+    id: "unreleased-empty",
+    title: "CHANGELOG 的 Unreleased 段已清空",
     run: async () => {
-        const types = await read("src/shell/types.ts");
-        const all = declaredFlags(types);
-        const missing: Record<string, string[]> = {};
-        for (const name of README_FILES) {
-            const mentioned = mentionedFlags(READMES.get(name) ?? "");
-            const absent = all.filter((f) => !mentioned.has(f));
-            if (absent.length > 0) missing[name] = absent;
-        }
-        const keys = Object.keys(missing);
+        const text = await read("CHANGELOG.md");
+        const m = /## \[Unreleased\]\r?\n([\s\S]*?)(?=\r?\n## \[)/.exec(text);
+        if (!m) return { ok: false, detail: "找不到 `## [Unreleased]` 段" };
+        const body = (m[1] ?? "").trim();
         return {
-            ok: keys.length === 0,
-            detail:
-                keys.length === 0
-                    ? `${all.length} 个标志位三份都提到`
-                    : keys.map((k) => `${k} 缺 ${missing[k]?.join(",")}`).join(" · "),
-        };
-    },
-});
-
-checks.push({
-    id: "readme-browser-ui",
-    title: "README 覆盖全部 BROWSER_UI_* 位",
-    run: async () => {
-        const types = await read("src/shell/types.ts");
-        const all = declaredBrowserUiBits(types);
-        const missing: string[] = [];
-        for (const name of README_FILES) {
-            const text = READMES.get(name) ?? "";
-            for (const bit of all) if (!text.includes(bit)) missing.push(`${name}:${bit}`);
-        }
-        return {
-            ok: missing.length === 0,
-            detail: missing.length === 0 ? `${all.length} 个位三份都提到` : missing.join(" · "),
-        };
-    },
-});
-
-checks.push({
-    id: "readme-subpaths",
-    title: "README 覆盖全部 exports 子路径",
-    run: () => {
-        const subs = documentedSubpaths(PKG.exports);
-        const missing: string[] = [];
-        for (const name of README_FILES) {
-            const text = READMES.get(name) ?? "";
-            for (const s of subs) if (!text.includes(`bun-app-window/${s}`)) missing.push(`${name}:${s}`);
-        }
-        return {
-            ok: missing.length === 0,
-            detail: missing.length === 0 ? `${subs.length} 个子路径三份都提到` : missing.join(" · "),
-        };
-    },
-});
-
-checks.push({
-    id: "readme-forbidden-refs",
-    title: "README 不引用发布面之外的文件",
-    run: () => {
-        const all = README_FILES.flatMap((n) => forbiddenReferences(n, READMES.get(n) ?? ""));
-        return {
-            ok: all.length === 0,
-            detail:
-                all.length === 0
-                    ? "无指向 AGENTS.md / .internal/ / docs/ 的引用"
-                    : all.map((r) => `${r.file} L${r.line} → ${r.name}（${r.why}）`).join(" · "),
-        };
-    },
-});
-
-checks.push({
-    id: "readme-self-version",
-    title: "README 不含自身版本字面量",
-    run: () => {
-        const all = README_FILES.flatMap((n) => selfVersionLiterals(n, READMES.get(n) ?? "", VERSION));
-        return {
-            ok: all.length === 0,
-            detail:
-                all.length === 0
-                    ? `没有出现 ${VERSION}`
-                    : all.map((r) => `${r.file} L${r.line}`).join(" · ") + ` 出现了 ${VERSION}`,
+            ok: body === "",
+            detail: body === "" ? "空" : `还有 ${body.split(/\r?\n/).filter(Boolean).length} 行未归档内容`,
         };
     },
 });
@@ -384,17 +234,58 @@ checks.push({
     },
 });
 
+/**
+ * 体积声明与实测。
+ *
+ * 三条判据合并成一条：三份文档描述的是**同一个包**，那是同一个事实说了三遍。
+ * 「三份彼此一致」已由 `tests/readme-contract.test.ts` 守住，这里补的是它结构上
+ * 做不到的那半——**与真打包出来的字节比对**。
+ */
 checks.push({
-    id: "unreleased-empty",
-    title: "CHANGELOG 的 Unreleased 段已清空",
+    id: "package-size",
+    title: "三份 README 的体积声明与实测一致",
     run: async () => {
-        const text = await read("CHANGELOG.md");
-        const m = /## \[Unreleased\]\r?\n([\s\S]*?)(?=\r?\n## \[)/.exec(text);
-        if (!m) return { ok: false, detail: "找不到 `## [Unreleased]` 段" };
-        const body = (m[1] ?? "").trim();
+        const m = await getMeasured();
+        const declared = README_FILES.map((n) => ({ file: n, size: parsePackageSize(READMES.get(n) ?? "") }));
+
+        const absent = declared.filter((x) => x.size === null).map((x) => x.file);
+        if (absent.length > 0) {
+            return { ok: false, detail: `${absent.join(" · ")} 找不到体积声明——被删掉也算漂移` };
+        }
+
+        if (m === null) {
+            // --no-pack：降级为「三份彼此一致」，与静态测试同判据
+            const first = declared[0]!.size!;
+            const off = declared.filter(
+                (x) =>
+                    x.size!.files !== first.files ||
+                    x.size!.packedMB !== first.packedMB ||
+                    x.size!.unpackedMB !== first.unpackedMB,
+            );
+            return {
+                ok: off.length === 0,
+                detail:
+                    off.length === 0
+                        ? `${first.files} files / ${first.packedMB} MB / ${first.unpackedMB} MB（--no-pack 未与实测比对）`
+                        : `三份不一致：${declared.map((x) => `${x.file}=${x.size!.unpackedMB}MB`).join(" ")}`,
+            };
+        }
+        if (!m.ok) return { ok: false, detail: m.error };
+
+        const real = m.size;
+        const off = declared.filter(
+            (x) =>
+                x.size!.files !== real.files ||
+                x.size!.packedMB !== real.packedMB ||
+                x.size!.unpackedMB !== real.unpackedMB,
+        );
         return {
-            ok: body === "",
-            detail: body === "" ? "空" : `还有 ${body.split(/\r?\n/).filter(Boolean).length} 行未归档内容`,
+            ok: off.length === 0,
+            detail:
+                off.length === 0
+                    ? `${real.files} files / ${real.packedMB} MB packed / ${real.unpackedMB} MB unpacked`
+                    : `${off.map((x) => `${x.file} 声明 ${x.size!.files}/${x.size!.packedMB}/${x.size!.unpackedMB}`).join(" · ")}` +
+                      ` ≠ 实测 ${real.files}/${real.packedMB}/${real.unpackedMB}`,
         };
     },
 });
@@ -403,73 +294,29 @@ checks.push({
 
 async function main(): Promise<number> {
     console.log(`release sentinel — 目标版本 ${VERSION}`);
+    console.log("前提：bun test 已绿（README 契约与双处版本号不在本脚本范围内）");
     console.log("");
 
-    // 打包实测只做**一次**：三份 README 的体积判据共用同一个读数。
-    // 每份各测一遍会让同一份 tarball 被 pack/unpack 三遍，而这个读数与哪份文档
-    // 无关——它描述的是包本身。
-    let measured: Awaited<ReturnType<typeof measureTarball>> | null = null;
-    if (!opts.noPack) {
-        measured = await measureTarball();
-    }
-
-    let failed = 0;
     for (const check of checks) {
-        const ok = await runCheck(check);
-        if (!ok) failed += 1;
+        await runner.run(check);
     }
 
-    for (const name of README_FILES) {
-        const declared = parsePackageSize(READMES.get(name) ?? "");
-        const title = `${name} 包体积与实测一致`;
-
-        if (declared === null) {
-            rows.push({ id: `readme-size-${name}`, title, ok: false, detail: "找不到体积声明——被删掉也算漂移" });
-            console.log(`FAIL  ${title.padEnd(38)} 找不到体积声明——被删掉也算漂移`);
-            failed += 1;
-            continue;
-        }
-        if (measured === null) {
-            const detail = `声明 ${declared.files}/${declared.packedMB}/${declared.unpackedMB}（--no-pack 未实测）`;
-            rows.push({ id: `readme-size-${name}`, title, ok: true, detail });
-            console.log(`PASS  ${title.padEnd(38)} ${detail}`);
-            continue;
-        }
-        if (!measured.ok) {
-            rows.push({ id: `readme-size-${name}`, title, ok: false, detail: measured.error });
-            console.log(`FAIL  ${title.padEnd(38)} ${measured.error}`);
-            failed += 1;
-            continue;
-        }
-
-        const m = measured.size;
-        const ok =
-            declared.files === m.files &&
-            declared.packedMB === m.packedMB &&
-            declared.unpackedMB === m.unpackedMB;
-        const detail = ok
-            ? `${m.files} files / ${m.packedMB} MB packed / ${m.unpackedMB} MB unpacked`
-            : `声明 ${declared.files} files / ${declared.packedMB} MB / ${declared.unpackedMB} MB ` +
-              `≠ 实测 ${m.files} files / ${m.packedMB} MB / ${m.unpackedMB} MB`;
-        rows.push({ id: `readme-size-${name}`, title, ok, detail });
-        console.log(`${ok ? "PASS" : "FAIL"}  ${title.padEnd(38)} ${detail}`);
-        if (!ok) failed += 1;
-    }
-
+    const { total, failed } = runner.summary();
     console.log("");
-    console.log(`--- ${rows.length - failed} PASS / ${failed} FAIL（共 ${rows.length} 项）---`);
+    console.log(`--- ${total - failed} PASS / ${failed} FAIL（共 ${total} 项）---`);
 
     if (failed > 0) {
         console.log("");
         console.log("阻塞项：");
-        for (const r of rows.filter((x) => !x.ok)) console.log(`  - ${r.title}：${r.detail}`);
+        for (const r of runner.rows.filter((x) => !x.ok)) console.log(`  - ${r.title}：${r.detail}`);
         console.log("");
         console.log("SENTINEL BLOCKED — 不要 push / publish");
         return 1;
     }
 
     console.log("");
-    console.log("SENTINEL CLEAR — 可以继续发版");
+    console.log("SENTINEL CLEAR — 本地就绪，可以 push");
+    console.log("push / tag / release 完成后、publish 之前，跑 release-verify.ts --pre-publish 再确认一次");
     return 0;
 }
 

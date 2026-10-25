@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Note
+
+- **Release verification split into two points around the irreversible step.** A release writes three carriers: the git commit, the GitHub tag + release, and the npm tarball. The first three actions can all be undone; `bun publish` cannot — the version number is spent permanently. Verification therefore now happens on both sides of it.
+
+    - `release-verify.ts --pre-publish`, run between `gh release create` and `bun publish`: HEAD equals `origin/main`, the tag is annotated and points at HEAD, the release exists and is not a draft, and npm has not yet taken that version number. This is what authorises the irreversible step.
+    - `release-verify.ts`, run after publish: the core check is a single comparison — `tag → git archive → bun pm pack → sha1` against the tarball downloaded from npm. When that matches, every file inside is identical, so no per-file or per-paragraph assertion is needed. `bun pm pack` was measured to be deterministic: repacking the `v0.7.0` tree reproduced the sha1 npm had already published, byte for byte.
+
+- **The pre-release sentinel went from sixteen checks to six.** Eight of them duplicated `tests/version.test.ts` and `tests/readme-contract.test.ts` verbatim, and the three package-size checks stated one fact three times. What remains is exactly what `bun test` structurally cannot do: CHANGELOG section, CHANGELOG links, empty `Unreleased`, clean working tree, unoccupied tag, and the declared package size against the real tarball. Duplication costs more than a few milliseconds — two implementations drift, and then a person bypasses whichever one is stricter, which is usually the one nobody maintains.
+
 ## [0.7.0] - 2026-10-25
 
 ### Added

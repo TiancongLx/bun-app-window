@@ -9,8 +9,9 @@
  *
  * 判定逻辑放在这里而不是直接写进测试，是因为它有两个消费者：
  *
- *   - `tests/readme-contract.test.ts`  每次 `bun test` 都跑（静态项，不打包）
- *   - `scripts/release-sentinel.ts`     发版前跑（额外做打包实测与 CHANGELOG 一致性）
+ *   - `tests/readme-contract.test.ts`  每次 `bun test` 都跑（静态项，不打包）——**唯一实现**
+ *   - `scripts/release-sentinel.ts`     发版前跑，但只用 `parsePackageSize`：它把文档声明
+ *     与真打包出来的字节比对，其余判据一律交给上面的测试
  *
  * 两处共用同一套规则。分开写必然会出现「测试认为合格、哨兵认为不合格」这种最糟的
  * 情况——那时人只会绕过其中一个。
