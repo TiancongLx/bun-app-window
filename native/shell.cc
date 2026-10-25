@@ -3830,19 +3830,43 @@ __declspec(dllexport) int shell_set_browser_ui(int mask) {
 // 读窗口标题。`GetWindowTextW` 而不是 `g_title`——后者只在 `shell_start_ex` 里赋过
 // 一次，`shell_title()` 从不更新它，读回来会是启动时的标题（一个 echo，不是 getter）。
 //
-// 返回写入的 UTF-8 字节数（0 = 标题为空）；窗口不存在或缓冲区装不下时返回 -1。
-// 截断会让多字节字符断在中间、产出非法 UTF-8，所以装不下就报错而不是给半个字符。
+// 返回写入的 UTF-8 字节数（0 = 标题为空）；窗口不存在或装不下时返回 -1。
+//
+// **必须先问长度再读，不能先读进定长缓冲再判 cap。** 第一版就是后者：
+// `GetWindowTextW(hwnd, wbuf, 512)` 对超过 511 字符的标题只写 511 个字符并返回 511，
+// 然后 511 个 ASCII = 511 字节小于 cap，于是**静默给出截断的标题**。
+// 实测（2026-10-25）：设 600 个 'a' 读回 511 个，差 89 个字符且无任何信号——
+// 比返回 -1 糟得多，因为调用方会以为拿到了完整标题。
+//
+// `GetWindowTextLengthW` 对同进程窗口是准确的（跨进程窗口它才受限），
+// 而且不实际搬运文本，成本可以忽略。
+
+// 窗口标题的内部缓冲（UTF-16 字符数）。声明成常量而不是两处各写 512：
+// 边界判断与缓冲大小必须是**同一个数**，否则改了缓冲大小忘改判断就会退回静默截断。
+// `tests/getters.test.ts` 断言它在函数体内被引用至少 3 次（边界判断 + 声明 + 读取），
+// 正是为了钉住「判断和缓冲不能分家」。
+const int kTitleBufW = 512;
+
 __declspec(dllexport) int shell_get_title(char *buf, int cap) {
   if (!buf || cap <= 0) return -1;
   buf[0] = 0;
   if (!g_hwnd) return -1;
-  wchar_t wbuf[512];
-  const int n = GetWindowTextW(g_hwnd, wbuf, 512);
-  if (n <= 0) return 0;  // 空标题（或读取失败，两者对外同为「没有标题」）
-  const int need = WideCharToMultiByte(CP_UTF8, 0, wbuf, n, nullptr, 0, nullptr, nullptr);
+
+  const int len = GetWindowTextLengthW(g_hwnd);
+  if (len < 0) return -1;
+  if (len == 0) return 0;  // 空标题（或读取失败，两者对外同为「没有标题」）
+  // 内部缓冲装不下：明确报告，而不是交给下面的 GetWindowTextW 去截断
+  if (len >= kTitleBufW) return -1;
+
+  wchar_t wbuf[kTitleBufW];
+  const int n = GetWindowTextW(g_hwnd, wbuf, kTitleBufW);
+  if (n <= 0) return 0;
+  // n 与 len 理论上相等；不等说明读取期间标题被改过，用短的那个（已读到的字节是真实的）
+  const int have = n < len ? n : len;
+  const int need = WideCharToMultiByte(CP_UTF8, 0, wbuf, have, nullptr, 0, nullptr, nullptr);
   if (need <= 0) return 0;
   if (need >= cap) return -1;
-  WideCharToMultiByte(CP_UTF8, 0, wbuf, n, buf, need, nullptr, nullptr);
+  WideCharToMultiByte(CP_UTF8, 0, wbuf, have, buf, need, nullptr, nullptr);
   buf[need] = 0;
   return need;
 }

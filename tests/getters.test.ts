@@ -76,6 +76,11 @@ test("getBrowserUi() 返回的是数字而不是 -1（未启动不是错误）",
 
 // ---- 静态：实现必须真的读原生，不能退回输入缓存 ----
 
+/** 剥掉 C/C++ 注释（行注释 + 块注释），只留真正的代码 */
+function stripNativeComments(src: string): string {
+    return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/[^\n]*/gm, "");
+}
+
 /** 取 `shell.cc` 里某个导出函数的完整函数体（按大括号配平） */
 function nativeBody(src: string, symbol: string): string {
     const at = src.indexOf(`int ${symbol}(`);
@@ -104,6 +109,37 @@ test("shell_get_title 读窗口（GetWindowTextW），不读 g_title 缓存", as
     // **这条是核心**：`shell_title()` 从不更新 `g_title`（只在 shell_start_ex 里赋过一次），
     // 所以读它等于把「输入」当成「结果」——一个 echo，不是 getter。
     expect(body).not.toContain("g_title");
+});
+
+test("**反向**：shell_get_title 必须先问长度，不能先截断再判 cap", async () => {
+    // 实测过的缺陷（2026-10-25）：第一版是
+    //   GetWindowTextW(hwnd, wbuf, 512) → 对超过 511 字符的标题只写 511 个并返回 511
+    //   → 511 个 ASCII = 511 字节 < cap → **静默给出截断的标题**
+    // 设 600 个 'a' 读回 511 个，差 89 个字符且无任何信号。
+    //
+    // 修复后必须先 GetWindowTextLengthW 拿真实长度，超缓冲就返回 -1。
+    // 去掉这个调用就会退回静默截断，而其余判据全绿——所以这条必须单独钉。
+    const src = await Bun.file(NATIVE_CC).text();
+    const body = nativeBody(src, "shell_get_title");
+    expect(body.length).toBeGreaterThan(50);
+    expect(body).toContain("GetWindowTextLengthW");
+
+    // 长度必须在真正的读取调用**之前**问：`GetWindowTextLengthW` 不含子串
+    // `GetWindowTextW(`，所以下面两处定位不会互相串。
+    const lenAt = body.indexOf("GetWindowTextLengthW");
+    const readAt = body.indexOf("GetWindowTextW(");
+    expect(lenAt).toBeGreaterThan(-1);
+    expect(readAt).toBeGreaterThan(-1);
+    expect(lenAt).toBeLessThan(readAt);
+
+    // 「问到了长度却不用它」是一个和「不问长度」等价、但静态断言看不见的变异。
+    // 必须**剥掉注释再数**：第一版直接数 `body`，而变异测试恰好把
+    // `// if (len >= kTitleBufW) return -1;` 留在注释里，计数照样是 3，
+    // 判据被自己的注释骗过去了。实测记录（2026-10-25）：那一版变异没有变红。
+    const code = stripNativeComments(body);
+    const refs = code.split("kTitleBufW").length - 1;
+    // 三处引用：边界判断、数组声明、读取调用。删掉边界判断 → 2 → 红。
+    expect(refs).toBe(3);
 });
 
 test("shell_get_min_size 读的就是 WM_GETMINMAXINFO 用的那两个全局", async () => {

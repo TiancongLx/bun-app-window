@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### 套件內容包含什麼
 
-發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 22 個檔案（0.51 MB，解包後 1.49 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
+發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 22 個檔案（0.51 MB，解包後 1.50 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
 
 ## 快速開始
 
@@ -84,32 +84,32 @@ shell.setTitle("Doing work…");
 
 ### 實例方法與屬性
 
-| 成員                                                 | 說明                                                                                                                                                                                                          |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `start()`                                            | 建立並啟動視窗，回傳 `{ rc, error }`。呼叫後立即回傳，UI 訊息迴圈執行於獨立原生執行緒                                                                                                                         |
-| `stop()`                                             | 銷毀視窗並釋放底層資源，支援冪等重複呼叫                                                                                                                                                                      |
-| `show()`                                             | 顯示視窗。常搭配 `FLAG_DEFER_SHOW` 使用，實現在頁面渲染就緒後再展現視窗                                                                                                                                       |
-| `isAlive()`                                          | 檢測視窗是否存活（註：`state()` 無法區分「尚未啟動」與「已銷毀」狀態）。等視窗關閉請用 `pollEvents()` 的 `CLOSED`，別輪詢它                                                                                   |
-| `pollEvents(max?)`                                   | 批次拉取視窗生命週期事件（`STATE` / `CLOSED`），同步、消費式。詳見下文「視窗事件」                                                                                                                            |
-| `state()`                                            | 取得目前視窗狀態：`{ maximized, minimized, focused, dark, raw }`                                                                                                                                              |
-| `getRect()`                                          | 讀取目前視窗矩形的結構化讀數 `{ x, y, width, height, maximized, dpi }`（物理像素）；讀不到或資料不可用時回傳 `null`。視窗未啟動、尺寸/DPI 為 0、最小化哨兵座標三種情況都回傳 `null`                           |
-| `getTitle()`                                         | 讀回視窗標題的**真實值**（原生 `GetWindowTextW`，不是任何快取）；視窗不存在時回傳 `null`，空標題回傳 `""`。`setTitle()` 的 `rc === 0` 只代表訊息投遞成功，要判斷「效果發生」必須讀這裡                        |
-| `getMinSize()`                                       | 讀回**生效中**的最小尺寸 `{ width, height }`（邏輯像素）；視窗不存在時回傳 `null`。讀的不是「最後一次 set 的參數」——`setMinSize(0, 0)` 對非正值是忽略的，所以這裡給出的是 `WM_GETMINMAXINFO` 真正會用的那一個 |
-| `getBrowserUi()`                                     | 已請求關閉的瀏覽器行為位元遮罩。**累積語意**：先 `BROWSER_UI_MENU` 再 `BROWSER_UI_KEYS`，讀回來是兩者之和——因為 `setBrowserUi()` 只有「關」的方向。視窗未啟動時回傳 `0`（準確答案，不是「讀不到」）           |
-| `lastError()`                                        | 取得最近一次操作失敗的錯誤訊息，無錯誤時回傳空字串                                                                                                                                                            |
-| `setTitle` / `minimize` / `toggleMaximize` / `close` | 基礎視窗控制操作，回傳狀態碼 `rc`                                                                                                                                                                             |
-| `setMinSize(w, h)`                                   | 設定視窗最小尺寸（單位：邏輯像素）                                                                                                                                                                            |
-| `drag()`                                             | 觸發原生視窗拖曳（於頁面 `pointerdown` 事件中呼叫，完整保留 Windows 貼齊版面配置特性）                                                                                                                        |
-| `beginResize(edge)`                                  | 觸發原生邊框縮放（於頁面 `pointermove` 事件中呼叫，`edge` 取值見 `RESIZE_EDGE.*`）                                                                                                                            |
-| `post(json)`                                         | 宿主向頁面單向投遞 JSON 訊息，非同步發送且不等待回傳結果                                                                                                                                                      |
-| `setZoom(f)` / `getZoom()`                           | 設定或取得頁面縮放比例（有效範圍 `0.25`–`3.0`，越界值自動鉗制）                                                                                                                                               |
-| `reload()` / `openDevTools()` / `toggleFullscreen()` | 頁面重新載入、開啟開發人員工具、切換全螢幕（分別對應 `Ctrl+R` / `F12` / `F11`）                                                                                                                               |
-| `setFrameless(frameless)` / `isFrameless()`          | 執行時期切換視窗形態並讀取目前形態。只有**建立時**給了 `FLAG_FRAMELESS` 的視窗能切；帶邊框起點的視窗回傳 `rc=-1`，理由在 `lastError()`。詳見下文「視窗旗標」                                                  |
-| `setBrowserUi(mask)`                                 | 停用指定的瀏覽器預設行為，傳入 `BROWSER_UI_*` 旗標的按位元 OR 組合                                                                                                                                            |
-| `showContextMenu(x, y, items)`                       | 於指定螢幕座標彈出 Win32 原生右鍵快顯功能表（詳見下文用法）                                                                                                                                                   |
-| `pickFolder(title?)`                                 | 呼叫原生資料夾選擇對話方塊（同步阻塞目前呼叫執行緒；**經 IPC 暴露時務必搭配 `timeoutMs: 0`**，見下文）                                                                                                        |
-| `libInfo`                                            | 原生動態連結程式庫解析中繼資料（包含實際路徑、載入來源、SHA-256 雜湊值）                                                                                                                                      |
-| `symbols`                                            | 底層直通介面：直接存取透過 `dlopen` 匯出的底層 C 符號                                                                                                                                                         |
+| 成員                                                 | 說明                                                                                                                                                                                                                                    |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start()`                                            | 建立並啟動視窗，回傳 `{ rc, error }`。呼叫後立即回傳，UI 訊息迴圈執行於獨立原生執行緒                                                                                                                                                   |
+| `stop()`                                             | 銷毀視窗並釋放底層資源，支援冪等重複呼叫                                                                                                                                                                                                |
+| `show()`                                             | 顯示視窗。常搭配 `FLAG_DEFER_SHOW` 使用，實現在頁面渲染就緒後再展現視窗                                                                                                                                                                 |
+| `isAlive()`                                          | 檢測視窗是否存活（註：`state()` 無法區分「尚未啟動」與「已銷毀」狀態）。等視窗關閉請用 `pollEvents()` 的 `CLOSED`，別輪詢它                                                                                                             |
+| `pollEvents(max?)`                                   | 批次拉取視窗生命週期事件（`STATE` / `CLOSED`），同步、消費式。詳見下文「視窗事件」                                                                                                                                                      |
+| `state()`                                            | 取得目前視窗狀態：`{ maximized, minimized, focused, dark, raw }`                                                                                                                                                                        |
+| `getRect()`                                          | 讀取目前視窗矩形的結構化讀數 `{ x, y, width, height, maximized, dpi }`（物理像素）；讀不到或資料不可用時回傳 `null`。視窗未啟動、尺寸/DPI 為 0、最小化哨兵座標三種情況都回傳 `null`                                                     |
+| `getTitle()`                                         | 讀回視窗標題的**真實值**（原生 `GetWindowTextW`，不是任何快取）。視窗不存在、或標題超過 511 個字元時回傳 `null`——**絕不回傳被截斷的字串**；空標題回傳 `""`。`setTitle()` 的 `rc === 0` 只代表訊息投遞成功，要判斷「效果發生」必須讀這裡 |
+| `getMinSize()`                                       | 讀回**生效中**的最小尺寸 `{ width, height }`（邏輯像素）；視窗不存在時回傳 `null`。讀的不是「最後一次 set 的參數」——`setMinSize(0, 0)` 對非正值是忽略的，所以這裡給出的是 `WM_GETMINMAXINFO` 真正會用的那一個                           |
+| `getBrowserUi()`                                     | 已請求關閉的瀏覽器行為位元遮罩。**累積語意**：先 `BROWSER_UI_MENU` 再 `BROWSER_UI_KEYS`，讀回來是兩者之和——因為 `setBrowserUi()` 只有「關」的方向。視窗未啟動時回傳 `0`（準確答案，不是「讀不到」）                                     |
+| `lastError()`                                        | 取得最近一次操作失敗的錯誤訊息，無錯誤時回傳空字串                                                                                                                                                                                      |
+| `setTitle` / `minimize` / `toggleMaximize` / `close` | 基礎視窗控制操作，回傳狀態碼 `rc`                                                                                                                                                                                                       |
+| `setMinSize(w, h)`                                   | 設定視窗最小尺寸（單位：邏輯像素）                                                                                                                                                                                                      |
+| `drag()`                                             | 觸發原生視窗拖曳（於頁面 `pointerdown` 事件中呼叫，完整保留 Windows 貼齊版面配置特性）                                                                                                                                                  |
+| `beginResize(edge)`                                  | 觸發原生邊框縮放（於頁面 `pointermove` 事件中呼叫，`edge` 取值見 `RESIZE_EDGE.*`）                                                                                                                                                      |
+| `post(json)`                                         | 宿主向頁面單向投遞 JSON 訊息，非同步發送且不等待回傳結果                                                                                                                                                                                |
+| `setZoom(f)` / `getZoom()`                           | 設定或取得頁面縮放比例（有效範圍 `0.25`–`3.0`，越界值自動鉗制）                                                                                                                                                                         |
+| `reload()` / `openDevTools()` / `toggleFullscreen()` | 頁面重新載入、開啟開發人員工具、切換全螢幕（分別對應 `Ctrl+R` / `F12` / `F11`）                                                                                                                                                         |
+| `setFrameless(frameless)` / `isFrameless()`          | 執行時期切換視窗形態並讀取目前形態。只有**建立時**給了 `FLAG_FRAMELESS` 的視窗能切；帶邊框起點的視窗回傳 `rc=-1`，理由在 `lastError()`。詳見下文「視窗旗標」                                                                            |
+| `setBrowserUi(mask)`                                 | 停用指定的瀏覽器預設行為，傳入 `BROWSER_UI_*` 旗標的按位元 OR 組合                                                                                                                                                                      |
+| `showContextMenu(x, y, items)`                       | 於指定螢幕座標彈出 Win32 原生右鍵快顯功能表（詳見下文用法）                                                                                                                                                                             |
+| `pickFolder(title?)`                                 | 呼叫原生資料夾選擇對話方塊（同步阻塞目前呼叫執行緒；**經 IPC 暴露時務必搭配 `timeoutMs: 0`**，見下文）                                                                                                                                  |
+| `libInfo`                                            | 原生動態連結程式庫解析中繼資料（包含實際路徑、載入來源、SHA-256 雜湊值）                                                                                                                                                                |
+| `symbols`                                            | 底層直通介面：直接存取透過 `dlopen` 匯出的底層 C 符號                                                                                                                                                                                   |
 
 ### 視窗旗標（Flags）
 

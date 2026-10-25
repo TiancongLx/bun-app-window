@@ -34,6 +34,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **`getTitle()` no longer returns a silently truncated title.** The first version read into a
+  fixed 512-character buffer and _then_ checked against the caller's capacity — but
+  `GetWindowTextW(hwnd, wbuf, 512)` only writes 511 characters and returns 511 for anything longer,
+  and 511 ASCII bytes fit comfortably under the 1024-byte buffer. Measured: a 600-character title
+  came back as 511 characters, **89 short, with no signal at all**. That is worse than failing: the
+  caller has no way to know the string is incomplete.
+
+    It now asks `GetWindowTextLengthW` for the real length first and returns `-1` (→ `null`) when it
+    exceeds the internal buffer. The buffer size and the bound check share one constant, so raising
+    one without the other cannot reintroduce the truncation.
+
+    The guard for this has its own cautionary note: the first version counted occurrences in the
+    un-stripped function body, and the mutation test left `// if (len >= kTitleBufW) return -1;` in a
+    comment — the count stayed at 3 and **the mutation did not turn red**. Counting after stripping
+    comments is what made it fail correctly.
+
 - **`setMinSize()` no longer leaks across windows.** `g_min_w` / `g_min_h` are process-level globals
   and nothing reset them, so a window that set 800×600 handed those limits to the _next_ window in
   the same process — one that never asked for them. `g_browser_ui` would have inherited the same
