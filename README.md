@@ -697,9 +697,9 @@ bun run scripts/gate.ts              # bun check + bun test + consumer acceptanc
 bun run scripts/gate.ts --clean      # same gates, but inside a fresh clone of HEAD
 ```
 
-`-Clean` reproduces the conditions a hosted runner would provide: it clones `HEAD` into `%TEMP%`, installs from the lockfile, and runs the gates there, so local artefacts (`.build/`, `node_modules/`, `vendor/webview2/`) cannot mask a missing file. It takes about two seconds. Uncommitted changes are reported and excluded — run without `-Clean` to verify the working tree as-is.
+`-Clean` reproduces the conditions a hosted runner would provide: it clones `HEAD` into `%TEMP%`, installs from the lockfile, and runs the gates there, so local artefacts (`.build/`, `node_modules/`, `vendor/webview2/`) cannot mask a missing file. Uncommitted changes are reported and excluded — run without `-Clean` to verify the working tree as-is.
 
-The gate has three stages: `bun check`, `bun test`, and consumer acceptance (`scripts/verify-pack.ts`). The third packs the tarball, installs it into a scratch project under `%TEMP%`, type-checks that project, and runs `scripts/consumer-probe.ts` against the installed package — assertions covering every subpath, the DLL actually being `dlopen`-ed out of `node_modules`, and `libInfo.source === "package"` (the probe reports its own count). It runs offline in about 0.4 s and denies by default: a file packed without being listed in the allow-list fails the gate. Pass `-SkipPack` only when the gate itself is what you are changing.
+The gate has three stages: `bun check`, `bun test`, and consumer acceptance (`scripts/verify-pack.ts`). The third packs the tarball, installs it into a scratch project under `%TEMP%`, type-checks that project, and runs `scripts/consumer-probe.ts` against the installed package — assertions covering every subpath, the DLL actually being `dlopen`-ed out of `node_modules`, and `libInfo.source === "package"` (the probe reports its own count). It runs offline and denies by default: a file packed without being listed in the allow-list fails the gate. Pass `-SkipPack` only when the gate itself is what you are changing.
 
 The underlying commands remain available directly:
 
@@ -709,9 +709,9 @@ bun test           # Run automated test suite (tests/)
 bun run demo       # Launch interactive self-test demo (requires desktop session)
 ```
 
-Note that `bun run demo` and the compiled-executable acceptance (shape B in `AGENTS.md`) both need an interactive desktop, so they were never CI-capable — they are local-only by construction.
+Note that `bun run demo` and the single-file `.exe` acceptance both need an interactive desktop, so they were never CI-capable — they are local-only by construction. For the `.exe`, the whole check is: compile it, copy the result into an empty directory, launch it, and confirm the window comes up with `libInfo.source === "embedded"`.
 
-Whenever `src/shell/` or `package.json` is modified, the consumer acceptance stage already covers the installed-package path (shape A in `AGENTS.md`); it runs as part of the gate, so there is nothing to remember. Only shape B — building the single-file `.exe` — still needs a manual run inside a desktop session.
+Whenever `src/shell/` or `package.json` is modified, the consumer acceptance stage already covers the installed-package path; it runs as part of the gate, so there is nothing to remember. Only the `.exe` build still needs a manual run inside a desktop session.
 
 For window enumeration (`EnumWindows`) or automated screenshot scripts, filter by the corresponding Win32 window class name:
 

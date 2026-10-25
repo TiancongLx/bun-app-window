@@ -667,9 +667,9 @@ bun run scripts/gate.ts              # 對目前工作區執行三段把關
 bun run scripts/gate.ts --clean      # 同上，但在 HEAD 的乾淨副本內執行
 ```
 
-`-Clean` 重現了託管 runner 的條件：將 `HEAD` clone 到 `%TEMP%`，依 lockfile 安裝相依套件，再於其中執行把關。如此一來，本機產物（`.build/`、`node_modules/`、`vendor/webview2/`）便無法掩蓋缺少的檔案。耗時約兩秒。未提交的變更會被提示並排除於乾淨副本之外——如需驗證工作區現況，請移除 `-Clean`。
+`-Clean` 重現了託管 runner 的條件：將 `HEAD` clone 到 `%TEMP%`，依 lockfile 安裝相依套件，再於其中執行把關。如此一來，本機產物（`.build/`、`node_modules/`、`vendor/webview2/`）便無法掩蓋缺少的檔案。未提交的變更會被提示並排除於乾淨副本之外——如需驗證工作區現況，請移除 `-Clean`。
 
-品質把關分三段：`bun check`、`bun test`，以及消費方驗收（`scripts/verify-pack.ts`）。第三段會把 tarball 打包到 `%TEMP%`，安裝進一個臨時專案，對該專案執行型別檢查，再執行 `scripts/consumer-probe.ts`——斷言涵蓋全部子路徑、DLL 是否真的從 `node_modules` 被 `dlopen`、以及 `libInfo.source` 是否為 `package`（條數由探針自報）。可離線執行，約 0.4 秒，且預設拒絕：任何未在允許清單登記的檔案被打進套件，把關就會失敗。只有在改動把關腳本本身時才用 `-SkipPack`。
+品質把關分三段：`bun check`、`bun test`，以及消費方驗收（`scripts/verify-pack.ts`）。第三段會把 tarball 打包到 `%TEMP%`，安裝進一個臨時專案，對該專案執行型別檢查，再執行 `scripts/consumer-probe.ts`——斷言涵蓋全部子路徑、DLL 是否真的從 `node_modules` 被 `dlopen`、以及 `libInfo.source` 是否為 `package`（條數由探針自報）。可離線執行，且預設拒絕：任何未在允許清單登記的檔案被打進套件，把關就會失敗。只有在改動把關腳本本身時才用 `-SkipPack`。
 
 底層指令仍可直接呼叫：
 
@@ -679,9 +679,9 @@ bun test           # 執行自動化測試套件（位於 tests/）
 bun run demo       # 啟動互動式自我檢測範例程式（需於桌面工作階段下執行）
 ```
 
-需注意：`bun run demo` 與「編譯為單一可執行檔」的驗收（`AGENTS.md` 中的形態 B）皆需要互動式桌面，本就不具備 CI 可行性，屬於構造上的本機專屬項目。
+需注意：`bun run demo` 與單一 `.exe` 的驗收都需要互動式桌面，因此兩者都不具備 CI 可行性，屬於構造上的本機專屬項目。`.exe` 那條的完整判據是：編譯 → 把產物複製進一個空目錄 → 啟動 → 確認視窗起得來，且 `libInfo.source` 回報 `embedded`。
 
-注意：每當修改 `src/shell/` 或 `package.json` 後，「作為外部專案相依套件安裝」這條鏈路（`AGENTS.md` 中的形態 A）已由消費方驗收階段自動涵蓋——它隨品質把關一起執行，不需要額外記得。只剩形態 B（編譯單一 `.exe`）仍需於桌面工作階段手動執行一次。
+每當修改 `src/shell/` 或 `package.json` 後，「作為外部專案相依套件安裝」這條鏈路已由消費方驗收階段自動涵蓋——它隨品質把關一起執行，不需要額外記得。只剩 `.exe` 建置仍需於桌面工作階段手動執行一次。
 
 自動化測試或截圖腳本若需透過 Win32 `EnumWindows` 過濾視窗控制代碼（HWND），請依據視窗模式比對對應的視窗類別名稱（Window Class）：
 

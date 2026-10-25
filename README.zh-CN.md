@@ -667,9 +667,9 @@ bun run scripts/gate.ts              # 对当前工作区跑三段门禁
 bun run scripts/gate.ts --clean      # 同上，但在 HEAD 的干净副本里跑
 ```
 
-`-Clean` 复现了托管 runner 的条件：把 `HEAD` clone 到 `%TEMP%`，按 lockfile 安装依赖，再在其中跑门禁。这样本地产物（`.build/`、`node_modules/`、`vendor/webview2/`）就无法掩盖缺失的文件。耗时约两秒。未提交改动会被提示并排除在干净副本之外——如需验证工作区现状，请去掉 `-Clean`。
+`-Clean` 复现了托管 runner 的条件：把 `HEAD` clone 到 `%TEMP%`，按 lockfile 安装依赖，再在其中跑门禁。这样本地产物（`.build/`、`node_modules/`、`vendor/webview2/`）就无法掩盖缺失的文件。未提交改动会被提示并排除在干净副本之外——如需验证工作区现状，请去掉 `-Clean`。
 
-门禁分三段：`bun check`、`bun test`，以及消费方验收（`scripts/verify-pack.ts`）。第三段会把 tarball 打进 `%TEMP%`，装进一个临时工程，对那个工程做类型检查，再运行 `scripts/consumer-probe.ts`——断言覆盖全部子路径、DLL 是否真从 `node_modules` 里被 `dlopen`、以及 `libInfo.source` 是否为 `package`（条数由探针自报）。离线可跑，约 0.4 秒，且默认拒绝：任何没在允许清单里登记的文件被打进包，门禁就红。只有在改动门禁自身时才用 `-SkipPack`。
+门禁分三段：`bun check`、`bun test`，以及消费方验收（`scripts/verify-pack.ts`）。第三段会把 tarball 打进 `%TEMP%`，装进一个临时工程，对那个工程做类型检查，再运行 `scripts/consumer-probe.ts`——断言覆盖全部子路径、DLL 是否真从 `node_modules` 里被 `dlopen`、以及 `libInfo.source` 是否为 `package`（条数由探针自报）。离线可跑，且默认拒绝：任何没在允许清单里登记的文件被打进包，门禁就红。只有在改动门禁自身时才用 `-SkipPack`。
 
 底层命令仍可直接调用：
 
@@ -679,9 +679,9 @@ bun test           # 运行自动化测试套件（位于 tests/）
 bun run demo       # 启动交互式自检示例程序（需在桌面会话下运行）
 ```
 
-需要注意：`bun run demo` 与「编译为单文件可执行程序」的验收（`AGENTS.md` 中的形态 B）都需要交互式桌面，本就不具备 CI 可行性，属于构造上的本地专属项。
+注意：`bun run demo` 与单文件 `.exe` 的验收都需要交互式桌面，因此两者都不具备 CI 可行性，属于构造上的本地专属项。`.exe` 那条的完整判据是：编译 → 把产物拷进一个空目录 → 启动 → 确认窗口起得来，且 `libInfo.source` 报 `embedded`。
 
-注意：每当修改 `src/shell/` 或 `package.json` 后，「作为外部工程依赖安装」这条链路（`AGENTS.md` 中的形态 A）已由消费方验收阶段自动覆盖——它随门禁一起跑，不需要额外记得。只剩形态 B（编译单文件 `.exe`）仍需在桌面会话下手动执行一次。
+每当修改 `src/shell/` 或 `package.json` 后，「作为外部工程依赖安装」这条链路已由消费方验收阶段自动覆盖——它随门禁一起跑，不需要额外记得。只剩 `.exe` 构建仍需在桌面会话下手动执行一次。
 
 自动化测试或截图脚本若需通过 Win32 `EnumWindows` 过滤窗口句柄，请根据窗口模式匹配对应的窗口类名（Window Class）：
 

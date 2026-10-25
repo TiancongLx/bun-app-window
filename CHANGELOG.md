@@ -24,20 +24,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Note
 
-- **The three READMEs were brought back in line with the code.** They had drifted in six places, and the drift was the kind that costs a reader time rather than merely looking untidy:
+- **A release sentinel now blocks a half-published release.** Releasing writes the same facts into six carriers — `package.json`'s `version`, `build-pack.ts`'s PE version, the CHANGELOG section, the CHANGELOG link definitions, the package size in all three READMEs, and the git state. Missing any one produces no compile error and no test failure; it produces a release where the tarball on npm describes itself wrongly, discovered only after the version number is permanently spent.
 
-    | Drift | Before | Now |
+    `bun run scripts/release-sentinel.ts` turns "do the six agree" into a decidable question. One run, sixteen checks, exit 1 with a list of what to fix. It measures the tarball for real (`bun pm pack` → `tar -xzf` → sum the bytes) rather than trusting the number written in the docs, because that number changes on **every commit that adds, removes, or edits a shipped file** — including edits to the READMEs themselves.
+
+    **It is deliberately not a fourth gate stage.** Every stage of `gate.ts` asserts "failure = the code is broken". Two of the sentinel's checks fail legitimately during normal development — a dirty working tree, and a CHANGELOG with no section for a version that has not been released yet. Putting that in a gate that runs on every commit only teaches people to reach for `--skip`, and a criterion that gets habitually skipped does not exist.
+
+- **The static half of that contract now runs on every `bun test`.** `tests/readme-contract.test.ts` (31 assertions) covers what can be judged without packing or touching git: all ten `FLAG_*` and five `BROWSER_UI_*` bits mentioned in all three READMEs, all ten `exports` subpaths mentioned, the three files structurally isomorphic, no references to files outside the publish surface, and no self-version literals. The split between the two layers has exactly one criterion: **will this check fail legitimately during normal development?** If yes, sentinel only.
+
+    Shared logic lives in `scripts/lib/readme-contract.ts` so the test and the sentinel cannot disagree — two implementations of the same predicate is the one failure mode where a person ends up bypassing whichever is stricter.
+
+- **Six README defects fixed, then the checks that would have caught them were written.** The two worst:
+
+    | Defect | Before | Now |
     | --- | --- | --- |
-    | `FLAG_TITLEBAR_RESERVE` (256) and `FLAG_NATIVE_CAPTIONS` (512) | **absent from the flag table entirely** | documented, including why the first is superseded by the second |
-    | `ackOf()` | never mentioned, despite being a main-entry export | one paragraph in Core API, with the reason `lastError()` is only read on failure |
-    | `titleBarCss()` / `detectIconSet()` / `captions: "native"` | never mentioned | documented under the title bar section |
-    | Default glyph set | "buttons default to geometric glyphs; setting `icons: \"fluent\"` switches to Segoe Fluent Icons" — **backwards since 0.6.1** | `detectIconSet()` runs by default and picks `fluent` whenever either icon font is present; `unicode` is the fallback |
-    | `types` subpath constant list | `STATE_*` only | names `STATE_MAXIMIZED` / `STATE_MINIMIZED` / `STATE_FOCUSED` and the `CAPTION_*` geometry trio, plus why the caption order is load-bearing |
+    | `FLAG_TITLEBAR_RESERVE` (256) / `FLAG_NATIVE_CAPTIONS` (512) | **absent from the flag table entirely** — the latter is the only way Snap Layouts can trigger | documented, including why the first is superseded by the second |
+    | All three READMEs | pointed readers at `AGENTS.md` for "shape A / shape B" — gitignored, not in `files`, so **unreachable for anyone who installed the package** from the day those sentences were written | rewritten self-contained |
+    | `ackOf()`, `titleBarCss()`, `detectIconSet()`, `captions: "native"` | never mentioned | documented |
+    | Default glyph set | "buttons default to geometric glyphs; setting `icons: \"fluent\"` switches to Segoe Fluent Icons" — **backwards since 0.6.1** | `detectIconSet()` picks `fluent` by default, `unicode` only as fallback |
+    | `types` subpath constants | `STATE_*` only | three named constants plus the `CAPTION_*` trio, and why the caption order is load-bearing |
     | Tarball size | 1.37 MB unpacked | 1.39 MB — measured, not estimated |
 
-    The glyph row was the worst of the six: a reader following it would set `icons: "fluent"` to *get* the Win 11 glyphs, when that had been the default since 0.6.1 and the documented behaviour was the opposite of what the code did.
+    The glyph row was the worst of the six: a reader following it would set `icons: "fluent"` to *get* the Win 11 glyphs, when that had been the default since 0.6.1 — the documentation described the opposite of what the code did. Two `about 0.4 s` / `about two seconds` figures were removed rather than updated; they drift with the machine and the reader cannot verify them. Two first-person phrasings were also removed from the Chinese READMEs (`各替我省一次调用` → `各能省掉一次调用`).
 
-- **Two first-person phrasings removed** from the Chinese READMEs (`各替我省一次调用` → `各能省掉一次调用`). Everything else in those files was already impersonal; the audit that found these two covered every occurrence of 我 / 咱 / 俺 and `I` / `my` / `we` across all three files.
+    Then the checks above were written, and verified in both directions: four mutations were injected into the real documents — deleting a flag mention, adding a heading to one file, corrupting one file's size, adding an `AGENTS.md` reference — and each turned exactly the expected assertion red. All four were reverted and the suite returned green.
 
 - **`dist/libshell.dll` changed** — `shell.cc` gained the two exports and the `g_frameless_live` predicates (`1,026,560 B`). The declared symbol count grew by two, tracked in `tests/native-surface.test.ts`. Three pre-existing static assertions in `tests/nav-guard.test.ts` were widened from `g_frameless` to `g_frameless(_live)?`; each carries a comment saying why the live variant satisfies the original intent. The caption-ordering assertion also moved its anchor off `WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET`, which appears in three other functions and was a substring trap waiting to misfire.
 
