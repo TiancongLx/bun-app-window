@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 
 import { EVENT_STATE, attachEventPump, type EventPump, unrefTimer } from "./events";
 import type { Shell } from "./index";
+import { isMinimizedSentinel, parseBounds, type WindowRect } from "./types";
 
 /**
  * 窗口位置与尺寸的持久化。
@@ -32,16 +33,26 @@ import type { Shell } from "./index";
  * 位置变化就永久丢了——用户「拖完立刻点 X」是最常见的关闭方式。
  */
 
-export type WindowPlacement = {
-    /** 物理像素，屏幕坐标 */
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    maximized: boolean;
-    /** 保存时的窗口 DPI；恢复时用于换算尺寸 */
-    dpi: number;
-};
+/**
+ * 窗口矩形的持久化形态——与 `Shell.getRect()` 返回的 `WindowRect` 是同一个类型。
+ *
+ * 不再各自定义一份形状相同的结构：两份类型会让 `savePlacement(file, shell.getRect())`
+ * 这种直接传递，在字段漂移时**静默丢字段**（结构宽的那个能赋给窄的，反过来不行，
+ * 而 TS 只报错不提「这是同一份数据」）。`tests/rect.test.ts` 钉住两者可互换。
+ *
+ * 语义差别只在用途上：`WindowRect` 说的是「此刻读到什么」，本别名说的是
+ * 「这份读数要落盘」。字段集合必须一致，因为它们本来就是同一次原生读取。
+ */
+export type WindowPlacement = WindowRect;
+
+/**
+ * 从 `./types` 转出解析器，保持 `bun-app-window/state` 的既有导入面不破。
+ *
+ * 真正实现在 `types.ts`：主入口 `getRect()` 也要用它，而本模块依赖 `node:fs`，
+ * 主入口不能反过来依赖这个可选件。两个子路径拿到的是**同一个函数对象**
+ * （`tests/rect.test.ts` 用 `toBe` 钉住），不会出现两份判据各说各话。
+ */
+export { parseBounds };
 
 const DEFAULTS = {
     /** 收到变化事件后攒多久再写盘。拖动期间事件每帧一条，攒到停手写一次 */
@@ -49,52 +60,6 @@ const DEFAULTS = {
     /** 自建事件泵（未由调用方提供）时的拉取节奏 */
     pumpMs: 16,
 } as const;
-
-/**
- * Win32 的「窗口已最小化」哨兵坐标。
- *
- * 窗口最小化时 `GetWindowRect` 返回的不是真实位置，而是一对哨兵值——实测
- * `-32000,-32000` 加一个图标尺寸（典型 `314x50`）。它们**看起来完全合法**：
- * 坐标是整数，尺寸也大于 0，所以只判「非有限 / 尺寸 ≤ 0」的形状校验拦不住。
- *
- * 成因在原生 `format_bounds`：它只在 `IsZoomed` 为真时走
- * `WINDOWPLACEMENT.rcNormalPosition`，最小化时 `IsZoomed` 返回 false，于是落进
- * `GetWindowRect` 分支——**`IsIconic` 从未被判断**。于是这对哨兵值会一路写成
- * `{"x":-32000,"y":-32000,"width":314,"height":50}`，下次启动恢复成一个畸形小窗
- * （实测：666×471，页面被挤到换行并出现滚动条）。
- *
- * 阈值取 -30000 而不是精确 -32000：不同 DPI / 主题下这对值会带几个像素偏移。
- * 真实坐标到不了这个量级——8K 屏横向也只有 7680，多屏横排也远不到 30000，
- * 所以用阈值不会误伤合法的负坐标（主屏在右、副屏在左时 x 确实是负数）。
- */
-const MINIMIZED_SENTINEL = -30000;
-
-/** 是不是 Win32 的最小化哨兵坐标。任一维命中即判否——两维是同时写的 */
-function isMinimizedSentinel(x: number, y: number): boolean {
-    return x <= MINIMIZED_SENTINEL || y <= MINIMIZED_SENTINEL;
-}
-
-/** 把原生返回的一行文本解析成 WindowPlacement；格式不对返回 null。 */
-export function parseBounds(text: string): WindowPlacement | null {
-    const parts = text.trim().split(",");
-    if (parts.length !== 6) {
-        return null;
-    }
-    const nums = parts.map((p) => Number(p));
-    if (nums.some((n) => !Number.isFinite(n))) {
-        return null;
-    }
-    const [x, y, width, height, maximized, dpi] = nums as [number, number, number, number, number, number];
-    // 尺寸为 0 或负数说明窗口还没建好（原生在无窗口时返回 0 长度文本，这里再兜一层）
-    if (width <= 0 || height <= 0 || dpi <= 0) {
-        return null;
-    }
-    // 最小化时原生给的是哨兵坐标，不是真实位置——宁可返回 null 让调用方保留上一次的值
-    if (isMinimizedSentinel(x, y)) {
-        return null;
-    }
-    return { x, y, width, height, maximized: maximized !== 0, dpi };
-}
 
 /**
  * 校验外部来源（磁盘 JSON）里的 placement。

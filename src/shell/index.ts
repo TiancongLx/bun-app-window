@@ -29,11 +29,13 @@ import {
     STATE_FOCUSED,
     STATE_MAXIMIZED,
     STATE_MINIMIZED,
+    parseBounds,
     resizeIndex,
     type NativeLibInfo,
     type ResizeEdge,
     type ShellOptions,
     type StartResult,
+    type WindowRect,
     type WindowState,
 } from "./types";
 
@@ -190,9 +192,31 @@ export type Shell = {
      * 当前窗口矩形，格式 "x,y,w,h,maximized,dpi"（物理像素）。
      * 最大化时返回的是「还原后」的矩形。窗口未启动时返回空串。
      *
-     * 一般不需要直接解析它——用 bun-app-window/state 的 capturePlacement()。
+     * 这是原生那一行文本的**直传**：不解析、不校验，字符串长什么样就什么样。
+     * 要可用的结构就用 `getRect()`——两者读的是同一个原生符号，只是后者把
+     * 同一份文本按判据解析了一遍。要连持久化一起办，用 `bun-app-window/state`
+     * 的 `capturePlacement()`。
      */
     getBounds(): string;
+    /**
+     * 当前窗口矩形的**结构化**读数；读不到或数据不可用时返回 `null`。
+     *
+     * 与 `getBounds()` 的分工：后者是逃生舱（原生原文直传），本方法是正式出口。
+     * 判据与 `parseBounds()` 同源，返回 `null` 的三种情形见那里——不只是
+     * 「窗口没开」，还包括**最小化时的 Win32 哨兵坐标**（形状合法但位置是假的，
+     * 详见 `MINIMIZED_SENTINEL` 的说明）。
+     *
+     * ```ts
+     * const r = shell.getRect();
+     * if (r) console.log(`${r.width}×${r.height} @ ${r.x},${r.y} dpi=${r.dpi}`);
+     * ```
+     *
+     * 为什么不让 `state()` 带矩形：`state()` 是廉价位掩码，加一次 FFI 字符串读
+     * 与解析会改变它的成本模型，而 `WindowState` 的形状变更本身就是破坏性改动。
+     * 需要「最大化标记 + 矩形」一起判时，本方法返回的 `maximized` 与 `x/y/width/height`
+     * 来自**同一次**原生读取，不存在两拍之间的撕裂。
+     */
+    getRect(): WindowRect | null;
     /**
      * 恢复窗口矩形。savedDpi 是保存时的 DPI，用于跨缩放比例换算；
      * 原生侧还会校验矩形是否仍在某块屏上，不在则居中。
@@ -260,6 +284,8 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
 
     // 拷贝式读出：shell_error() 返回共享缓冲区的指针，解锁后可能被别的线程改写
     const lastError = () => readBuffer((p, len) => symbols.shell_error_text(p, len), 512);
+    // 原生那一行 "x,y,w,h,maximized,dpi" 最长也不过几十字节，256 是余量
+    const readBounds = () => readBuffer((p, len) => symbols.shell_get_bounds(p, len), 256);
 
     const shell: Shell = {
         start(): StartResult {
@@ -328,7 +354,9 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
         setBrowserUi: (mask) => symbols.shell_set_browser_ui(mask),
         showContextMenu: (x, y, items) => symbols.shell_show_app_menu(x, y, cstr(items)),
 
-        getBounds: () => readBuffer((p, len) => symbols.shell_get_bounds(p, len), 256),
+        getBounds: readBounds,
+        // 与 getBounds 读同一个原生符号，区别只在「解析过没有」。这条链不能省。
+        getRect: () => parseBounds(readBounds()),
         restoreBounds: (x, y, w, h, savedDpi, maximized) =>
             symbols.shell_restore_bounds(x, y, w, h, savedDpi, maximized ? 1 : 0),
 

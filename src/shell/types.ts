@@ -281,6 +281,97 @@ export type WindowState = {
     dark: boolean;
 };
 
+/**
+ * 窗口矩形的一次读数（物理像素，屏幕坐标）。
+ *
+ * 与 `WindowState` 的分工：`WindowState` 是廉价的位掩码（最大化 / 最小化 / 焦点 /
+ * 深色），不含几何；本类型是几何快照，唯一来源是 `Shell.getRect()` 对原生那行
+ * 文本的解析。
+ *
+ * `maximized` 与 `dpi` 跟矩形来自**同一次**原生读取，所以一起返回：判「这次读到的
+ * 尺寸是不是整屏」时不必再发一次 FFI 问 `state()`，也不会在两拍之间撞上状态变化，
+ * 读出一个 `x` 是旧的、`maximized` 是新的的撕裂值。最大化时四个数值是「还原后」的
+ * 矩形，不是整屏尺寸。
+ */
+export type WindowRect = {
+    /** 物理像素，屏幕坐标。主屏在右、副屏在左时 `x` 真的是负数，属正常 */
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    /** 最大化时 `x/y/width/height` 为「还原后」的矩形 */
+    maximized: boolean;
+    /** 读取时的窗口 DPI；跨缩放比恢复矩形时用它换算 */
+    dpi: number;
+};
+
+/**
+ * Win32 的「窗口已最小化」哨兵坐标。
+ *
+ * 窗口最小化时 `GetWindowRect` 返回的不是真实位置，而是一对哨兵值——实测
+ * `-32000,-32000` 加一个图标尺寸（典型 `314x50`）。它们**看起来完全合法**：
+ * 坐标是整数，尺寸也大于 0，所以只判「非有限 / 尺寸 ≤ 0」的形状校验拦不住。
+ *
+ * 成因在原生 `format_bounds`：它只在 `IsZoomed` 为真时走
+ * `WINDOWPLACEMENT.rcNormalPosition`，最小化时 `IsZoomed` 返回 false，于是落进
+ * `GetWindowRect` 分支——**`IsIconic` 从未被判断**。于是这对哨兵值会一路写成
+ * `{"x":-32000,"y":-32000,"width":314,"height":50}`，下次启动恢复成一个畸形小窗
+ * （实测：666×471，页面被挤到换行并出现滚动条）。
+ *
+ * 阈值取 -30000 而不是精确 -32000：不同 DPI / 主题下这对值会带几个像素偏移。
+ * 真实坐标到不了这个量级——8K 屏横向也只有 7680，多屏横排也远不到 30000，
+ * 所以用阈值不会误伤合法的负坐标（主屏在右、副屏在左时 x 确实是负数）。
+ */
+const MINIMIZED_SENTINEL = -30000;
+
+/**
+ * 是不是 Win32 的最小化哨兵坐标。任一维命中即判否——两维是同时写的。
+ *
+ * 导出是因为**读原生字符串**与**读磁盘 JSON** 两条路都必须判同一对值：
+ * `parseBounds()` 判前者，`./state` 的 `parsePlacement()` 判后者。两条路各抄一份
+ * 阈值，某天调了一处就是其中一条静默失效。
+ */
+export function isMinimizedSentinel(x: number, y: number): boolean {
+    return x <= MINIMIZED_SENTINEL || y <= MINIMIZED_SENTINEL;
+}
+
+/**
+ * 把原生 `shell_get_bounds()` 返回的一行文本解析成 `WindowRect`；格式不对返回 `null`。
+ *
+ * 输入形如 `"x,y,w,h,maximized,dpi"`（物理像素）。三种返回 `null` 的情形都是
+ * **实测会真的出现**的，不是防御性编程：
+ *
+ * | 输入 | 成因 | 为什么不能给个默认值 |
+ * | --- | --- | --- |
+ * | 空串 | 窗口未启动或已销毁：原生 `format_bounds` 里 `!g_hwnd` 直接返回 0 | 编个矩形出来会让调用方以为窗口还在 |
+ * | 尺寸或 DPI 为 0 | 窗口还没建好，同一帧里读到的中途态 | 0 宽高的矩形画不对任何东西，DPI 为 0 也没法换算 |
+ * | 最小化哨兵坐标 | 见 `MINIMIZED_SENTINEL` | 那对数字形状合法，但不是位置 |
+ *
+ * 放在 `types.ts` 而不是 `./state` 的理由是分层：主入口要调用它，而 `./state`
+ * 依赖 `node:fs`（持久化按定义是副作用），主入口不能反过来依赖那个可选件。
+ * 本函数纯计算、零 import，主入口与页面侧都拿得动。
+ */
+export function parseBounds(text: string): WindowRect | null {
+    const parts = text.trim().split(",");
+    if (parts.length !== 6) {
+        return null;
+    }
+    const nums = parts.map((p) => Number(p));
+    if (nums.some((n) => !Number.isFinite(n))) {
+        return null;
+    }
+    const [x, y, width, height, maximized, dpi] = nums as [number, number, number, number, number, number];
+    // 尺寸为 0 或负数说明窗口还没建好（原生在无窗口时返回 0 长度文本，这里再兜一层）
+    if (width <= 0 || height <= 0 || dpi <= 0) {
+        return null;
+    }
+    // 最小化时原生给的是哨兵坐标，不是真实位置——宁可返回 null 让调用方保留上一次的值
+    if (isMinimizedSentinel(x, y)) {
+        return null;
+    }
+    return { x, y, width, height, maximized: maximized !== 0, dpi };
+}
+
 /** 原生库的解析结果 */
 export type NativeLibInfo = {
     path: string;

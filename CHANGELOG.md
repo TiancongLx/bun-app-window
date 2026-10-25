@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`Shell.getRect()` reads the window rectangle as a structure.** `getBounds()` has always returned
+  the native line `"x,y,w,h,maximized,dpi"` as a string, so every consumer had to split and validate
+  it themselves — and the minimised sentinel rectangle (`-32000,-32000` plus an icon-sized box)
+  passes a naive shape check while being a completely fake position. Reading geometry from the host
+  also meant importing `bun-app-window/state` (which pulls in `node:fs`) for a single value.
+
+    `getRect()` returns `{ x, y, width, height, maximized, dpi } | null`, applying the same three
+    rejections as `parseBounds()`: window not started, zero size or DPI, or the sentinel rectangle.
+    All six fields come from one native read, so a caller asking "is this the whole screen?" does not
+    need a second FFI call that could observe a different state.
+
+- **`parseBounds` and `WindowRect` moved to `bun-app-window/types`.** `bun-app-window/state` still
+  re-exports both — `WindowPlacement` is now an alias of `WindowRect`, not a second structurally
+  identical type — so existing imports keep working. The move lets the main entry use the parser
+  without depending on `node:fs`, and both paths expose the same function object.
+
 ## [0.8.0] - 2026-10-25
 
 ### Added

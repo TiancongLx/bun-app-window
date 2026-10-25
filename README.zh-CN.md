@@ -84,28 +84,29 @@ shell.setTitle("Doing work…");
 
 ### 实例方法与属性
 
-| 成员                                                 | 说明                                                                                                                                                         |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `start()`                                            | 创建并启动窗口，返回 `{ rc, error }`。调用后立即返回，UI 消息循环运行于独立原生线程                                                                          |
-| `stop()`                                             | 销毁窗口并释放底层资源，支持幂等重复调用                                                                                                                     |
-| `show()`                                             | 显示窗口。常配合 `FLAG_DEFER_SHOW` 使用，实现在页面渲染就绪后再展现窗口                                                                                      |
-| `isAlive()`                                          | 检测窗口是否存活（注：`state()` 无法区分「尚未启动」与「已销毁」状态）。等窗口关闭请用 `pollEvents()` 的 `CLOSED`，别轮询它                                  |
-| `pollEvents(max?)`                                   | 批量拉取窗口生命周期事件（`STATE` / `CLOSED`），同步、消费式。详见下文「窗口事件」                                                                           |
-| `state()`                                            | 获取当前窗口状态：`{ maximized, minimized, focused, dark, raw }`                                                                                             |
-| `lastError()`                                        | 获取最近一次操作失败的错误信息，无错误时返回空字符串                                                                                                         |
-| `setTitle` / `minimize` / `toggleMaximize` / `close` | 基础窗口控制操作，返回状态码 `rc`                                                                                                                            |
-| `setMinSize(w, h)`                                   | 设置窗口最小尺寸（单位：逻辑像素）                                                                                                                           |
-| `drag()`                                             | 触发原生窗口拖拽（在页面 `pointerdown` 事件中调用，完整保留 Windows 贴边分屏特性）                                                                           |
-| `beginResize(edge)`                                  | 触发原生边框缩放（在页面 `pointermove` 事件中调用，`edge` 取值见 `RESIZE_EDGE.*`）                                                                           |
-| `post(json)`                                         | 宿主向页面单向投递 JSON 消息，异步发送且不等待返回结果                                                                                                       |
-| `setZoom(f)` / `getZoom()`                           | 设置或获取页面缩放比例（有效范围 `0.25`–`3.0`，越界值自动钳制）                                                                                              |
-| `reload()` / `openDevTools()` / `toggleFullscreen()` | 页面重载、打开开发者工具、切换全屏（分别对应 `Ctrl+R` / `F12` / `F11`）                                                                                      |
-| `setFrameless(frameless)` / `isFrameless()`          | 运行时切换窗口形态并读取当前形态。只有**创建时**给了 `FLAG_FRAMELESS` 的窗口能切；带边框起点的窗口返回 `rc=-1`，理由在 `lastError()`。详见下文「窗口标志位」 |
-| `setBrowserUi(mask)`                                 | 禁用指定的浏览器默认行为，传入 `BROWSER_UI_*` 标志位的按位或组合                                                                                             |
-| `showContextMenu(x, y, items)`                       | 在指定屏幕坐标弹出 Win32 原生上下文菜单（详见下文用法）                                                                                                      |
-| `pickFolder(title?)`                                 | 调用原生文件夹选择对话框（同步阻塞当前调用线程；**经 IPC 暴露时务必配 `timeoutMs: 0`**，见下文）                                                             |
-| `libInfo`                                            | 原生动态库解析元数据（包含实际路径、加载来源、SHA-256 校验值）                                                                                               |
-| `symbols`                                            | 底层直通接口：直接访问通过 `dlopen` 导出的底层 C 符号                                                                                                        |
+| 成员                                                 | 说明                                                                                                                                                                                |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start()`                                            | 创建并启动窗口，返回 `{ rc, error }`。调用后立即返回，UI 消息循环运行于独立原生线程                                                                                                 |
+| `stop()`                                             | 销毁窗口并释放底层资源，支持幂等重复调用                                                                                                                                            |
+| `show()`                                             | 显示窗口。常配合 `FLAG_DEFER_SHOW` 使用，实现在页面渲染就绪后再展现窗口                                                                                                             |
+| `isAlive()`                                          | 检测窗口是否存活（注：`state()` 无法区分「尚未启动」与「已销毁」状态）。等窗口关闭请用 `pollEvents()` 的 `CLOSED`，别轮询它                                                         |
+| `pollEvents(max?)`                                   | 批量拉取窗口生命周期事件（`STATE` / `CLOSED`），同步、消费式。详见下文「窗口事件」                                                                                                  |
+| `state()`                                            | 获取当前窗口状态：`{ maximized, minimized, focused, dark, raw }`                                                                                                                    |
+| `getRect()`                                          | 读取当前窗口矩形的结构化读数 `{ x, y, width, height, maximized, dpi }`（物理像素）；读不到或数据不可用时返回 `null`。窗口未启动、尺寸/DPI 为 0、最小化哨兵坐标三种情况都返回 `null` |
+| `lastError()`                                        | 获取最近一次操作失败的错误信息，无错误时返回空字符串                                                                                                                                |
+| `setTitle` / `minimize` / `toggleMaximize` / `close` | 基础窗口控制操作，返回状态码 `rc`                                                                                                                                                   |
+| `setMinSize(w, h)`                                   | 设置窗口最小尺寸（单位：逻辑像素）                                                                                                                                                  |
+| `drag()`                                             | 触发原生窗口拖拽（在页面 `pointerdown` 事件中调用，完整保留 Windows 贴边分屏特性）                                                                                                  |
+| `beginResize(edge)`                                  | 触发原生边框缩放（在页面 `pointermove` 事件中调用，`edge` 取值见 `RESIZE_EDGE.*`）                                                                                                  |
+| `post(json)`                                         | 宿主向页面单向投递 JSON 消息，异步发送且不等待返回结果                                                                                                                              |
+| `setZoom(f)` / `getZoom()`                           | 设置或获取页面缩放比例（有效范围 `0.25`–`3.0`，越界值自动钳制）                                                                                                                     |
+| `reload()` / `openDevTools()` / `toggleFullscreen()` | 页面重载、打开开发者工具、切换全屏（分别对应 `Ctrl+R` / `F12` / `F11`）                                                                                                             |
+| `setFrameless(frameless)` / `isFrameless()`          | 运行时切换窗口形态并读取当前形态。只有**创建时**给了 `FLAG_FRAMELESS` 的窗口能切；带边框起点的窗口返回 `rc=-1`，理由在 `lastError()`。详见下文「窗口标志位」                        |
+| `setBrowserUi(mask)`                                 | 禁用指定的浏览器默认行为，传入 `BROWSER_UI_*` 标志位的按位或组合                                                                                                                    |
+| `showContextMenu(x, y, items)`                       | 在指定屏幕坐标弹出 Win32 原生上下文菜单（详见下文用法）                                                                                                                             |
+| `pickFolder(title?)`                                 | 调用原生文件夹选择对话框（同步阻塞当前调用线程；**经 IPC 暴露时务必配 `timeoutMs: 0`**，见下文）                                                                                    |
+| `libInfo`                                            | 原生动态库解析元数据（包含实际路径、加载来源、SHA-256 校验值）                                                                                                                      |
+| `symbols`                                            | 底层直通接口：直接访问通过 `dlopen` 导出的底层 C 符号                                                                                                                               |
 
 ### 窗口标志位（Flags）
 
