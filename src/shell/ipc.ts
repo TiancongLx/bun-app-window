@@ -34,8 +34,7 @@ export type IpcRequestMessage = {
 };
 
 export type IpcReplyMessage =
-    | { t: "ipc:res"; id: number; ok: true; r: unknown }
-    | { t: "ipc:res"; id: number; ok: false; e: IpcErrorPayload };
+    { t: "ipc:res"; id: number; ok: true; r: unknown } | { t: "ipc:res"; id: number; ok: false; e: IpcErrorPayload };
 
 export type IpcEventMessage = {
     t: "ipc:evt";
@@ -123,12 +122,7 @@ function isRequest(v: unknown): v is IpcRequestMessage {
         return false;
     }
     const o = v as Record<string, unknown>;
-    return (
-        o.t === "ipc:req" &&
-        typeof o.id === "number" &&
-        typeof o.m === "string" &&
-        Array.isArray(o.a)
-    );
+    return o.t === "ipc:req" && typeof o.id === "number" && typeof o.m === "string" && Array.isArray(o.a);
 }
 
 /**
@@ -220,9 +214,7 @@ export function createIpcServer(opts: IpcServerOptions): IpcServer {
             // hasOwnProperty 而非 `service[m]` 直接取：否则 "constructor" /
             // "__proto__" / "toString" 这类名字会命中原型链上的函数，
             // 等于把一个未知形状的东西当服务方法调用。
-            const fn = Object.prototype.hasOwnProperty.call(service, parsed.m)
-                ? service[parsed.m]
-                : undefined;
+            const fn = Object.prototype.hasOwnProperty.call(service, parsed.m) ? service[parsed.m] : undefined;
 
             if (!fn) {
                 send(peer, {
@@ -306,24 +298,21 @@ export type Channel = {
 
 /** 把方法表映射成「返回 Promise 的同名方法」 */
 export type ClientMethods<T> = {
-    [K in keyof T]: T[K] extends (...args: infer A) => infer R
-        ? (...args: A) => Promise<Awaited<R>>
-        : never;
+    [K in keyof T]: T[K] extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never;
 };
 
-export type IpcClient<T, E extends Record<string, unknown> = Record<string, never>> =
-    ClientMethods<T> & {
-        /** 订阅宿主推送的事件。返回取消订阅函数 */
-        on<K extends keyof E & string>(event: K, handler: (payload: E[K]) => void): () => void;
-        /** 取消订阅 */
-        off(event: string, handler: (payload: unknown) => void): void;
-        /** 关闭通道。未完成的调用会被 reject */
-        close(): void;
-        /** 通道当前是否可用 */
-        readonly connected: boolean;
-        /** 尚未收到回复的调用数 */
-        readonly pending: number;
-    };
+export type IpcClient<T, E extends Record<string, unknown> = Record<string, never>> = ClientMethods<T> & {
+    /** 订阅宿主推送的事件。返回取消订阅函数 */
+    on<K extends keyof E & string>(event: K, handler: (payload: E[K]) => void): () => void;
+    /** 取消订阅 */
+    off(event: string, handler: (payload: unknown) => void): void;
+    /** 关闭通道。未完成的调用会被 reject */
+    close(): void;
+    /** 通道当前是否可用 */
+    readonly connected: boolean;
+    /** 尚未收到回复的调用数 */
+    readonly pending: number;
+};
 
 export type ConnectOptions = {
     /** 已建立的通道。给了就不再自己连 */
@@ -459,9 +448,7 @@ export async function connect<T, E extends Record<string, unknown> = Record<stri
 ): Promise<IpcClient<T, E>> {
     const timeoutMs = opts.timeoutMs ?? 30000;
 
-    const channel =
-        opts.channel ??
-        (await webSocketChannel(opts.url ?? deriveUrl(opts.token)));
+    const channel = opts.channel ?? (await webSocketChannel(opts.url ?? deriveUrl(opts.token)));
 
     const pending = new Map<number, Pending>();
     const listeners = new Map<string, Set<(payload: unknown) => void>>();

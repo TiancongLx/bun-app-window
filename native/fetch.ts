@@ -103,11 +103,7 @@ export type SdkPlan =
  *   3. 头文件缺、nupkg 不在    → install + download
  *   4. 头文件缺、nupkg 在      → install，离线解压
  */
-export function decideSdk(opts: {
-    forceDownload: boolean;
-    headerPresent: boolean;
-    pkgPresent: boolean;
-}): SdkPlan {
+export function decideSdk(opts: { forceDownload: boolean; headerPresent: boolean; pkgPresent: boolean }): SdkPlan {
     if (opts.forceDownload) {
         return { kind: "install", download: true };
     }
@@ -147,10 +143,7 @@ async function run(argv: string[], cwd?: string): Promise<number> {
         stdout: "pipe",
         stderr: "pipe",
     });
-    const [out, err] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-    ]);
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
     if (out.trim()) {
         process.stdout.write(out.endsWith("\n") ? out : `${out}\n`);

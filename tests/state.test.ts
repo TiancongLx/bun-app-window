@@ -88,9 +88,7 @@ function fakePump(): { pump: EventPump; emit: (e: WindowEvent) => void } {
 
 /** 只提供 getBounds 的壳替身（pollEvents 由注入的泵取代） */
 function fakeShell(read: () => string): Parameters<typeof attachPlacementStore>[0] {
-    return { getBounds: read, pollEvents: () => [] } as unknown as Parameters<
-        typeof attachPlacementStore
-    >[0];
+    return { getBounds: read, pollEvents: () => [] } as unknown as Parameters<typeof attachPlacementStore>[0];
 }
 
 // ---- parseBounds：原生文本 → 结构 ----
@@ -238,10 +236,14 @@ test("attachPlacementStore 首次写一次，静止时不再重复写，变化�
     const text = { value: "100,200,800,600,0,96" };
     const { pump, emit } = fakePump();
 
-    const store = attachPlacementStore(fakeShell(() => text.value), file, {
-        debounceMs: 10,
-        events: pump,
-    });
+    const store = attachPlacementStore(
+        fakeShell(() => text.value),
+        file,
+        {
+            debounceMs: 10,
+            events: pump,
+        },
+    );
 
     // 首次快照应该落盘一次：程序若在用户操作前崩溃，也还有初始位置可恢复
     await store.flush();
@@ -270,10 +272,14 @@ test("attachPlacementStore 首次写一次，静止时不再重复写，变化�
 test("attachPlacementStore 忽略解析不出意义的读数（窗口建好前）", async () => {
     const file = join(tmpDir(), "zero.json");
     const { pump, emit } = fakePump();
-    const store = attachPlacementStore(fakeShell(() => "0,0,0,0,0,0"), file, {
-        debounceMs: 10,
-        events: pump,
-    });
+    const store = attachPlacementStore(
+        fakeShell(() => "0,0,0,0,0,0"),
+        file,
+        {
+            debounceMs: 10,
+            events: pump,
+        },
+    );
     emit(stateEvent(1));
     await Bun.sleep(40);
     store.dispose();
@@ -295,10 +301,14 @@ test("attachPlacementStore 在最小化读数到达时保留上一次真实位�
     const text = { value: "300,400,900,700,0,96" };
     const { pump, emit } = fakePump();
 
-    const store = attachPlacementStore(fakeShell(() => text.value), file, {
-        debounceMs: 10,
-        events: pump,
-    });
+    const store = attachPlacementStore(
+        fakeShell(() => text.value),
+        file,
+        {
+            debounceMs: 10,
+            events: pump,
+        },
+    );
     await store.flush();
     expect((JSON.parse(readFileSync(file, "utf8")) as WindowPlacement).x).toBe(300);
 
@@ -328,10 +338,14 @@ test("getBounds 变空之后，已取到的快照仍会落盘", async () => {
     const text = { value: "10,20,700,500,0,96" };
     const { pump, emit } = fakePump();
 
-    const store = attachPlacementStore(fakeShell(() => text.value), file, {
-        debounceMs: 30,
-        events: pump,
-    });
+    const store = attachPlacementStore(
+        fakeShell(() => text.value),
+        file,
+        {
+            debounceMs: 30,
+            events: pump,
+        },
+    );
 
     text.value = "40,50,900,700,0,96";
     emit(stateEvent(2)); // 快照在这一刻取到真实值
@@ -348,10 +362,14 @@ test("dispose 之后不再写盘", async () => {
     const file = join(tmpDir(), "disposed.json");
     const text = { value: "1,2,300,200,0,96" };
     const { pump, emit } = fakePump();
-    const store = attachPlacementStore(fakeShell(() => text.value), file, {
-        debounceMs: 10,
-        events: pump,
-    });
+    const store = attachPlacementStore(
+        fakeShell(() => text.value),
+        file,
+        {
+            debounceMs: 10,
+            events: pump,
+        },
+    );
     await store.flush();
     store.dispose();
 

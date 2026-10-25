@@ -84,9 +84,7 @@ for (const name of README_FILES) {
  * 用 `bun pm pack` 而不是 `bun publish --dry-run`：后者会读凭据、打网络，
  * 而判据只关心本地字节数。
  */
-async function measureTarball(): Promise<
-    { ok: true; size: DeclaredPackageSize } | { ok: false; error: string }
-> {
+async function measureTarball(): Promise<{ ok: true; size: DeclaredPackageSize } | { ok: false; error: string }> {
     const work = join(tmpdir(), `baw-sentinel-${Date.now()}`);
     const src = join(work, "src");
     const out = join(work, "out");
@@ -206,10 +204,7 @@ checks.push({
         if (opts.allowDirty) return { ok: true, detail: "(--allow-dirty 跳过)" };
         const st = Bun.spawnSync(["git.exe", "-C", ROOT, "status", "--porcelain", "-s"]);
         if (st.exitCode !== 0) return { ok: false, detail: `git status 失败：${st.stderr.toString()}` };
-        const dirty = st.stdout
-            .toString()
-            .split(/\r?\n/)
-            .filter(Boolean);
+        const dirty = st.stdout.toString().split(/\r?\n/).filter(Boolean);
         return {
             ok: dirty.length === 0,
             detail: dirty.length === 0 ? "clean" : `${dirty.length} 处未提交：${dirty.slice(0, 4).join(" | ")}`,

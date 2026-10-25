@@ -194,9 +194,7 @@ test("resizeIndex 覆盖全部 8 个合法边，并对非法值返回 -1", () =>
 test("ZOOM_LADDER 与原生 kZoomLadder 逐档一致", () => {
     // 14 档，首尾就是原生 apply_zoom 的钳制边界
     expect(ZOOM_LADDER.length).toBe(14);
-    expect([...ZOOM_LADDER]).toEqual([
-        0.25, 0.33, 0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
-    ]);
+    expect([...ZOOM_LADDER]).toEqual([0.25, 0.33, 0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]);
 });
 
 test("ZOOM_MIN / ZOOM_MAX 就是阶梯首尾，且严格递增", () => {

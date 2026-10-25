@@ -77,11 +77,7 @@ describe("回归：入口守卫不能恒为假", () => {
     });
 
     test("三个真实入口在同一 argv 下判定一致", () => {
-        const entries = [
-            resolve("scripts/gate.ts"),
-            resolve("scripts/verify-pack.ts"),
-            resolve("native/fetch.ts"),
-        ];
+        const entries = [resolve("scripts/gate.ts"), resolve("scripts/verify-pack.ts"), resolve("native/fetch.ts")];
         for (const entry of entries) {
             // 该文件自己作为 argv → 是入口
             expect(isEntrypoint(false, entry, entry)).toBe(true);

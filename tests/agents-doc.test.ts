@@ -257,7 +257,10 @@ guard("文档里的脚本路径引用", () => {
     const DELETED = new Map<string, string>([
         ["scripts/capture-window.ps1", "2026-10-20 删除（两个替代品制造歧义）"],
         ["scripts/capture.ps1", "同上（CopyFromScreen，受前台遮挡影响）"],
-        ["tools/capture-window.ts", "截图层迁至 echoes-of-the-eye（原 agent-eyes，2026-10-21）；pitfalls 里的实测数字仍引自它"],
+        [
+            "tools/capture-window.ts",
+            "截图层迁至 echoes-of-the-eye（原 agent-eyes，2026-10-21）；pitfalls 里的实测数字仍引自它",
+        ],
         ["native/build-pack.ps1", "迁为 native/build-pack.ts（ADR 0014）"],
         ["native/build.ps1", "迁为 native/build.ts"],
         ["native/fetch.ps1", "迁为 native/fetch.ts"],
@@ -386,9 +389,7 @@ describe("pitfalls 编号与章节归属", () => {
             const prev = seq[k - 1];
             const cur = seq[k];
             if (prev && cur && cur.n < prev.n) {
-                outOfOrder.push(
-                    `L${cur.line} 编号 ${cur.label} 出现在 L${prev.line} 的 ${prev.label} 之后`,
-                );
+                outOfOrder.push(`L${cur.line} 编号 ${cur.label} 出现在 L${prev.line} 的 ${prev.label} 之后`);
             }
         }
         expect(outOfOrder).toEqual([]);

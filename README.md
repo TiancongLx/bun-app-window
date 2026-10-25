@@ -26,13 +26,13 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 
 Before adopting this package, please review the following architectural constraints and trade-offs:
 
-| Constraint | Implication |
-| --- | --- |
-| Windows x64 only | Enforced via `os` and `cpu` fields in `package.json` (the platform-neutral package name is reserved for future expansion). A prebuilt `libshell.dll` is shipped in the package; no install-time compilation is required |
-| Bun runtime required | Ships raw TypeScript source files and requires Bun >= 1.4.4. While Node.js can install the package, it cannot execute it |
+| Constraint                           | Implication                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows x64 only                     | Enforced via `os` and `cpu` fields in `package.json` (the platform-neutral package name is reserved for future expansion). A prebuilt `libshell.dll` is shipped in the package; no install-time compilation is required                                                                                               |
+| Bun runtime required                 | Ships raw TypeScript source files and requires Bun >= 1.4.4. While Node.js can install the package, it cannot execute it                                                                                                                                                                                              |
 | TypeScript >= 7.0.2 to type-check it | The API is designed and checked on TypeScript 7.0.2, pinned exactly in `devDependencies`; no compatibility work is done for older compilers. Above 7.0.2 the outcome is unasserted — `bun-types` only opens its `typesVersions: ">= 7.1"` gate there, which changes what a `with { type: "text" }` import resolves to |
-| Type-checking needs `@types/bun` | Because the package ships `.ts` sources, your own `bun check` compiles them too. Add `bun add -d @types/bun`; without it the checker reports `TS2868: Cannot find name 'Bun'` from inside `node_modules` |
-| Built on `bun:ffi` | `bun:ffi` is marked as experimental in Bun. While Bun recommends Node-API for production stability, this library chooses `bun:ffi` to achieve a zero-dependency footprint |
+| Type-checking needs `@types/bun`     | Because the package ships `.ts` sources, your own `bun check` compiles them too. Add `bun add -d @types/bun`; without it the checker reports `TS2868: Cannot find name 'Bun'` from inside `node_modules`                                                                                                              |
+| Built on `bun:ffi`                   | `bun:ffi` is marked as experimental in Bun. While Bun recommends Node-API for production stability, this library chooses `bun:ffi` to achieve a zero-dependency footprint                                                                                                                                             |
 
 Runtime prerequisites and non-goals:
 
@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### What the tarball contains
 
-The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 22 files, 0.50 MB packed (1.44 MB unpacked). The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
+The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript sources — 22 files, 0.50 MB packed (1.47 MB unpacked). The native C++ layer (`native/`) and the vendored upstream headers (`vendor/`) are **not** shipped: they are only needed to rebuild `libshell.dll`, and rebuilding requires cloning the repository. `bun run build:native` and `build:exe` are therefore repository-only scripts that do nothing useful inside `node_modules`.
 
 ## Quick Start
 
@@ -56,22 +56,23 @@ The published package holds the prebuilt `dist/libshell.dll` plus the TypeScript
 import { openShell, serveOnSafePort, FLAG_FRAMELESS, FLAG_CENTER } from "bun-app-window";
 
 const server = serveOnSafePort({
-  fetch: () => new Response("<h1>Hello</h1>", {
-    headers: { "content-type": "text/html; charset=utf-8" },
-  }),
+    fetch: () =>
+        new Response("<h1>Hello</h1>", {
+            headers: { "content-type": "text/html; charset=utf-8" },
+        }),
 });
 
 const shell = await openShell({
-  url: `http://127.0.0.1:${server.port}`,
-  title: "My App",
-  width: 1000,
-  height: 680,
-  flags: FLAG_FRAMELESS | FLAG_CENTER,
-  minWidth: 480,
-  minHeight: 320,
+    url: `http://127.0.0.1:${server.port}`,
+    title: "My App",
+    width: 1000,
+    height: 680,
+    flags: FLAG_FRAMELESS | FLAG_CENTER,
+    minWidth: 480,
+    minHeight: 320,
 });
 
-shell.post(JSON.stringify({ t: "ready" }));   // Host -> Page one-way message
+shell.post(JSON.stringify({ t: "ready" })); // Host -> Page one-way message
 shell.setTitle("Doing work…");
 ```
 
@@ -85,45 +86,45 @@ returns a stale message that looks like a fresh failure.
 
 ### Instance Methods & Properties
 
-| Member | Description |
-| --- | --- |
-| `start()` | Opens the window and returns `{ rc, error }`. Returns immediately while the UI message loop runs on a dedicated native thread |
-| `stop()` | Destroys the window and releases native resources. Safe to call multiple times (idempotent) |
-| `show()` | Reveals the window. Typically paired with `FLAG_DEFER_SHOW` to display the window only after the web UI is ready |
-| `isAlive()` | Checks whether the native window still exists (unlike `state()`, which cannot distinguish between unstarted and destroyed states). To wait for close, use `pollEvents()` and watch for `CLOSED` instead of polling this |
-| `pollEvents(max?)` | Drains window lifecycle events (`STATE` / `CLOSED`); synchronous and consuming. See "Window events" below |
-| `state()` | Returns current window state: `{ maximized, minimized, focused, dark, raw }` |
-| `lastError()` | Returns the most recent failure message, or an empty string if no error occurred |
-| `setTitle` / `minimize` / `toggleMaximize` / `close` | Standard window control operations; each returns a status code `rc` |
-| `setMinSize(w, h)` | Sets the minimum window dimensions in logical pixels |
-| `drag()` | Initiates native window dragging from a page `pointerdown` event (preserves Windows Snap Layouts) |
-| `beginResize(edge)` | Initiates native border resizing from a page `pointermove` event (`edge` uses `RESIZE_EDGE.*` constants) |
-| `post(json)` | Sends a fire-and-forget JSON message from the host to the web page |
-| `setZoom(f)` / `getZoom()` | Gets or sets the page zoom factor (clamped automatically to `0.25`–`3.0`) |
-| `reload()` / `openDevTools()` / `toggleFullscreen()` | Equivalent to `Ctrl+R`, `F12`, and `F11` respectively |
-| `setFrameless(frameless)` / `isFrameless()` | Switches the window form at runtime and reports the current one. Only a window **created** with `FLAG_FRAMELESS` can switch; a framed-created window refuses with `rc=-1` and a reason in `lastError()`. See "Window Flags" below |
-| `setBrowserUi(mask)` | Disables specific default browser behaviors using a bitwise OR of `BROWSER_UI_*` flags |
-| `showContextMenu(x, y, items)` | Displays a native Win32 context menu at the specified screen coordinates (see below) |
-| `pickFolder(title?)` | Opens a native folder selection dialog (synchronously blocks the calling thread; **when exposed over IPC, pair it with `timeoutMs: 0`**, see below) |
-| `libInfo` | Metadata of the resolved native library (file path, resolution source, SHA-256 hash) |
-| `symbols` | Escape hatch providing direct access to the raw `dlopen` FFI symbols |
+| Member                                               | Description                                                                                                                                                                                                                       |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start()`                                            | Opens the window and returns `{ rc, error }`. Returns immediately while the UI message loop runs on a dedicated native thread                                                                                                     |
+| `stop()`                                             | Destroys the window and releases native resources. Safe to call multiple times (idempotent)                                                                                                                                       |
+| `show()`                                             | Reveals the window. Typically paired with `FLAG_DEFER_SHOW` to display the window only after the web UI is ready                                                                                                                  |
+| `isAlive()`                                          | Checks whether the native window still exists (unlike `state()`, which cannot distinguish between unstarted and destroyed states). To wait for close, use `pollEvents()` and watch for `CLOSED` instead of polling this           |
+| `pollEvents(max?)`                                   | Drains window lifecycle events (`STATE` / `CLOSED`); synchronous and consuming. See "Window events" below                                                                                                                         |
+| `state()`                                            | Returns current window state: `{ maximized, minimized, focused, dark, raw }`                                                                                                                                                      |
+| `lastError()`                                        | Returns the most recent failure message, or an empty string if no error occurred                                                                                                                                                  |
+| `setTitle` / `minimize` / `toggleMaximize` / `close` | Standard window control operations; each returns a status code `rc`                                                                                                                                                               |
+| `setMinSize(w, h)`                                   | Sets the minimum window dimensions in logical pixels                                                                                                                                                                              |
+| `drag()`                                             | Initiates native window dragging from a page `pointerdown` event (preserves Windows Snap Layouts)                                                                                                                                 |
+| `beginResize(edge)`                                  | Initiates native border resizing from a page `pointermove` event (`edge` uses `RESIZE_EDGE.*` constants)                                                                                                                          |
+| `post(json)`                                         | Sends a fire-and-forget JSON message from the host to the web page                                                                                                                                                                |
+| `setZoom(f)` / `getZoom()`                           | Gets or sets the page zoom factor (clamped automatically to `0.25`–`3.0`)                                                                                                                                                         |
+| `reload()` / `openDevTools()` / `toggleFullscreen()` | Equivalent to `Ctrl+R`, `F12`, and `F11` respectively                                                                                                                                                                             |
+| `setFrameless(frameless)` / `isFrameless()`          | Switches the window form at runtime and reports the current one. Only a window **created** with `FLAG_FRAMELESS` can switch; a framed-created window refuses with `rc=-1` and a reason in `lastError()`. See "Window Flags" below |
+| `setBrowserUi(mask)`                                 | Disables specific default browser behaviors using a bitwise OR of `BROWSER_UI_*` flags                                                                                                                                            |
+| `showContextMenu(x, y, items)`                       | Displays a native Win32 context menu at the specified screen coordinates (see below)                                                                                                                                              |
+| `pickFolder(title?)`                                 | Opens a native folder selection dialog (synchronously blocks the calling thread; **when exposed over IPC, pair it with `timeoutMs: 0`**, see below)                                                                               |
+| `libInfo`                                            | Metadata of the resolved native library (file path, resolution source, SHA-256 hash)                                                                                                                                              |
+| `symbols`                                            | Escape hatch providing direct access to the raw `dlopen` FFI symbols                                                                                                                                                              |
 
 ### Window Flags
 
 Combine via bitwise OR (`|`) and pass to `opts.flags`:
 
-| Flag | Description |
-| --- | --- |
-| `FLAG_FRAMELESS` | Creates a frameless window without the default system title bar, delegating title bar rendering to the web UI. A window created this way can switch back to framed at runtime with `setFrameless(false)` |
-| `FLAG_RESIZABLE` | Allows user resizing |
-| `FLAG_CENTER` | Centers the window within the active monitor work area on startup (works in both standard and frameless modes) |
-| `FLAG_TOPMOST` | Keeps the window always on top |
-| `FLAG_DEFER_SHOW` | Creates the window hidden initially until `show()` is explicitly called |
-| `FLAG_ACCEPT_DROP` | Enables native file and folder drag-and-drop from Windows Explorer |
-| `FLAG_START_MAXIMIZED` | Opens the window directly in a maximized state without an intermediate normal-sized frame flash |
-| `FLAG_ALLOW_EXTERNAL_NAV` | Opts out of external-navigation interception — for apps that genuinely are browsers |
-| `FLAG_TITLEBAR_RESERVE` | In frameless mode, shifts the web content down by one title-bar height so the top strip belongs to the native window. Superseded by `FLAG_NATIVE_CAPTIONS`: the caption hit zone is pinned to client `y ∈ [0, 32)`, so this variant puts the page's own title bar 32 px away from where clicks are actually routed |
-| `FLAG_NATIVE_CAPTIONS` | In frameless mode, draws the three caption buttons on a layered child window owned by the shell and answers `HTMAXBUTTON` there. This is the only way Snap Layouts can trigger: the WebView2 render child lives in another process and always returns `HTCLIENT`. Pair it with `mountTitleBar({ captions: "native" })` so the page reserves `46 × 3` instead of drawing its own buttons |
+| Flag                      | Description                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FLAG_FRAMELESS`          | Creates a frameless window without the default system title bar, delegating title bar rendering to the web UI. A window created this way can switch back to framed at runtime with `setFrameless(false)`                                                                                                                                                                                |
+| `FLAG_RESIZABLE`          | Allows user resizing                                                                                                                                                                                                                                                                                                                                                                    |
+| `FLAG_CENTER`             | Centers the window within the active monitor work area on startup (works in both standard and frameless modes)                                                                                                                                                                                                                                                                          |
+| `FLAG_TOPMOST`            | Keeps the window always on top                                                                                                                                                                                                                                                                                                                                                          |
+| `FLAG_DEFER_SHOW`         | Creates the window hidden initially until `show()` is explicitly called                                                                                                                                                                                                                                                                                                                 |
+| `FLAG_ACCEPT_DROP`        | Enables native file and folder drag-and-drop from Windows Explorer                                                                                                                                                                                                                                                                                                                      |
+| `FLAG_START_MAXIMIZED`    | Opens the window directly in a maximized state without an intermediate normal-sized frame flash                                                                                                                                                                                                                                                                                         |
+| `FLAG_ALLOW_EXTERNAL_NAV` | Opts out of external-navigation interception — for apps that genuinely are browsers                                                                                                                                                                                                                                                                                                     |
+| `FLAG_TITLEBAR_RESERVE`   | In frameless mode, shifts the web content down by one title-bar height so the top strip belongs to the native window. Superseded by `FLAG_NATIVE_CAPTIONS`: the caption hit zone is pinned to client `y ∈ [0, 32)`, so this variant puts the page's own title bar 32 px away from where clicks are actually routed                                                                      |
+| `FLAG_NATIVE_CAPTIONS`    | In frameless mode, draws the three caption buttons on a layered child window owned by the shell and answers `HTMAXBUTTON` there. This is the only way Snap Layouts can trigger: the WebView2 render child lives in another process and always returns `HTCLIENT`. Pair it with `mountTitleBar({ captions: "native" })` so the page reserves `46 × 3` instead of drawing its own buttons |
 
 ### External navigation is blocked by default
 
@@ -170,18 +171,18 @@ import htmlText from "./index.html" with { type: "text" };
 const html = htmlText as unknown as string;
 
 const app = await createApp({
-  html,
-  title: "My App",
-  flags: FLAG_FRAMELESS,          // opt in to a self-drawn title bar
-  browserUi: BROWSER_UI_ALL,
-  service: {
-    greet: (name: string) => `hi ${name}`,
-    pickFolder: () => app.shell.pickFolder(),
-  },
+    html,
+    title: "My App",
+    flags: FLAG_FRAMELESS, // opt in to a self-drawn title bar
+    browserUi: BROWSER_UI_ALL,
+    service: {
+        greet: (name: string) => `hi ${name}`,
+        pickFolder: () => app.shell.pickFolder(),
+    },
 });
 
-await app.wait();                  // resolves when the window closes
-await app.stop();                  // releases the event pump and the server; idempotent
+await app.wait(); // resolves when the window closes
+await app.stop(); // releases the event pump and the server; idempotent
 ```
 
 Pass `page` to serve a bundled page script without writing a route yourself. `createApp` answers
@@ -209,7 +210,7 @@ Two more things on `App` that save a call and a subpath import:
 ```ts
 // page.ts — inside index.html's bundle
 import { connect } from "bun-app-window/ipc";
-const api = await connect();       // token comes from the page URL's ?t=
+const api = await connect(); // token comes from the page URL's ?t=
 await api.greet("Ada");
 ```
 
@@ -261,7 +262,7 @@ Notes:
 - **Not re-exported from the main entry.** It is a subpath like `./state` and `./ipc`. It imports
   `openShell` from `./index`; exporting it from `index.ts` would make that a cycle.
 
-This is **not** a replacement for `Bun.WebView`. That one is a *headless* browser for automation,
+This is **not** a replacement for `Bun.WebView`. That one is a _headless_ browser for automation,
 testing and scraping — it has no window, and it can only screenshot its own page. This package
 draws a real desktop window with a system title bar, DPI awareness, snap layouts and taskbar
 identity. The two do not compete.
@@ -281,31 +282,33 @@ export type Events = { windowState: { maximized: boolean } };
 import { createIpcServer } from "bun-app-window/ipc";
 
 const ipc = createIpcServer({
-  service: { greet: (name: string) => `Hello ${name}` },
+    service: { greet: (name: string) => `Hello ${name}` },
 });
 
 serveOnSafePort({
-  fetch(req) { /* Serve assets & authenticate */ },
-  websocket: {
-    open: (ws) => ipc.attach(ws),
-    message: (ws, raw) => ipc.handle(ws, raw),
-    close: (ws) => ipc.detach(ws),
-  },
+    fetch(req) {
+        /* Serve assets & authenticate */
+    },
+    websocket: {
+        open: (ws) => ipc.attach(ws),
+        message: (ws, raw) => ipc.handle(ws, raw),
+        close: (ws) => ipc.detach(ws),
+    },
 });
 
-ipc.emit("windowState", { maximized: false });   // Push event to connected pages
+ipc.emit("windowState", { maximized: false }); // Push event to connected pages
 ```
 
 #### Delivering state to late connections
 
-A page loads *after* the window is created. Anything the host emits between `createApp` returning
+A page loads _after_ the window is created. Anything the host emits between `createApp` returning
 and the page's WebSocket opening is delivered to zero connections and is not replayed — so a page
 that reads its initial state from events alone stays empty, with no error on either side.
 
 Mark state-shaped events as sticky and the server replays the last payload to each new connection:
 
 ```ts
-ipc.emit("windowState", { maximized: false }, { sticky: true });   // Replayed on attach()
+ipc.emit("windowState", { maximized: false }, { sticky: true }); // Replayed on attach()
 ```
 
 Sticky is **opt-in** and keeps one payload per event name, not a history. Events that are
@@ -318,7 +321,7 @@ import { connect } from "bun-app-window/ipc";
 import type { Api, Events } from "./api";
 
 const api = await connect<Api, Events>();
-await api.greet("Ada");                        // Inferred return type: string
+await api.greet("Ada"); // Inferred return type: string
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
@@ -349,13 +352,13 @@ The client is a `Proxy`: a handful of names resolve to the client itself and nev
 method. If your service exposes a method under one of these names, **the server-side method becomes
 unreachable** — the page calls the client's own member instead, and neither end reports an error.
 
-| Name | What the page actually gets |
-| --- | --- |
-| `on` / `off` | Event subscription helpers |
-| `close()` | Closes the WebSocket channel — every later call is rejected |
-| `connected` | `boolean`: whether the channel is open |
-| `pending` | `number` of calls still awaiting a reply |
-| `then` | `undefined`, so `await client` cannot hang on a never-resolving thenable |
+| Name         | What the page actually gets                                              |
+| ------------ | ------------------------------------------------------------------------ |
+| `on` / `off` | Event subscription helpers                                               |
+| `close()`    | Closes the WebSocket channel — every later call is rejected              |
+| `connected`  | `boolean`: whether the channel is open                                   |
+| `pending`    | `number` of calls still awaiting a reply                                 |
+| `then`       | `undefined`, so `await client` cannot hang on a never-resolving thenable |
 
 Symbol keys are reserved as well. Pick a different service name (`winClose` instead of `close`) and
 map it back on the page side — see the title bar section below.
@@ -374,12 +377,12 @@ so the host exposes `winClose` and the page maps it back:
 ```ts
 // Host — flat service; `close` is reserved by the IPC client
 createIpcServer({
-  service: {
-    minimize: () => shell.minimize(),
-    toggleMaximize: () => shell.toggleMaximize(),
-    winClose: () => shell.close(),
-    drag: () => shell.drag(),
-  },
+    service: {
+        minimize: () => shell.minimize(),
+        toggleMaximize: () => shell.toggleMaximize(),
+        winClose: () => shell.close(),
+        drag: () => shell.drag(),
+    },
 });
 ```
 
@@ -388,14 +391,14 @@ createIpcServer({
 import { mountTitleBar, bridgeFromWindowService } from "bun-app-window/titlebar";
 
 const bar = mountTitleBar({
-  title: "My App",
-  icon: "/icon.svg",
-  bridge: bridgeFromWindowService({
-    minimize: () => api.minimize(),
-    toggleMaximize: () => api.toggleMaximize(),
-    close: () => api.winClose(),          // mapped back to the bridge's own name
-    drag: () => api.drag(),
-  }),
+    title: "My App",
+    icon: "/icon.svg",
+    bridge: bridgeFromWindowService({
+        minimize: () => api.minimize(),
+        toggleMaximize: () => api.toggleMaximize(),
+        close: () => api.winClose(), // mapped back to the bridge's own name
+        drag: () => api.drag(),
+    }),
 });
 
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
@@ -423,7 +426,7 @@ if (saved) restorePlacement(shell, saved);
 
 shell.show();
 
-const store = attachPlacementStore(shell, FILE);   // Subscribes to window events; writes once the drag settles
+const store = attachPlacementStore(shell, FILE); // Subscribes to window events; writes once the drag settles
 process.on("beforeExit", () => store.flush());
 ```
 
@@ -461,8 +464,10 @@ event stream directly:
 import { EVENT_CLOSED, EVENT_STATE } from "bun-app-window/events";
 
 for (const e of shell.pollEvents()) {
-  if (e.type === EVENT_CLOSED) break;          // window is gone, the native singleton is released
-  if (e.type === EVENT_STATE && e.maximized) { /* ... */ }
+    if (e.type === EVENT_CLOSED) break; // window is gone, the native singleton is released
+    if (e.type === EVENT_STATE && e.maximized) {
+        /* ... */
+    }
 }
 ```
 
@@ -474,7 +479,9 @@ exactly one consumer. For a fixed cadence plus multi-subscriber fan-out, use
 import { EVENT_CLOSED, attachEventPump } from "bun-app-window/events";
 
 const pump = attachEventPump(shell, { intervalMs: 16 });
-pump.on((e) => { if (e.type === EVENT_CLOSED) pump.stop(); });
+pump.on((e) => {
+    if (e.type === EVENT_CLOSED) pump.stop();
+});
 pump.onGap((missing) => console.warn(`missed ${missing} events`));
 ```
 
@@ -496,8 +503,8 @@ Exposes internal metrics and hit-testing utilities. Note: This module is exclude
 import { debugOf } from "bun-app-window/debug";
 
 const d = debugOf(shell);
-d.metrics();   // → "pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1"
-d.dpi();       // → "awareness=-1 dpi=192 scale=200%"
+d.metrics(); // → "pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1"
+d.dpi(); // → "awareness=-1 dpi=192 scale=200%"
 d.hittest(x, y);
 ```
 
@@ -553,10 +560,10 @@ framework, and this package ships no plugins of its own.
 
 ```ts
 const built = await bundlePage({
-  entry: "src/main.ts",
-  plugins: [myFrameworkPlugin()],              // .vue / .svelte / .tsx — whatever your plugin handles
-  define: { __VUE_OPTIONS_API__: "false" },    // compile-time constants
-  loader: { ".thing": "ts" },                  // custom extensions
+    entry: "src/main.ts",
+    plugins: [myFrameworkPlugin()], // .vue / .svelte / .tsx — whatever your plugin handles
+    define: { __VUE_OPTIONS_API__: "false" }, // compile-time constants
+    loader: { ".thing": "ts" }, // custom extensions
 });
 ```
 
@@ -567,14 +574,14 @@ ignored. Four forms were tried and all failed to resolve. So this package backs 
 `onResolve` plugin:
 
 ```ts
-await bundlePage({ entry, alias: { "@": "./src", "lib": "./src/lib" } });
+await bundlePage({ entry, alias: { "@": "./src", lib: "./src/lib" } });
 ```
 
-| Specifier | Rewritten? |
-| --- | --- |
-| equal to a key, or prefixed by `key/` | yes |
-| starts with `.` or `/` | no |
-| has a `scheme:` prefix | no |
+| Specifier                             | Rewritten? |
+| ------------------------------------- | ---------- |
+| equal to a key, or prefixed by `key/` | yes        |
+| starts with `.` or `/`                | no         |
+| has a `scheme:` prefix                | no         |
 
 **The default is empty.** `$lib` is a SvelteKit convention and `@/` is some project's `tsconfig`
 alias; neither belongs here. Aliases merge with your plugins rather than replacing them, and the
@@ -630,13 +637,13 @@ const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 
 Individual flags can also be combined via bitwise OR:
 
-| Flag | Disabled Behavior |
-| --- | --- |
-| `BROWSER_UI_MENU` | Default Edge right-click context menu |
-| `BROWSER_UI_KEYS` | Built-in browser shortcuts (`Ctrl+P`, `Ctrl+F`, `Ctrl+S`) |
-| `BROWSER_UI_STATUSBAR` | Bottom-left URL hover status bar |
-| `BROWSER_UI_SWIPE` | Trackpad horizontal swipe back/forward navigation |
-| `BROWSER_UI_AUTOFILL` | Form autofill popups |
+| Flag                   | Disabled Behavior                                         |
+| ---------------------- | --------------------------------------------------------- |
+| `BROWSER_UI_MENU`      | Default Edge right-click context menu                     |
+| `BROWSER_UI_KEYS`      | Built-in browser shortcuts (`Ctrl+P`, `Ctrl+F`, `Ctrl+S`) |
+| `BROWSER_UI_STATUSBAR` | Bottom-left URL hover status bar                          |
+| `BROWSER_UI_SWIPE`     | Trackpad horizontal swipe back/forward navigation         |
+| `BROWSER_UI_AUTOFILL`  | Form autofill popups                                      |
 
 Note: `F11`, `F12`, and `Ctrl±` zoom shortcuts are handled directly by the native shell and remain active regardless of these flags.
 
@@ -647,26 +654,22 @@ After disabling the default browser menu, render native Win32 popup menus (`Trac
 ```ts
 // Host: expose the menu capability on the flat service
 createIpcServer({
-  service: {
-    showContextMenu: (x: number, y: number, items: string) => shell.showContextMenu(x, y, items),
-  },
+    service: {
+        showContextMenu: (x: number, y: number, items: string) => shell.showContextMenu(x, y, items),
+    },
 });
 ```
 
 ```ts
 // Page: trigger the native menu
 document.addEventListener("contextmenu", async (e) => {
-  e.preventDefault();
-  await api.showContextMenu(
-    Math.round(e.screenX),
-    Math.round(e.screenY),
-    "open|Open\nrefresh|Refresh\n-\nquit|Quit"
-  );
+    e.preventDefault();
+    await api.showContextMenu(Math.round(e.screenX), Math.round(e.screenY), "open|Open\nrefresh|Refresh\n-\nquit|Quit");
 });
 
 // Page: handle menu item selection
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "menu") console.log("Selected ID:", e.detail.id);
+    if (e.detail.t === "menu") console.log("Selected ID:", e.detail.id);
 });
 ```
 
@@ -686,7 +689,7 @@ const shell = await openShell({ url, flags: FLAG_ACCEPT_DROP });
 ```js
 // Page
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "drop") console.log("Dropped paths:", e.detail.paths);
+    if (e.detail.t === "drop") console.log("Dropped paths:", e.detail.paths);
 });
 ```
 
@@ -694,10 +697,10 @@ Files **and folders** are forwarded by a script the shell injects, so the page d
 
 ```js
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t !== "drop") return;
-  for (const p of e.detail.paths) {
-    console.log(e.detail.dirs.includes(p) ? "folder" : "file", p);
-  }
+    if (e.detail.t !== "drop") return;
+    for (const p of e.detail.paths) {
+        console.log(e.detail.dirs.includes(p) ? "folder" : "file", p);
+    }
 });
 ```
 
@@ -708,14 +711,27 @@ When running in an elevated administrator process (High Integrity Level) while E
 The shell does not inject any implicit DOM nodes or stylesheets into your page. To make your web UI feel like a native desktop app, include the following baseline rules:
 
 ```css
-html, body { cursor: default; }
-body { user-select: none; }
-input, textarea, .log { user-select: text; cursor: auto; }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+html,
+body {
+    cursor: default;
+}
+body {
+    user-select: none;
+}
+input,
+textarea,
+.log {
+    user-select: text;
+    cursor: auto;
+}
+button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
 ```
 
 ```html
-<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off">
+<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off" />
 ```
 
 Setting `spellcheck="false"` is particularly important—red squiggly underlines beneath file paths and numeric inputs immediately give away a web view.
@@ -726,7 +742,7 @@ When bundling with `bun build --compile`, import `bun-app-window/embedded` to em
 
 ```ts
 import { createShell } from "bun-app-window";
-import { embeddedDll } from "bun-app-window/embedded";   // Embeds the DLL into the binary
+import { embeddedDll } from "bun-app-window/embedded"; // Embeds the DLL into the binary
 
 const shell = await createShell({ url, embedded: embeddedDll });
 ```
@@ -766,14 +782,14 @@ At runtime, `libshell.dll` is located in the following order:
 
 ### Built-in Keyboard & Mouse Shortcuts
 
-| Input | Behavior |
-| --- | --- |
-| `Ctrl +` / `Ctrl -` / `Ctrl 0` | Zoom in / Zoom out / Reset zoom to 100% |
-| `Ctrl + Mouse Wheel` | Zoom in / Zoom out |
-| `F11` | Toggle fullscreen mode (hides window borders and covers the taskbar) |
-| `F5` / `Ctrl + R` | Reload page |
-| `F12` | Open WebView2 Developer Tools |
-| `Alt + Space` / Right-click title bar | Open native Windows system menu |
+| Input                                 | Behavior                                                             |
+| ------------------------------------- | -------------------------------------------------------------------- |
+| `Ctrl +` / `Ctrl -` / `Ctrl 0`        | Zoom in / Zoom out / Reset zoom to 100%                              |
+| `Ctrl + Mouse Wheel`                  | Zoom in / Zoom out                                                   |
+| `F11`                                 | Toggle fullscreen mode (hides window borders and covers the taskbar) |
+| `F5` / `Ctrl + R`                     | Reload page                                                          |
+| `F12`                                 | Open WebView2 Developer Tools                                        |
+| `Alt + Space` / Right-click title bar | Open native Windows system menu                                      |
 
 ## Development & Verification
 
@@ -804,10 +820,10 @@ Whenever `src/shell/` or `package.json` is modified, the consumer acceptance sta
 
 For window enumeration (`EnumWindows`) or automated screenshot scripts, filter by the corresponding Win32 window class name:
 
-| Window Mode | Window Class Name |
-| --- | --- |
-| Standard framed (without `FLAG_FRAMELESS`) | `webview` |
-| Frameless (with `FLAG_FRAMELESS`) | `webview_shell` |
+| Window Mode                                | Window Class Name |
+| ------------------------------------------ | ----------------- |
+| Standard framed (without `FLAG_FRAMELESS`) | `webview`         |
+| Frameless (with `FLAG_FRAMELESS`)          | `webview_shell`   |
 
 ## Acknowledgments
 

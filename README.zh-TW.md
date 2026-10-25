@@ -26,13 +26,13 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 
 在導入本專案前，請確認以下技術前提與架構取捨是否符合你的應用場景：
 
-| 維度 | 限制與說明 |
-| --- | --- |
-| 僅支援 Windows x64 | `package.json` 中的 `os` 與 `cpu` 欄位已做強制限制，拒絕在其他平台安裝（套件名稱保持平台中立僅為預留命名空間）。預編譯動態連結程式庫 `libshell.dll` 隨套件發佈，無需在安裝期編譯 |
-| 僅支援 Bun 執行環境 | 套件內直接發佈 TypeScript 原始碼，要求 Bun ≥ 1.4.4。Node.js 環境雖可完成套件安裝，但無法直接執行 |
+| 維度                            | 限制與說明                                                                                                                                                                                                                       |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 僅支援 Windows x64              | `package.json` 中的 `os` 與 `cpu` 欄位已做強制限制，拒絕在其他平台安裝（套件名稱保持平台中立僅為預留命名空間）。預編譯動態連結程式庫 `libshell.dll` 隨套件發佈，無需在安裝期編譯                                                 |
+| 僅支援 Bun 執行環境             | 套件內直接發佈 TypeScript 原始碼，要求 Bun ≥ 1.4.4。Node.js 環境雖可完成套件安裝，但無法直接執行                                                                                                                                 |
 | 型別檢查要求 TypeScript ≥ 7.0.2 | API 在 TypeScript 7.0.2 下設計與檢查，`devDependencies` 中精確鎖版；不為更舊的編譯器做相容。高於 7.0.2 的結果未作斷言——`bun-types` 只在那一側才開啟 `typesVersions: ">= 7.1"` 閘控，`with { type: "text" }` 的解析結果會隨之改變 |
-| 型別檢查需自備 `@types/bun` | 套件內是 `.ts` 原始碼，消費方的 `bun check` 會一併編譯它們。需執行 `bun add -d @types/bun`，否則型別檢查會在 `node_modules` 內回報 `TS2868: Cannot find name 'Bun'` |
-| 基於 `bun:ffi` 建構 | `bun:ffi` 在 Bun 中仍標記為實驗性功能（Experimental）。官方建議正式環境優先採用 Node-API，本專案選擇 `bun:ffi` 是為了換取零第三方相依性的輕量架構 |
+| 型別檢查需自備 `@types/bun`     | 套件內是 `.ts` 原始碼，消費方的 `bun check` 會一併編譯它們。需執行 `bun add -d @types/bun`，否則型別檢查會在 `node_modules` 內回報 `TS2868: Cannot find name 'Bun'`                                                              |
+| 基於 `bun:ffi` 建構             | `bun:ffi` 在 Bun 中仍標記為實驗性功能（Experimental）。官方建議正式環境優先採用 Node-API，本專案選擇 `bun:ffi` 是為了換取零第三方相依性的輕量架構                                                                                |
 
 執行環境與能力邊界：
 
@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### 套件內容包含什麼
 
-發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 22 個檔案（0.50 MB，解包後 1.44 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
+發佈的 tarball 只有預先編譯的 `dist/libshell.dll` 與 TypeScript 原始碼，共 22 個檔案（0.50 MB，解包後 1.47 MB）。原生 C++ 層（`native/`）與上游 vendored 標頭檔（`vendor/`）**不隨套件散布**：它們只在重新編譯 `libshell.dll` 時需要，而重新編譯必須 clone 儲存庫。因此 `bun run build:native` 與 `build:exe` 是本儲存庫專用指令碼，安裝進 `node_modules` 後執行沒有意義。
 
 ## 快速開始
 
@@ -56,22 +56,23 @@ bun add bun-app-window
 import { openShell, serveOnSafePort, FLAG_FRAMELESS, FLAG_CENTER } from "bun-app-window";
 
 const server = serveOnSafePort({
-  fetch: () => new Response("<h1>Hello</h1>", {
-    headers: { "content-type": "text/html; charset=utf-8" },
-  }),
+    fetch: () =>
+        new Response("<h1>Hello</h1>", {
+            headers: { "content-type": "text/html; charset=utf-8" },
+        }),
 });
 
 const shell = await openShell({
-  url: `http://127.0.0.1:${server.port}`,
-  title: "My App",
-  width: 1000,
-  height: 680,
-  flags: FLAG_FRAMELESS | FLAG_CENTER,
-  minWidth: 480,
-  minHeight: 320,
+    url: `http://127.0.0.1:${server.port}`,
+    title: "My App",
+    width: 1000,
+    height: 680,
+    flags: FLAG_FRAMELESS | FLAG_CENTER,
+    minWidth: 480,
+    minHeight: 320,
 });
 
-shell.post(JSON.stringify({ t: "ready" }));   // 宿主 → 頁面單向訊息
+shell.post(JSON.stringify({ t: "ready" })); // 宿主 → 頁面單向訊息
 shell.setTitle("Doing work…");
 ```
 
@@ -83,45 +84,45 @@ shell.setTitle("Doing work…");
 
 ### 實例方法與屬性
 
-| 成員 | 說明 |
-| --- | --- |
-| `start()` | 建立並啟動視窗，回傳 `{ rc, error }`。呼叫後立即回傳，UI 訊息迴圈執行於獨立原生執行緒 |
-| `stop()` | 銷毀視窗並釋放底層資源，支援冪等重複呼叫 |
-| `show()` | 顯示視窗。常搭配 `FLAG_DEFER_SHOW` 使用，實現在頁面渲染就緒後再展現視窗 |
-| `isAlive()` | 檢測視窗是否存活（註：`state()` 無法區分「尚未啟動」與「已銷毀」狀態）。等視窗關閉請用 `pollEvents()` 的 `CLOSED`，別輪詢它 |
-| `pollEvents(max?)` | 批次拉取視窗生命週期事件（`STATE` / `CLOSED`），同步、消費式。詳見下文「視窗事件」 |
-| `state()` | 取得目前視窗狀態：`{ maximized, minimized, focused, dark, raw }` |
-| `lastError()` | 取得最近一次操作失敗的錯誤訊息，無錯誤時回傳空字串 |
-| `setTitle` / `minimize` / `toggleMaximize` / `close` | 基礎視窗控制操作，回傳狀態碼 `rc` |
-| `setMinSize(w, h)` | 設定視窗最小尺寸（單位：邏輯像素） |
-| `drag()` | 觸發原生視窗拖曳（於頁面 `pointerdown` 事件中呼叫，完整保留 Windows 貼齊版面配置特性） |
-| `beginResize(edge)` | 觸發原生邊框縮放（於頁面 `pointermove` 事件中呼叫，`edge` 取值見 `RESIZE_EDGE.*`） |
-| `post(json)` | 宿主向頁面單向投遞 JSON 訊息，非同步發送且不等待回傳結果 |
-| `setZoom(f)` / `getZoom()` | 設定或取得頁面縮放比例（有效範圍 `0.25`–`3.0`，越界值自動鉗制） |
-| `reload()` / `openDevTools()` / `toggleFullscreen()` | 頁面重新載入、開啟開發人員工具、切換全螢幕（分別對應 `Ctrl+R` / `F12` / `F11`） |
-| `setFrameless(frameless)` / `isFrameless()` | 執行時期切換視窗形態並讀取目前形態。只有**建立時**給了 `FLAG_FRAMELESS` 的視窗能切；帶邊框起點的視窗回傳 `rc=-1`，理由在 `lastError()`。詳見下文「視窗旗標」 |
-| `setBrowserUi(mask)` | 停用指定的瀏覽器預設行為，傳入 `BROWSER_UI_*` 旗標的按位元 OR 組合 |
-| `showContextMenu(x, y, items)` | 於指定螢幕座標彈出 Win32 原生右鍵快顯功能表（詳見下文用法） |
-| `pickFolder(title?)` | 呼叫原生資料夾選擇對話方塊（同步阻塞目前呼叫執行緒；**經 IPC 暴露時務必搭配 `timeoutMs: 0`**，見下文） |
-| `libInfo` | 原生動態連結程式庫解析中繼資料（包含實際路徑、載入來源、SHA-256 雜湊值） |
-| `symbols` | 底層直通介面：直接存取透過 `dlopen` 匯出的底層 C 符號 |
+| 成員                                                 | 說明                                                                                                                                                         |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `start()`                                            | 建立並啟動視窗，回傳 `{ rc, error }`。呼叫後立即回傳，UI 訊息迴圈執行於獨立原生執行緒                                                                        |
+| `stop()`                                             | 銷毀視窗並釋放底層資源，支援冪等重複呼叫                                                                                                                     |
+| `show()`                                             | 顯示視窗。常搭配 `FLAG_DEFER_SHOW` 使用，實現在頁面渲染就緒後再展現視窗                                                                                      |
+| `isAlive()`                                          | 檢測視窗是否存活（註：`state()` 無法區分「尚未啟動」與「已銷毀」狀態）。等視窗關閉請用 `pollEvents()` 的 `CLOSED`，別輪詢它                                  |
+| `pollEvents(max?)`                                   | 批次拉取視窗生命週期事件（`STATE` / `CLOSED`），同步、消費式。詳見下文「視窗事件」                                                                           |
+| `state()`                                            | 取得目前視窗狀態：`{ maximized, minimized, focused, dark, raw }`                                                                                             |
+| `lastError()`                                        | 取得最近一次操作失敗的錯誤訊息，無錯誤時回傳空字串                                                                                                           |
+| `setTitle` / `minimize` / `toggleMaximize` / `close` | 基礎視窗控制操作，回傳狀態碼 `rc`                                                                                                                            |
+| `setMinSize(w, h)`                                   | 設定視窗最小尺寸（單位：邏輯像素）                                                                                                                           |
+| `drag()`                                             | 觸發原生視窗拖曳（於頁面 `pointerdown` 事件中呼叫，完整保留 Windows 貼齊版面配置特性）                                                                       |
+| `beginResize(edge)`                                  | 觸發原生邊框縮放（於頁面 `pointermove` 事件中呼叫，`edge` 取值見 `RESIZE_EDGE.*`）                                                                           |
+| `post(json)`                                         | 宿主向頁面單向投遞 JSON 訊息，非同步發送且不等待回傳結果                                                                                                     |
+| `setZoom(f)` / `getZoom()`                           | 設定或取得頁面縮放比例（有效範圍 `0.25`–`3.0`，越界值自動鉗制）                                                                                              |
+| `reload()` / `openDevTools()` / `toggleFullscreen()` | 頁面重新載入、開啟開發人員工具、切換全螢幕（分別對應 `Ctrl+R` / `F12` / `F11`）                                                                              |
+| `setFrameless(frameless)` / `isFrameless()`          | 執行時期切換視窗形態並讀取目前形態。只有**建立時**給了 `FLAG_FRAMELESS` 的視窗能切；帶邊框起點的視窗回傳 `rc=-1`，理由在 `lastError()`。詳見下文「視窗旗標」 |
+| `setBrowserUi(mask)`                                 | 停用指定的瀏覽器預設行為，傳入 `BROWSER_UI_*` 旗標的按位元 OR 組合                                                                                           |
+| `showContextMenu(x, y, items)`                       | 於指定螢幕座標彈出 Win32 原生右鍵快顯功能表（詳見下文用法）                                                                                                  |
+| `pickFolder(title?)`                                 | 呼叫原生資料夾選擇對話方塊（同步阻塞目前呼叫執行緒；**經 IPC 暴露時務必搭配 `timeoutMs: 0`**，見下文）                                                       |
+| `libInfo`                                            | 原生動態連結程式庫解析中繼資料（包含實際路徑、載入來源、SHA-256 雜湊值）                                                                                     |
+| `symbols`                                            | 底層直通介面：直接存取透過 `dlopen` 匯出的底層 C 符號                                                                                                        |
 
 ### 視窗旗標（Flags）
 
 透過按位元 OR（`|`）組合傳入 `opts.flags`：
 
-| 旗標 | 作用說明 |
-| --- | --- |
-| `FLAG_FRAMELESS` | 無邊框視窗模式，移除系統預設標題列，交由前端頁面自行繪製。以這種方式建立的視窗可在執行時期用 `setFrameless(false)` 切回帶邊框 |
-| `FLAG_RESIZABLE` | 允許使用者調整視窗大小 |
-| `FLAG_CENTER` | 啟動時於目前顯示器工作區置中顯示（有邊框與無邊框模式均生效） |
-| `FLAG_TOPMOST` | 視窗保持最上層顯示 |
-| `FLAG_DEFER_SHOW` | 建立視窗後保持隱藏狀態，等待明確呼叫 `show()` |
-| `FLAG_ACCEPT_DROP` | 允許視窗接收外部檔案或資料夾拖放事件 |
-| `FLAG_START_MAXIMIZED` | 視窗首次顯示即處於最大化狀態，避免從一般尺寸跳變至最大化的中間閃爍畫格 |
-| `FLAG_ALLOW_EXTERNAL_NAV` | 放棄外部導覽攔截——用於本身就是瀏覽器的應用程式 |
-| `FLAG_TITLEBAR_RESERVE` | 無邊框模式下把網頁內容整體下移一個標題列高度，讓頂端那一條歸原生視窗。**已被 `FLAG_NATIVE_CAPTIONS` 取代**：caption 命中區固定在客戶區 `y ∈ [0, 32)`，這條路會把頁面自繪的標題列放到與點擊真正落點相差 32 px 的位置 |
-| `FLAG_NATIVE_CAPTIONS` | 無邊框模式下，由殼層自己的 layered 子視窗繪製三個 caption 按鈕並在那裡應答 `HTMAXBUTTON`。這是 Snap Layouts 唯一能觸發的途徑：WebView2 的渲染子視窗在另一個處理序裡，恆回 `HTCLIENT`。必須與 `mountTitleBar({ captions: "native" })` 搭配，頁面才會留出 `46 × 3` 而不是自己畫一套 |
+| 旗標                      | 作用說明                                                                                                                                                                                                                                                                          |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FLAG_FRAMELESS`          | 無邊框視窗模式，移除系統預設標題列，交由前端頁面自行繪製。以這種方式建立的視窗可在執行時期用 `setFrameless(false)` 切回帶邊框                                                                                                                                                     |
+| `FLAG_RESIZABLE`          | 允許使用者調整視窗大小                                                                                                                                                                                                                                                            |
+| `FLAG_CENTER`             | 啟動時於目前顯示器工作區置中顯示（有邊框與無邊框模式均生效）                                                                                                                                                                                                                      |
+| `FLAG_TOPMOST`            | 視窗保持最上層顯示                                                                                                                                                                                                                                                                |
+| `FLAG_DEFER_SHOW`         | 建立視窗後保持隱藏狀態，等待明確呼叫 `show()`                                                                                                                                                                                                                                     |
+| `FLAG_ACCEPT_DROP`        | 允許視窗接收外部檔案或資料夾拖放事件                                                                                                                                                                                                                                              |
+| `FLAG_START_MAXIMIZED`    | 視窗首次顯示即處於最大化狀態，避免從一般尺寸跳變至最大化的中間閃爍畫格                                                                                                                                                                                                            |
+| `FLAG_ALLOW_EXTERNAL_NAV` | 放棄外部導覽攔截——用於本身就是瀏覽器的應用程式                                                                                                                                                                                                                                    |
+| `FLAG_TITLEBAR_RESERVE`   | 無邊框模式下把網頁內容整體下移一個標題列高度，讓頂端那一條歸原生視窗。**已被 `FLAG_NATIVE_CAPTIONS` 取代**：caption 命中區固定在客戶區 `y ∈ [0, 32)`，這條路會把頁面自繪的標題列放到與點擊真正落點相差 32 px 的位置                                                               |
+| `FLAG_NATIVE_CAPTIONS`    | 無邊框模式下，由殼層自己的 layered 子視窗繪製三個 caption 按鈕並在那裡應答 `HTMAXBUTTON`。這是 Snap Layouts 唯一能觸發的途徑：WebView2 的渲染子視窗在另一個處理序裡，恆回 `HTCLIENT`。必須與 `mountTitleBar({ captions: "native" })` 搭配，頁面才會留出 `46 × 3` 而不是自己畫一套 |
 
 ### 外部導覽預設被攔截
 
@@ -165,18 +166,18 @@ import htmlText from "./index.html" with { type: "text" };
 const html = htmlText as unknown as string;
 
 const app = await createApp({
-  html,
-  title: "我的應用程式",
-  flags: FLAG_FRAMELESS,          // 想要自繪標題列就明確加上
-  browserUi: BROWSER_UI_ALL,
-  service: {
-    greet: (name: string) => `hi ${name}`,
-    pickFolder: () => app.shell.pickFolder(),
-  },
+    html,
+    title: "我的應用程式",
+    flags: FLAG_FRAMELESS, // 想要自繪標題列就明確加上
+    browserUi: BROWSER_UI_ALL,
+    service: {
+        greet: (name: string) => `hi ${name}`,
+        pickFolder: () => app.shell.pickFolder(),
+    },
 });
 
-await app.wait();                  // 視窗關閉時 resolve
-await app.stop();                  // 釋放事件泵與服務；冪等，已關閉時立即回傳
+await app.wait(); // 視窗關閉時 resolve
+await app.stop(); // 釋放事件泵與服務；冪等，已關閉時立即回傳
 ```
 
 傳 `page` 就能把打包好的頁面指令碼交給骨架，不必自己寫那條路由。`createApp` 會應答
@@ -203,7 +204,7 @@ const app = await createApp({ html, page: code, service });
 ```ts
 // page.ts —— index.html 的 bundle 內
 import { connect } from "bun-app-window/ipc";
-const api = await connect();       // token 從頁面 URL 的 ?t= 取得
+const api = await connect(); // token 從頁面 URL 的 ?t= 取得
 await api.greet("Ada");
 ```
 
@@ -264,19 +265,21 @@ export type Events = { windowState: { maximized: boolean } };
 import { createIpcServer } from "bun-app-window/ipc";
 
 const ipc = createIpcServer({
-  service: { greet: (name: string) => `Hello ${name}` },
+    service: { greet: (name: string) => `Hello ${name}` },
 });
 
 serveOnSafePort({
-  fetch(req) { /* 處理靜態頁面與驗證 */ },
-  websocket: {
-    open: (ws) => ipc.attach(ws),
-    message: (ws, raw) => ipc.handle(ws, raw),
-    close: (ws) => ipc.detach(ws),
-  },
+    fetch(req) {
+        /* 處理靜態頁面與驗證 */
+    },
+    websocket: {
+        open: (ws) => ipc.attach(ws),
+        message: (ws, raw) => ipc.handle(ws, raw),
+        close: (ws) => ipc.detach(ws),
+    },
 });
 
-ipc.emit("windowState", { maximized: false });   // 向頁面主動推播事件
+ipc.emit("windowState", { maximized: false }); // 向頁面主動推播事件
 ```
 
 #### 遲連線的狀態投遞
@@ -288,7 +291,7 @@ ipc.emit("windowState", { maximized: false });   // 向頁面主動推播事件
 把「狀態類」事件標為黏性，服務端就會在每次連線建立時重播最後一份酬載：
 
 ```ts
-ipc.emit("windowState", { maximized: false }, { sticky: true });   // attach() 時重播
+ipc.emit("windowState", { maximized: false }, { sticky: true }); // attach() 時重播
 ```
 
 黏性是**明確開啟**的，且每個事件名稱只保留一份酬載，不是歷史佇列。語意上是「通知」而非
@@ -300,7 +303,7 @@ import { connect } from "bun-app-window/ipc";
 import type { Api, Events } from "./api";
 
 const api = await connect<Api, Events>();
-await api.greet("Ada");                        // 回傳型別自動推導為 string
+await api.greet("Ada"); // 回傳型別自動推導為 string
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
@@ -333,13 +336,13 @@ const api = await connect<Api, Events>({ timeoutMs: 0 });
 用戶端是一個 `Proxy`：有幾個名稱會解析到用戶端自己身上，永遠到不了遠端方法。服務表裡若有
 同名方法，**那個服務端方法就永遠呼叫不到**——頁面呼叫的是用戶端自己的成員，兩端都不會報錯。
 
-| 名稱 | 頁面實際拿到的東西 |
-| --- | --- |
-| `on` / `off` | 事件訂閱輔助函式 |
-| `close()` | 關閉 WebSocket 通道——之後所有呼叫都會被 reject |
-| `connected` | `boolean`，通道目前是否可用 |
-| `pending` | `number`，尚未收到回覆的呼叫數 |
-| `then` | `undefined`，否則 `await client` 會把這個永不兌現的 thenable 等下去 |
+| 名稱         | 頁面實際拿到的東西                                                  |
+| ------------ | ------------------------------------------------------------------- |
+| `on` / `off` | 事件訂閱輔助函式                                                    |
+| `close()`    | 關閉 WebSocket 通道——之後所有呼叫都會被 reject                      |
+| `connected`  | `boolean`，通道目前是否可用                                         |
+| `pending`    | `number`，尚未收到回覆的呼叫數                                      |
+| `then`       | `undefined`，否則 `await client` 會把這個永不兌現的 thenable 等下去 |
 
 Symbol 鍵同樣保留。給服務方法換個名稱（`winClose` 而不是 `close`），在頁面端映射回去 ——
 見下方的標題列一節。
@@ -357,12 +360,12 @@ Symbol 鍵同樣保留。給服務方法換個名稱（`winClose` 而不是 `clo
 ```ts
 // 宿主端 —— 扁平服務；`close` 是 IPC 用戶端的保留名稱
 createIpcServer({
-  service: {
-    minimize: () => shell.minimize(),
-    toggleMaximize: () => shell.toggleMaximize(),
-    winClose: () => shell.close(),
-    drag: () => shell.drag(),
-  },
+    service: {
+        minimize: () => shell.minimize(),
+        toggleMaximize: () => shell.toggleMaximize(),
+        winClose: () => shell.close(),
+        drag: () => shell.drag(),
+    },
 });
 ```
 
@@ -371,14 +374,14 @@ createIpcServer({
 import { mountTitleBar, bridgeFromWindowService } from "bun-app-window/titlebar";
 
 const bar = mountTitleBar({
-  title: "我的應用程式",
-  icon: "/icon.svg",
-  bridge: bridgeFromWindowService({
-    minimize: () => api.minimize(),
-    toggleMaximize: () => api.toggleMaximize(),
-    close: () => api.winClose(),          // 橋接時再映射回 close
-    drag: () => api.drag(),
-  }),
+    title: "我的應用程式",
+    icon: "/icon.svg",
+    bridge: bridgeFromWindowService({
+        minimize: () => api.minimize(),
+        toggleMaximize: () => api.toggleMaximize(),
+        close: () => api.winClose(), // 橋接時再映射回 close
+        drag: () => api.drag(),
+    }),
 });
 
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
@@ -406,7 +409,7 @@ if (saved) restorePlacement(shell, saved);
 
 shell.show();
 
-const store = attachPlacementStore(shell, FILE);   // 訂閱視窗事件，拖曳停下後寫入一次
+const store = attachPlacementStore(shell, FILE); // 訂閱視窗事件，拖曳停下後寫入一次
 process.on("beforeExit", () => store.flush());
 ```
 
@@ -440,8 +443,10 @@ const store = attachPlacementStore(app.shell, FILE, { events: app.events });
 import { EVENT_CLOSED, EVENT_STATE } from "bun-app-window/events";
 
 for (const e of shell.pollEvents()) {
-  if (e.type === EVENT_CLOSED) break;          // 視窗已銷毀，原生單例已釋放
-  if (e.type === EVENT_STATE && e.maximized) { /* ... */ }
+    if (e.type === EVENT_CLOSED) break; // 視窗已銷毀，原生單例已釋放
+    if (e.type === EVENT_STATE && e.maximized) {
+        /* ... */
+    }
 }
 ```
 
@@ -452,7 +457,9 @@ for (const e of shell.pollEvents()) {
 import { EVENT_CLOSED, attachEventPump } from "bun-app-window/events";
 
 const pump = attachEventPump(shell, { intervalMs: 16 });
-pump.on((e) => { if (e.type === EVENT_CLOSED) pump.stop(); });
+pump.on((e) => {
+    if (e.type === EVENT_CLOSED) pump.stop();
+});
 pump.onGap((missing) => console.warn(`漏了 ${missing} 條事件`));
 ```
 
@@ -472,8 +479,8 @@ pump.onGap((missing) => console.warn(`漏了 ${missing} 條事件`));
 import { debugOf } from "bun-app-window/debug";
 
 const d = debugOf(shell);
-d.metrics();   // → "pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1"
-d.dpi();       // → "awareness=-1 dpi=192 scale=200%"
+d.metrics(); // → "pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1"
+d.dpi(); // → "awareness=-1 dpi=192 scale=200%"
 d.hittest(x, y);
 ```
 
@@ -520,10 +527,10 @@ await writePageBundle({ entry: "src/ui/page.ts", out: "src/ui/page.bundle.txt" }
 
 ```ts
 const built = await bundlePage({
-  entry: "src/main.ts",
-  plugins: [myFrameworkPlugin()],              // .vue / .svelte / .tsx —— 外掛能編譯什麼就傳什麼
-  define: { __VUE_OPTIONS_API__: "false" },    // 編譯期常數
-  loader: { ".thing": "ts" },                  // 自訂副檔名
+    entry: "src/main.ts",
+    plugins: [myFrameworkPlugin()], // .vue / .svelte / .tsx —— 外掛能編譯什麼就傳什麼
+    define: { __VUE_OPTIONS_API__: "false" }, // 編譯期常數
+    loader: { ".thing": "ts" }, // 自訂副檔名
 });
 ```
 
@@ -533,14 +540,14 @@ Bun 1.4.4 的 `BuildConfig` 沒有 `alias` 屬性，而且傳進去不會報錯�
 四種寫法都試過，全部解析失敗。因此本套件用自帶的 `onResolve` 外掛支撐 `alias`：
 
 ```ts
-await bundlePage({ entry, alias: { "@": "./src", "lib": "./src/lib" } });
+await bundlePage({ entry, alias: { "@": "./src", lib: "./src/lib" } });
 ```
 
-| 模組指定符 | 是否重寫 |
-| --- | --- |
-| 與某個鍵相等，或以 `鍵/` 為前綴 | 是 |
-| 以 `.` 或 `/` 開頭 | 否 |
-| 帶 `scheme:` 前綴 | 否 |
+| 模組指定符                      | 是否重寫 |
+| ------------------------------- | -------- |
+| 與某個鍵相等，或以 `鍵/` 為前綴 | 是       |
+| 以 `.` 或 `/` 開頭              | 否       |
+| 帶 `scheme:` 前綴               | 否       |
 
 **預設是空的。** `$lib` 是 SvelteKit 的約定，`@/` 是某些專案自己的 `tsconfig` 別名，
 兩者都不屬於本套件。別名與呼叫方的外掛是合併關係而非取代，且只在傳入 `alias` 時才註冊該外掛。
@@ -594,13 +601,13 @@ const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 
 亦可依需求組合以下旗標：
 
-| 旗標 | 停用的瀏覽器行為 |
-| --- | --- |
-| `BROWSER_UI_MENU` | 預設網頁右鍵選單（Edge 快顯功能表） |
-| `BROWSER_UI_KEYS` | 瀏覽器內建快速鍵（如 `Ctrl+P` / `Ctrl+F` / `Ctrl+S`） |
-| `BROWSER_UI_STATUSBAR` | 左下角連結懸停狀態列 |
-| `BROWSER_UI_SWIPE` | 觸控板雙指橫滑上一頁 / 下一頁手勢 |
-| `BROWSER_UI_AUTOFILL` | 表單自動填入提示 |
+| 旗標                   | 停用的瀏覽器行為                                      |
+| ---------------------- | ----------------------------------------------------- |
+| `BROWSER_UI_MENU`      | 預設網頁右鍵選單（Edge 快顯功能表）                   |
+| `BROWSER_UI_KEYS`      | 瀏覽器內建快速鍵（如 `Ctrl+P` / `Ctrl+F` / `Ctrl+S`） |
+| `BROWSER_UI_STATUSBAR` | 左下角連結懸停狀態列                                  |
+| `BROWSER_UI_SWIPE`     | 觸控板雙指橫滑上一頁 / 下一頁手勢                     |
+| `BROWSER_UI_AUTOFILL`  | 表單自動填入提示                                      |
 
 註：`F11`、`F12` 及 `Ctrl±` 縮放由視窗外殼層直接接管，不受上述旗標影響。
 
@@ -611,26 +618,26 @@ const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 ```ts
 // 宿主端：將選單能力掛載到扁平服務上
 createIpcServer({
-  service: {
-    showContextMenu: (x: number, y: number, items: string) => shell.showContextMenu(x, y, items),
-  },
+    service: {
+        showContextMenu: (x: number, y: number, items: string) => shell.showContextMenu(x, y, items),
+    },
 });
 ```
 
 ```ts
 // 頁面端觸發選單
 document.addEventListener("contextmenu", async (e) => {
-  e.preventDefault();
-  await api.showContextMenu(
-    Math.round(e.screenX),
-    Math.round(e.screenY),
-    "open|開啟\nrefresh|重新整理\n-\nquit|結束"
-  );
+    e.preventDefault();
+    await api.showContextMenu(
+        Math.round(e.screenX),
+        Math.round(e.screenY),
+        "open|開啟\nrefresh|重新整理\n-\nquit|結束",
+    );
 });
 
 // 頁面端監聽選單點擊結果
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "menu") console.log("選取選單項目 ID:", e.detail.id);
+    if (e.detail.t === "menu") console.log("選取選單項目 ID:", e.detail.id);
 });
 ```
 
@@ -648,7 +655,7 @@ const shell = await openShell({ url, flags: FLAG_ACCEPT_DROP });
 ```js
 // 頁面端接收路徑清單
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "drop") console.log("拖入檔案路徑:", e.detail.paths);
+    if (e.detail.t === "drop") console.log("拖入檔案路徑:", e.detail.paths);
 });
 ```
 
@@ -656,10 +663,10 @@ window.addEventListener("shell-msg", (e) => {
 
 ```js
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t !== "drop") return;
-  for (const p of e.detail.paths) {
-    console.log(e.detail.dirs.includes(p) ? "資料夾" : "檔案", p);
-  }
+    if (e.detail.t !== "drop") return;
+    for (const p of e.detail.paths) {
+        console.log(e.detail.dirs.includes(p) ? "資料夾" : "檔案", p);
+    }
 });
 ```
 
@@ -670,14 +677,27 @@ window.addEventListener("shell-msg", (e) => {
 視窗外殼層不會向頁面隱式注入任何 DOM 或全域樣式。為消除「網頁感」，建議應用程式於前端自行補充以下基礎規則：
 
 ```css
-html, body { cursor: default; }
-body { user-select: none; }
-input, textarea, .log { user-select: text; cursor: auto; }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+html,
+body {
+    cursor: default;
+}
+body {
+    user-select: none;
+}
+input,
+textarea,
+.log {
+    user-select: text;
+    cursor: auto;
+}
+button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
 ```
 
 ```html
-<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off">
+<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off" />
 ```
 
 尤其建議為輸入框設定 `spellcheck="false"`，否則瀏覽器拼字檢查極易在檔案路徑或專業數值下方繪製紅色波浪底線，破壞桌面應用程式的原生觀感。
@@ -688,7 +708,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 ```ts
 import { createShell } from "bun-app-window";
-import { embeddedDll } from "bun-app-window/embedded";   // 將 DLL 位元組內嵌至封裝產物
+import { embeddedDll } from "bun-app-window/embedded"; // 將 DLL 位元組內嵌至封裝產物
 
 const shell = await createShell({ url, embedded: embeddedDll });
 ```
@@ -727,14 +747,14 @@ bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 
 ### 內建快速鍵與滑鼠行為
 
-| 觸發方式 | 預設行為 |
-| --- | --- |
-| `Ctrl +` / `Ctrl -` / `Ctrl 0` | 頁面縮放：放大一階 / 縮小一階 / 重設為 100% |
-| `Ctrl + 滑鼠滾輪` | 頁面縮放：放大 / 縮小 |
-| `F11` | 切換全螢幕模式（隱藏視窗邊框並覆蓋系統工作列） |
-| `F5` / `Ctrl + R` | 重新載入目前頁面 |
-| `F12` | 開啟 WebView2 開發人員工具 |
-| `Alt + Space` / 標題列右鍵 | 彈出 Windows 系統視窗選單 |
+| 觸發方式                       | 預設行為                                       |
+| ------------------------------ | ---------------------------------------------- |
+| `Ctrl +` / `Ctrl -` / `Ctrl 0` | 頁面縮放：放大一階 / 縮小一階 / 重設為 100%    |
+| `Ctrl + 滑鼠滾輪`              | 頁面縮放：放大 / 縮小                          |
+| `F11`                          | 切換全螢幕模式（隱藏視窗邊框並覆蓋系統工作列） |
+| `F5` / `Ctrl + R`              | 重新載入目前頁面                               |
+| `F12`                          | 開啟 WebView2 開發人員工具                     |
+| `Alt + Space` / 標題列右鍵     | 彈出 Windows 系統視窗選單                      |
 
 ## 開發與驗證
 
@@ -765,10 +785,10 @@ bun run demo       # 啟動互動式自我檢測範例程式（需於桌面工�
 
 自動化測試或截圖腳本若需透過 Win32 `EnumWindows` 過濾視窗控制代碼（HWND），請依據視窗模式比對對應的視窗類別名稱（Window Class）：
 
-| 視窗模式 | 對應視窗類別名稱 |
-| --- | --- |
-| 標準有邊框模式（未傳 `FLAG_FRAMELESS`） | `webview` |
-| 無邊框模式（傳入 `FLAG_FRAMELESS`） | `webview_shell` |
+| 視窗模式                                | 對應視窗類別名稱 |
+| --------------------------------------- | ---------------- |
+| 標準有邊框模式（未傳 `FLAG_FRAMELESS`） | `webview`        |
+| 無邊框模式（傳入 `FLAG_FRAMELESS`）     | `webview_shell`  |
 
 ## 致謝
 

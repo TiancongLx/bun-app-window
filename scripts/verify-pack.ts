@@ -82,10 +82,7 @@ type RunResult = { code: number; out: string; err: string };
 
 async function run(argv: readonly string[], cwd: string): Promise<RunResult> {
     const proc = Bun.spawn([...argv], { cwd, stdout: "pipe", stderr: "pipe" });
-    const [out, err] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-    ]);
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
     return { code, out, err };
 }
@@ -126,10 +123,7 @@ function findTar(): string | null {
  * 没有冒号，不会被误判成远程主机。两层防护，缺一不可——只靠找一个好 tar，
  * 换个环境仍可能解析错。
  */
-async function listTarball(
-    tarExe: string,
-    tgz: string,
-): Promise<RunResult & { files: string[] }> {
+async function listTarball(tarExe: string, tgz: string): Promise<RunResult & { files: string[] }> {
     const res = await run([tarExe, "-tzf", basename(tgz)], dirname(tgz));
     const files = res.out
         .split(/\r?\n/)
@@ -168,10 +162,7 @@ export function checkPayload(files: readonly string[], declaredFiles: readonly s
     checks.push({
         name: "无未登记的发布文件",
         ok: disallowed.length === 0,
-        detail:
-            disallowed.length === 0
-                ? "全部命中白名单"
-                : disallowed.map((f) => `${f}（${hintFor(f)}）`).join("; "),
+        detail: disallowed.length === 0 ? "全部命中白名单" : disallowed.map((f) => `${f}（${hintFor(f)}）`).join("; "),
     });
 
     // files 里写了却没打进包的条目，等于清单在说谎
@@ -204,8 +195,7 @@ function checkConsumer(checkRun: RunResult, probeRun: RunResult): Check[] {
 
     // 「零错误」还不够：tsconfig 的 include 写歪了会得到「检查了 0 个文件」的满分答卷。
     // bun check 把摘要写在 stderr（标准输出是空的），两种措辞分别对应成功与失败。
-    const counted =
-        /checked\s+(\d+)\s+files?/i.exec(combined) ?? /No type errors in (\d+)\s+files?/i.exec(combined);
+    const counted = /checked\s+(\d+)\s+files?/i.exec(combined) ?? /No type errors in (\d+)\s+files?/i.exec(combined);
     const checkedFiles = counted?.[1] ? Number(counted[1]) : 0;
 
     return [
@@ -224,7 +214,11 @@ function checkConsumer(checkRun: RunResult, probeRun: RunResult): Check[] {
             ok: probeRun.code === 0,
             detail:
                 probeRun.code === 0
-                    ? (`${probeRun.out}`.split(/\r?\n|\r/).map((l) => l.trim()).filter((l) => l).pop() ?? "")
+                    ? (`${probeRun.out}`
+                          .split(/\r?\n|\r/)
+                          .map((l) => l.trim())
+                          .filter((l) => l)
+                          .pop() ?? "")
                     : `${probeRun.out}\n${probeRun.err}`
                           .split(/\r?\n|\r/)
                           .map((l) => l.trim())
@@ -292,10 +286,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     try {
         // ---- 1. 打包 ---------------------------------------------------------
         const packStart = performance.now();
-        const pack = await run(
-            [BUN, "pm", "pack", "--destination", packDir, "--quiet"],
-            REPO_ROOT,
-        );
+        const pack = await run([BUN, "pm", "pack", "--destination", packDir, "--quiet"], REPO_ROOT);
         const packMs = performance.now() - packStart;
         if (pack.code !== 0) {
             fatal(`bun pm pack failed (rc=${pack.code}): ${pack.err.trim() || pack.out.trim()}`);
@@ -383,10 +374,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 
         // ---- 4. 消费方运行时探针 ---------------------------------------------
         const probeStart = performance.now();
-        const probeRun = await run(
-            [BUN, "probe.ts", "--expect-source", "package"],
-            consumerDir,
-        );
+        const probeRun = await run([BUN, "probe.ts", "--expect-source", "package"], consumerDir);
         const probeMs = performance.now() - probeStart;
 
         checks.push(...checkConsumer(checkRun, probeRun));

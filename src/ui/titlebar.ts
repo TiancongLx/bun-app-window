@@ -479,8 +479,7 @@ export function mountTitleBar(opts: TitleBarOptions): TitleBarHandle {
     if (!nativeCaptions) {
         for (const action of ["minimize", "maximize", "close"] as const) {
             const btn = doc.createElement("button");
-            btn.className =
-                action === "close" ? "ws-titlebar__btn ws-titlebar__btn--close" : "ws-titlebar__btn";
+            btn.className = action === "close" ? "ws-titlebar__btn ws-titlebar__btn--close" : "ws-titlebar__btn";
             btn.setAttribute("type", "button");
             btn.setAttribute("data-act", action);
             btn.textContent = glyphFor(icons, action, opts.maximized === true);

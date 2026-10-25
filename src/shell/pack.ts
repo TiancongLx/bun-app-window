@@ -237,16 +237,12 @@ export async function bundlePage(opts: BundlePageOptions): Promise<PageBundle> {
         });
     } catch (err) {
         // 入口不可达走这条：`Bun.build` 抛 AggregateError 而不是返回 success:false
-        throw new Error(
-            `页面脚本打包失败（entry=${entry}）\n${failureDetail(err)}`,
-        );
+        throw new Error(`页面脚本打包失败（entry=${entry}）\n${failureDetail(err)}`);
     }
 
     if (!result.success || result.outputs.length === 0) {
         const detail = result.logs.map((item) => String(item)).join("\n");
-        throw new Error(
-            `页面脚本打包失败（entry=${entry}）\n${detail || "（Bun 未提供日志）"}`,
-        );
+        throw new Error(`页面脚本打包失败（entry=${entry}）\n${detail || "（Bun 未提供日志）"}`);
     }
 
     const outputs: PageOutput[] = [];
@@ -280,11 +276,7 @@ export async function bundlePage(opts: BundlePageOptions): Promise<PageBundle> {
  *
  * 产物本身没有扩展名时（少见），追加 `.<kind>`，保证不覆盖入口脚本。
  */
-export function outputPathFor(
-    out: string,
-    entryPath: string,
-    artifact: Pick<PageOutput, "path" | "kind">,
-): string {
+export function outputPathFor(out: string, entryPath: string, artifact: Pick<PageOutput, "path" | "kind">): string {
     if (artifact.path === entryPath || artifact.kind === "entry-point") {
         return out;
     }

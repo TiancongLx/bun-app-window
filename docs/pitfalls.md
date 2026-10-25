@@ -85,11 +85,11 @@
 ### 2.4b 居中必须两种窗口模式都做，且先收缩再居中
 
 - **症状一**：带边框窗口调用 `FLAG_CENTER` 完全没反应，停在 `(343,343)` 这类级联位置。
-  - **原因**：居中逻辑只写在无边框分支里（无边框是我们自建窗口，带边框是 webview 库自建窗口）。
-  - **修法**：抽出 `center_on_work_area(hwnd)`，两条分支都调；带边框分支放在 `ShowWindow(SW_HIDE)` 之后，位置先定好再显示，避免显示后跳一下。
+    - **原因**：居中逻辑只写在无边框分支里（无边框是我们自建窗口，带边框是 webview 库自建窗口）。
+    - **修法**：抽出 `center_on_work_area(hwnd)`，两条分支都调；带边框分支放在 `ShowWindow(SW_HIDE)` 之后，位置先定好再显示，避免显示后跳一下。
 - **症状二**：居中之后水平方向对，但垂直方向贴顶（`y=0`），看起来没居中。
-  - **原因**：窗口比工作区还高。900×940 逻辑像素在 200% 缩放下加边框是 1950 物理像素，工作区只有 1824；居中算出的 `y` 为负，夹取后只能贴顶。
-  - **修法**：先收缩到工作区（不低于 `setMinSize` 下限）再居中。收缩是把「居中」变成可能的前提，不是可选项。
+    - **原因**：窗口比工作区还高。900×940 逻辑像素在 200% 缩放下加边框是 1950 物理像素，工作区只有 1824；居中算出的 `y` 为负，夹取后只能贴顶。
+    - **修法**：先收缩到工作区（不低于 `setMinSize` 下限）再居中。收缩是把「居中」变成可能的前提，不是可选项。
 - **附带修正**：`setMinSize` 契约是逻辑像素，原生侧直接当物理像素用会让高 DPI 下最小尺寸偏小；统一走 `min_track_size()` 按 `GetDpiForWindow` 换算。
 - **证据**：`实测`。修复前 `rect=(343,343) 1826x1950`；修复后 `rect=(623,56) 1826x1711`，与工作区中心一致，四边留白 623/623/56/57。
 
@@ -99,20 +99,20 @@
 - **根因一：窗口被提前显示。** `webview_set_size()` 的实现结尾是 `return window_show();`
   （`vendor/webview/.../win32_edge.hh` 的 `set_size_impl`），而 `window_show()` 里
   `ShowWindow` + `UpdateWindow` 是**同步绘制**。所以「延迟显示」实际是「先显示、再被我们藏起来」。
-  - 修法：子类化要装在 `webview_set_size` **之前**，并在 `WM_SHOWWINDOW` 里用 `SWP_HIDEWINDOW`
-    把来自外部的显示请求压回去（`wp == TRUE && g_defer_show && !g_shown`）。
-  - 反向陷阱：**不能**为了避开它就不调 `webview_set_size`。它置位内部的 `m_is_size_set`，
-    少了这一步 webview 会在消息循环里补一次默认 `640x480`，把尺寸覆盖掉（实测 client 从
-    1800×1640 变成 1280×960）。
+    - 修法：子类化要装在 `webview_set_size` **之前**，并在 `WM_SHOWWINDOW` 里用 `SWP_HIDEWINDOW`
+      把来自外部的显示请求压回去（`wp == TRUE && g_defer_show && !g_shown`）。
+    - 反向陷阱：**不能**为了避开它就不调 `webview_set_size`。它置位内部的 `m_is_size_set`，
+      少了这一步 webview 会在消息循环里补一次默认 `640x480`，把尺寸覆盖掉（实测 client 从
+      1800×1640 变成 1280×960）。
 - **根因二：露出来的底色是白的。** WebView2 表面在页面首帧绘制前显示自身默认**白底**，
   实测首帧亮度 mean=236/255。窗口再怎么延后显示也没用——一显示就是白的。
-  - 修法：`ICoreWebView2Controller2::put_DefaultBackgroundColor`，在 `navigate` **之前**设。
-    MinGW 无 IID 符号库，用 GUID 字面量 `{c979903e-d4ca-4228-92eb-47ee3fa96eab}`（见 3.2）。
+    - 修法：`ICoreWebView2Controller2::put_DefaultBackgroundColor`，在 `navigate` **之前**设。
+      MinGW 无 IID 符号库，用 GUID 字面量 `{c979903e-d4ca-4228-92eb-47ee3fa96eab}`（见 3.2）。
 - **根因三：显示时机由固定延时决定。** `Bun.sleep(600)` 太短会露出半成品首帧
   （实测首帧亮度只有终态的 46%），太长则拖慢启动。
-  - 修法：页面在两次 `requestAnimationFrame` 之后 `POST /api/ready`，宿主等这个信号再
-    `shell.show()`，并留 2.5 s 超时兜底。深色模式还要在 `<head>` 内同步设 `data-theme`，
-    否则首帧会按浅色算变量（深色面板里冒出白底按钮）。
+    - 修法：页面在两次 `requestAnimationFrame` 之后 `POST /api/ready`，宿主等这个信号再
+      `shell.show()`，并留 2.5 s 超时兜底。深色模式还要在 `<head>` 内同步设 `data-theme`，
+      否则首帧会按浅色算变量（深色面板里冒出白底按钮）。
 - **证据**：`实测`。逐帧 `PrintWindow` 采样（不要用 `CopyFromScreen`，本机 z 序被锁、
   截图会被遮挡窗口覆盖）：修复前首帧 `mean=236`；修复后从第一帧起稳定 `mean=39`。
 - **回归守护**：`tests/first-paint.test.ts`（原生侧三条顺序约束）；页面侧的
@@ -177,8 +177,8 @@
 - **症状**：`bun check` 全绿，但开窗后页面白屏 / 按钮全无反应。
 - **原因**：`page.ts` 把整页 HTML 写成 TS 模板字符串，里面的 JS 只有**运行时**才被
   解析。TS 类型检查看的是外层模板字符串，看不出内层 JS 的语法错。踩过两次：
-  1) 模板里写 `"\n"` → 变成真实换行 → 字符串未终止
-  2) 模板里写 `"\\"` → 变成单个反斜杠 → 反斜杠把后面的引号转义掉 → 字符串未终止
+    1. 模板里写 `"\n"` → 变成真实换行 → 字符串未终止
+    2. 模板里写 `"\\"` → 变成单个反斜杠 → 反斜杠把后面的引号转义掉 → 字符串未终止
 - **连带现象**：整块 `<script>` 都不执行，于是「30 项参数」停在「载入中…」、
   深色主题不生效、右键菜单与拖放全哑。看起来像多个功能同时坏了，其实只有一个根因。
 - **修法**：模板里表示反斜杠要写 `\\\\`；模板里不要出现裸反引号（注释里的
@@ -272,7 +272,7 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 - **对照实验（决定性）**：同一份 `src/host.ts`，
     - `Start-Process -WindowStyle Hidden` → 12 次采样全 `WS_VISIBLE=False`（6 秒）
     - `Start-Process`（默认） → 1000 ms 时 `WS_VISIBLE=True`
-  代码、参数、环境完全相同，只有启动器的 STARTUPINFO 不同。
+      代码、参数、环境完全相同，只有启动器的 STARTUPINFO 不同。
 - **修法**：`show_now()` 里 `ShowWindow` 之后调 `force_visible()`——先查
   `IsWindowVisible`，不可见就再 `ShowWindow` 一次，仍不可见则用
   `SetWindowPos(..., SWP_SHOWWINDOW)` 兜底（`SWP_SHOWWINDOW` 不读 `nCmdShow`，
@@ -318,8 +318,8 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
        TS 侧连对应常量都没有，所以调用方**无法表达**这个意图。
     3. `g_origin` 的注释写着「由 `shell_start_ex` 从 `g_url` 算出」，
        而赋值语句一句都没有 —— 恒为空串。
-  前两条足以让守卫不装；即使补上调用，第 3 条也会让
-  `if (g_allow_external_nav || g_origin.empty()) return;` 立刻提前返回。
+       前两条足以让守卫不装；即使补上调用，第 3 条也会让
+       `if (g_allow_external_nav || g_origin.empty()) return;` 立刻提前返回。
 - **最刺眼的一条**：`NavEventBase` 定义了引用计数与 `QueryInterface` 的公共实现，
   但 `NavigationGuard` / `NewWindowGuard` **都没有继承它**。也就是说这 241 行
   **从未通过编译**——`error: use of undeclared identifier 'add_ref'` 一次就把
@@ -416,29 +416,30 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 - **症状**：0.5.0 发布后，从资源管理器拖文件进窗口，光标显示**红色拒绝图标**，
   drop 根本不发生。`WM_DROPFILES` 一次也不来。
 - **两个实测事实**：
-  1. `DragAcceptFiles` 只设 `WS_EX_ACCEPTFILES`，**不注册** `IDropTarget`。查
-     `OleDropTargetInterface` property：整条窗口链（顶层 `webview` /
-     `webview_widget` / `Chrome_WidgetWin_0` / `Chrome_WidgetWin_1` /
-     `Chrome_RenderWidgetHostHWND` / `Intermediate D3D Window`）**全为 false**。
-     现代 Windows 的 OLE 命中测试**不会** fallback 到那条 legacy 路径——
-     `DragAcceptFiles` 只对「别人主动发 `WM_DROPFILES` 给你」有意义。
-  2. `AllowExternalDrop` 是 `CoreWebView2AllowExternalDrop`：「是否允许外部拖放」。
-     设 `FALSE` = 拒绝，不是「转交」。它把 WebView2 的 target 变成「什么都不接受」，
-     于是整条链上没有承接者。
+    1. `DragAcceptFiles` 只设 `WS_EX_ACCEPTFILES`，**不注册** `IDropTarget`。查
+       `OleDropTargetInterface` property：整条窗口链（顶层 `webview` /
+       `webview_widget` / `Chrome_WidgetWin_0` / `Chrome_WidgetWin_1` /
+       `Chrome_RenderWidgetHostHWND` / `Intermediate D3D Window`）**全为 false**。
+       现代 Windows 的 OLE 命中测试**不会** fallback 到那条 legacy 路径——
+       `DragAcceptFiles` 只对「别人主动发 `WM_DROPFILES` 给你」有意义。
+    2. `AllowExternalDrop` 是 `CoreWebView2AllowExternalDrop`：「是否允许外部拖放」。
+       设 `FALSE` = 拒绝，不是「转交」。它把 WebView2 的 target 变成「什么都不接受」，
+       于是整条链上没有承接者。
 - **正确修法**：`get_AdditionalObjects` + `ICoreWebView2File::get_Path`。
   让 WebView2 接管拖放，页面在 **capture 阶段**把 `DataTransfer.files` 转给宿主：
 
-  ```text
-  DOM drop → chrome.webview.postMessage({ files: [...] })
-           → ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects
-           → 每项 QueryInterface 到 ICoreWebView2File，get_Path 拿绝对路径
-           → 壳层 post_json({ t: "drop", paths: [...] })
-  ```
+    ```text
+    DOM drop → chrome.webview.postMessage({ files: [...] })
+             → ICoreWebView2WebMessageReceivedEventArgs2::get_AdditionalObjects
+             → 每项 QueryInterface 到 ICoreWebView2File，get_Path 拿绝对路径
+             → 壳层 post_json({ t: "drop", paths: [...] })
+    ```
 
-  - 注入脚本由 `kInit` 追加（**仅** `FLAG_ACCEPT_DROP` 时），页面不需要写任何代码。
-  - `dragover` 必须 `preventDefault()`，否则浏览器不认这个落点、`drop` 不会来。
-  - `FileList` 是 live 集合，跨进程 structured clone 前要先转成真数组。
-  - 老运行时没有 `EventArgs2`：`QueryInterface` 失败就静默放过，不影响其它消息。
+    - 注入脚本由 `kInit` 追加（**仅** `FLAG_ACCEPT_DROP` 时），页面不需要写任何代码。
+    - `dragover` 必须 `preventDefault()`，否则浏览器不认这个落点、`drop` 不会来。
+    - `FileList` 是 live 集合，跨进程 structured clone 前要先转成真数组。
+    - 老运行时没有 `EventArgs2`：`QueryInterface` 失败就静默放过，不影响其它消息。
+
 - **这条路的代价**：`AdditionalObjects` 只能从**页面发起的**投递里取，
   所以注入脚本是必需的一环——它不是「页面代码」，而是初始化脚本，与
   `window.__shell.recv` 同一条注入路径。投递用的是
@@ -458,12 +459,12 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 
 - **四道关，按触发顺序**：
 
-    | # | 关卡 | 失败时的现象 | 判据 |
-    | --- | --- | --- | --- |
-    | 1 | 宿主**完整性级别** ≤ 拖放源 | 一条 `dragenter` 都没有，光标禁止 | 计划任务 `RunLevel Limited` 跑，非提权 |
-    | 2 | 注入脚本跑到页面 | `window.__shellDropReady` 为空 | 页面读该标记 |
-    | 3 | `dropEffect` 显式设 `'copy'` | `dragenter`/`dragover` 照常，`dropEffect=none`，`drop` 不来 | 页面读 `e.dataTransfer.dropEffect` |
-    | 4 | 投递用 `postMessageWithAdditionalObjects` | `drop` 到了、`files=1`，但 `get_AdditionalObjects` 的 `get_Count` 是 0 | `__shellDropPosted` + 宿主侧 count |
+    | #   | 关卡                                      | 失败时的现象                                                           | 判据                                   |
+    | --- | ----------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------- |
+    | 1   | 宿主**完整性级别** ≤ 拖放源               | 一条 `dragenter` 都没有，光标禁止                                      | 计划任务 `RunLevel Limited` 跑，非提权 |
+    | 2   | 注入脚本跑到页面                          | `window.__shellDropReady` 为空                                         | 页面读该标记                           |
+    | 3   | `dropEffect` 显式设 `'copy'`              | `dragenter`/`dragover` 照常，`dropEffect=none`，`drop` 不来            | 页面读 `e.dataTransfer.dropEffect`     |
+    | 4   | 投递用 `postMessageWithAdditionalObjects` | `drop` 到了、`files=1`，但 `get_AdditionalObjects` 的 `get_Count` 是 0 | `__shellDropPosted` + 宿主侧 count     |
 
 - **第 1 关：UIPI 会连 `dragenter` 一起拦掉。** 本机 OTT 承载在
   `RunLevel Highest` 的登录任务里，所有子进程都是 High 完整性，而资源管理器是
@@ -490,16 +491,16 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
        To pass additionalObjects via WebMessage to the app, use the
        chrome.webview.postMessageWithAdditionalObjects content API.
 
-  所以第一个参数只放自己的标记，`File` 一律走第二个参数：
+    所以第一个参数只放自己的标记，`File` 一律走第二个参数：
 
-  ```js
-  wv.postMessageWithAdditionalObjects({ __shellDrop: 1 }, files);
-  ```
+    ```js
+    wv.postMessageWithAdditionalObjects({ __shellDrop: 1 }, files);
+    ```
 
-  这一关的教训比前三条都普遍：**「调用没抛错」不等于「效果发生了」**。
-  当时 `postMessage` 是 `try` 块里的，只要它不抛就置 `__shellDropPosted = 1`，
-  于是诊断标记本身在说谎。现在的写法把「投递被接受」与「宿主真的拿到了对象」
-  分成两个独立观测点。
+    这一关的教训比前三条都普遍：**「调用没抛错」不等于「效果发生了」**。
+    当时 `postMessage` 是 `try` 块里的，只要它不抛就置 `__shellDropPosted = 1`，
+    于是诊断标记本身在说谎。现在的写法把「投递被接受」与「宿主真的拿到了对象」
+    分成两个独立观测点。
 
 - **实验纪律（这一轮又犯了一次）**：第一版探针把监听同时挂在 capture 和冒泡上，
   计数翻倍——读数里 `dragenter=2` 其实是 1 次。**探针自己会制造假数据**，
@@ -519,8 +520,15 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 - **实测读数**（宿主侧诊断计数，这一轮专门为此加的）：
 
     ```json
-    {"paths":[],"dirs":[],"nFile":0,"nHandle":0,"nNoPath":1,"ok":false,
-     "err":"additional objects carried no usable path"}
+    {
+        "paths": [],
+        "dirs": [],
+        "nFile": 0,
+        "nHandle": 0,
+        "nNoPath": 1,
+        "ok": false,
+        "err": "additional objects carried no usable path"
+    }
     ```
 
     `nNoPath=1` 说明集合里**确实有 1 项**，但 `QueryInterface` 到
@@ -537,9 +545,14 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
   实测同一轮把 handles 与 files **一起**传上去：
 
     ```json
-    {"paths":["C:\\Users\\root\\Desktop\\鲸鱼拖放测试目录"],
-     "dirs":["C:\\Users\\root\\Desktop\\鲸鱼拖放测试目录"],
-     "nFile":1,"nHandle":0,"nNoPath":1,"ok":true}
+    {
+        "paths": ["C:\\Users\\root\\Desktop\\鲸鱼拖放测试目录"],
+        "dirs": ["C:\\Users\\root\\Desktop\\鲸鱼拖放测试目录"],
+        "nFile": 1,
+        "nHandle": 0,
+        "nNoPath": 1,
+        "ok": true
+    }
     ```
 
     `nFile=1` 就是那个 File。所以**主路是 `files`，handles 只是额外尝试**。
@@ -580,7 +593,7 @@ G2 之前，宿主要知道窗口状态只能轮询。做「环形队列 + 拉�
 它看起来**完全合法**：整数坐标、正尺寸、DPI 正常。所以形状校验——
 
 ```ts
-if (width <= 0 || height <= 0 || dpi <= 0) return null;   // 拦不住
+if (width <= 0 || height <= 0 || dpi <= 0) return null; // 拦不住
 ```
 
 ——一条都拦不住。`window.json` 于是变成上面那对值，下次启动恢复成一个 314×50 的窗口。
@@ -626,7 +639,7 @@ if (width <= 0 || height <= 0 || dpi <= 0) return null;   // 拦不住
 ### 2.19 `HTMAXBUTTON` 是 Snap Layouts 的唯一钥匙，也是页面点击的黑洞
 
 想让自绘标题栏的最大化按钮在悬停时弹 Win 11 的分屏面板，条件只有一个，且是
-微软文档明文写着的（*Support snap layouts for desktop apps on Windows 11*）：
+微软文档明文写着的（_Support snap layouts for desktop apps on Windows 11_）：
 
 ```text
 For Win32 apps, make sure you are responding appropriately to WM_NCHITTEST
@@ -685,11 +698,11 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
 
 几何常量 `32` / `46` 有**三份**，缺一不可：
 
-| 处 | 用途 |
-| --- | --- |
-| `src/shell/types.ts` | 事实源，页面与原生共同消费 |
-| `native/shell.cc` | `caption_button_at()` 的命中区（C++ 无法 import TS） |
-| `src/ui/titlebar.ts` 的 CSS | 视觉尺寸（页面真正渲染的是 CSS） |
+| 处                          | 用途                                                 |
+| --------------------------- | ---------------------------------------------------- |
+| `src/shell/types.ts`        | 事实源，页面与原生共同消费                           |
+| `native/shell.cc`           | `caption_button_at()` 的命中区（C++ 无法 import TS） |
+| `src/ui/titlebar.ts` 的 CSS | 视觉尺寸（页面真正渲染的是 CSS）                     |
 
 数值算偏几个像素，表现是「悬停位置怪」或「不弹」——两种都极难反推回常量。
 
@@ -815,10 +828,10 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
 
 同一个窗口只改 rest 底的填充 alpha 做 A/B：
 
-| alpha | `UpdateLayeredWindow` | 命中 |
-| --- | --- | --- |
-| 0 | `true` | **0/3** |
-| 1 ~ 255 | `true` | **3/3** |
+| alpha   | `UpdateLayeredWindow` | 命中    |
+| ------- | --------------------- | ------- |
+| 0       | `true`                | **0/3** |
+| 1 ~ 255 | `true`                | **3/3** |
 
 - rest 底填 `alpha = 1`（1/255，肉眼不可见）不是「差不多就行」，是**唯一能保住命中的最小值**。别优化成 0，也别因为看不见就删掉这次填充。
 - 五态 hover 靠背板亮度区分，实测 `32.0 → 55.1`（**+23.1**，理论值 +22.7）。三个字形的包围盒 `20×20 / 20×20 / 20×2` 物理 = `10×10 / 10×10 / 10×1` 逻辑，居中偏差 `0.0 / 0.0 / 0.0`。
@@ -855,13 +868,14 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
     - 人工 `SendMessage(WM_ACTIVATE, WA_INACTIVE)` 之后仍是 `3/3`。**激活态被排除**，变量只剩 z 序。
 - **规矩**：屏幕坐标类探针必须带**三条前置**，任何一条不过就输出「判据不可信」并退出，**绝不把 0 当结论**：
 
-    | 前置 | 判据 |
-    | --- | --- |
-    | A 目标就是前景窗口 | `GetForegroundWindow() === 目标` |
+    | 前置                   | 判据                                                        |
+    | ---------------------- | ----------------------------------------------------------- |
+    | A 目标就是前景窗口     | `GetForegroundWindow() === 目标`                            |
     | B 目标矩形未被他人占用 | caption 上一个按钮外的点，其句柄的 **pid** 必须等于目标 pid |
-    | C 尺子没瞎 | 对照点必须**穿透到 child**（非 null、非顶层本身） |
+    | C 尺子没瞎             | 对照点必须**穿透到 child**（非 null、非顶层本身）           |
 
     注意 B 和 C 都要看 **pid**，不是看类名、也不只看「非 null」。
+
 - **判据落地**：`%TEMP%\baw-caption-verify.ts` 已按上面三条实现，前置不过时打印「**判据不可信，本轮不作结论**」并以退出码 3 结束。真机读数：三条前置 PASS，三个按钮 `★ webview_shell_caption` 且 `HT=20/9/8`，标题空白仍回 `Chrome_RenderWidgetHostHWND`，`3/3` + `空白区未被 caption 吞`。
 - **证据**：`实测结果`（2026-10-22，`baw-mvp` pid 29196 / `bun-app-window@0.6.1` / @192dpi 最大化 / 确认 DLL `E807B058`）。
 
@@ -1014,16 +1028,16 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
 - **先厘清两层的成本**：
     - 模型侧：每图最多 **1024 tokens**，超过部分被规范化掉（`1300×1300` 等效封顶）
     - 宿主侧：Open WebUI 把历史消息留在后端内存里，图片作为 base64 **在之后每一轮被反复携带**
-  **真正的滚雪球是后者**：一张 47 KB 的图，base64 后 62 KB，20 轮就是 1.2 MiB 常驻；
-  十张图、几十轮，后端内存就是这么涨上去的。
+      **真正的滚雪球是后者**：一张 47 KB 的图，base64 后 62 KB，20 轮就是 1.2 MiB 常驻；
+      十张图、几十轮，后端内存就是这么涨上去的。
 - **实测胖瘦**（2000×1360 的真实窗口截图）：
 
-    | 路线 | 字节 | base64 | 20 轮驻留 |
-    | --- | --- | --- | --- |
-    | truecolor png 全尺寸 | 143,013 | 190,684 | 3.6 MiB |
-    | jpeg q82 全尺寸 | 139,761 | 186,348 | 3.6 MiB |
-    | **palette png 全尺寸** | **46,567** | **62,092** | **1.2 MiB** |
-    | jpeg q82 缩到 1024 | 49,292 | 65,724 | 1.3 MiB |
+    | 路线                       | 字节       | base64     | 20 轮驻留   |
+    | -------------------------- | ---------- | ---------- | ----------- |
+    | truecolor png 全尺寸       | 143,013    | 190,684    | 3.6 MiB     |
+    | jpeg q82 全尺寸            | 139,761    | 186,348    | 3.6 MiB     |
+    | **palette png 全尺寸**     | **46,567** | **62,092** | **1.2 MiB** |
+    | jpeg q82 缩到 1024         | 49,292     | 65,724     | 1.3 MiB     |
     | **裁剪 800×600 + palette** | **24,125** | **32,168** | **0.6 MiB** |
 
 - **两个反直觉结论**：
@@ -1063,16 +1077,16 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
   实测之后这个理由只对 palette 成立——**truecolor PNG 交给它纯属亏本**。
 - **实测**（3098×1850 真实窗口 / 800×600 裁剪，5 次取中位数）：
 
-    | 路线 | 全窗 ms / KiB | 裁剪 ms / KiB |
-    | --- | --- | --- |
-    | 自家 `encodePng` level 1 | 22.0 / 617 | 3.2 / 90 |
-    | 自家 `encodePng` level 3 | 30.7 / 429 | 5.1 / 67 |
-    | **自家 `encodePng` level 6** | **39.0 / 392** | **6.0 / 62** |
-    | 自家 `encodePng` level 9 | 186.2 / 353 | 23.6 / 54 |
-    | `Bun.Image` png（默认级别） | 458.3 / 531 | 40.0 / 84 |
-    | `Bun.Image` png `compressionLevel: 1` | 420.9 / 836 | 36.1 / 119 |
-    | `Bun.Image` jpeg q85 | 23.8 / 406 | 4.0 / 67 |
-    | `Bun.Image` palette 256 | 2590.7 / 180 | 198.2 / 32 |
+    | 路线                                  | 全窗 ms / KiB  | 裁剪 ms / KiB |
+    | ------------------------------------- | -------------- | ------------- |
+    | 自家 `encodePng` level 1              | 22.0 / 617     | 3.2 / 90      |
+    | 自家 `encodePng` level 3              | 30.7 / 429     | 5.1 / 67      |
+    | **自家 `encodePng` level 6**          | **39.0 / 392** | **6.0 / 62**  |
+    | 自家 `encodePng` level 9              | 186.2 / 353    | 23.6 / 54     |
+    | `Bun.Image` png（默认级别）           | 458.3 / 531    | 40.0 / 84     |
+    | `Bun.Image` png `compressionLevel: 1` | 420.9 / 836    | 36.1 / 119    |
+    | `Bun.Image` jpeg q85                  | 23.8 / 406     | 4.0 / 67      |
+    | `Bun.Image` palette 256               | 2590.7 / 180   | 198.2 / 32    |
 
 - **三条结论**：
     1. **`Bun.Image` 的 PNG 全面劣于自家编码器**：慢 7–12 倍，而且**更大**
@@ -1084,15 +1098,16 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
        6 ms / 62 KiB。**裁剪是像素操作，与编码器无关。**
 - **端到端复验**（真实窗口 + CLI 全流程，含 Bun 启动与 `PrintWindow`，3098×1850）：
 
-    | 命令 | 字节 | base64 | 端到端 ms |
-    | --- | --- | --- | --- |
-    | `--level 1` | 704,353 | 939,140 | 148 |
-    | 默认（level 6） | 439,347 | 585,796 | 170 |
-    | `--level 9` | 411,366 | 548,488 | 330 |
-    | `--crop 700,300,800,600` | **50,836** | 67,784 | 170 |
+    | 命令                     | 字节       | base64  | 端到端 ms |
+    | ------------------------ | ---------- | ------- | --------- |
+    | `--level 1`              | 704,353    | 939,140 | 148       |
+    | 默认（level 6）          | 439,347    | 585,796 | 170       |
+    | `--level 9`              | 411,366    | 548,488 | 330       |
+    | `--crop 700,300,800,600` | **50,836** | 67,784  | 170       |
 
     两条可以直接引用的结论：**level 9 多花一倍时间只省 6%**；
     **裁剪把 429 KiB 压到 50 KiB（−88%）**，token 估算从 1024 降到 291。
+
 - **判据**：`--format png` 时一次 `Bun.Image` 都不应被构造；只有 `--max-edge > 0`
   （要重采样）或 `--format` 为 palette / jpeg / webp 时才走它。
   回归断言在 `tests/tooling.test.ts` 的「默认不缩、png、level 6」与
@@ -1125,10 +1140,10 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
   全自家链路。实测之后发现交给它不但慢，**而且更大**。
 - **实测**（真实窗口 3098×1850 → 1300×776，5 次取中位数）：
 
-    | 路线 | ms | 字节 |
-    | --- | --- | --- |
+    | 路线                           | ms       | 字节        |
+    | ------------------------------ | -------- | ----------- |
     | **`downscaleBgra` + 自家编码** | **45.9** | **102,036** |
-    | `Bun.Image` resize + png | 95.9 | 222,621 |
+    | `Bun.Image` resize + png       | 95.9     | 222,621     |
 
 - **为什么快**：`Bun.Image` 的输入是 PNG，所以它必须**先编码再解码**才能缩放；
   我们手里是 `CreateDIBSection` 的 BGRA 原始指针，那一步压根不用付。
@@ -1212,10 +1227,10 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
 
 - **证据**：`实测`。两份对照工程，均 `lib: ["ESNext", "DOM"]`：
 
-    | 工程 | 内容 | 结果 |
-    | --- | --- | --- |
+    | 工程   | 内容                                   | 结果                                                 |
+    | ------ | -------------------------------------- | ---------------------------------------------------- |
     | 对照组 | 裸 `with { type: "text" }` + 单层 `as` | **2 条错**：`TS2322`、`TS2352`（文本与上引逐字一致） |
-    | 修复组 | 双层断言 + 九个公开子路径全部 import | **13 files 零错误** |
+    | 修复组 | 双层断言 + 九个公开子路径全部 import   | **13 files 零错误**                                  |
 
     消费者侧同样双向验证：同一份 `tsconfig` + `src` 装 0.4.0 得 1 条 `TS2352`，
     装修复后的 tarball 得 0 条。
@@ -1275,10 +1290,10 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
 
 #### 五、两个枚举值都差一位
 
-| 常量 | 我写错的 | 正确 | 写错的后果 |
-| --- | --- | --- | --- |
-| `CMSG_VERIFY_SIGNER_NULL` | 2（那是 `..._PK`） | **4** | `CRYPT_E_INVALID_MSG_TYPE` |
-| `CMSG_CTRL_VERIFY_SIGNATURE_EX` | 1（那是非 EX 版） | **2** | `CRYPT_E_ASN1_BADTAG`，把 EX 结构体当 `PCCERT_CONTEXT` 解 |
+| 常量                            | 我写错的           | 正确  | 写错的后果                                                |
+| ------------------------------- | ------------------ | ----- | --------------------------------------------------------- |
+| `CMSG_VERIFY_SIGNER_NULL`       | 2（那是 `..._PK`） | **4** | `CRYPT_E_INVALID_MSG_TYPE`                                |
+| `CMSG_CTRL_VERIFY_SIGNATURE_EX` | 1（那是非 EX 版）  | **2** | `CRYPT_E_ASN1_BADTAG`，把 EX 结构体当 `PCCERT_CONTEXT` 解 |
 
 #### 六、`WTD_REVOKE_WHOLECHAIN` 会联网，直接卡住
 
@@ -1387,9 +1402,9 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
 
 - **事实**：`SignedCms.CheckSignature(true)` 只验证 PKCS#7 签名与内容的数学一致性，不验证书链。文件完整性与信任判定由 WinVerifyTrust 负责。
 - **测试要点**：
-  - `Get-AuthenticodeSignature` 对未受信任根返回 `UnknownError` + `CERT_E_UNTRUSTEDROOT`（`0x800B0109`）。
-  - 篡改 `.text` 一个字节后返回 `HashMismatch`，这是签名真正起作用的证明。
-  - 篡改后 PKCS#7 的 `CheckSignature(true)` 仍为 VALID，因为签名的是「签名时刻的 PE 摘要」，不是磁盘当前内容。篡改判定以 `HashMismatch` 为准。
+    - `Get-AuthenticodeSignature` 对未受信任根返回 `UnknownError` + `CERT_E_UNTRUSTEDROOT`（`0x800B0109`）。
+    - 篡改 `.text` 一个字节后返回 `HashMismatch`，这是签名真正起作用的证明。
+    - 篡改后 PKCS#7 的 `CheckSignature(true)` 仍为 VALID，因为签名的是「签名时刻的 PE 摘要」，不是磁盘当前内容。篡改判定以 `HashMismatch` 为准。
 - **自签证书安装**：写入 `CurrentUser\TrustedPublisher` 可成功；写入 `CurrentUser\Root` 需要管理员权限，普通权限下报「不支持该请求」。
 - **证据**：`实测`。
 
@@ -1410,7 +1425,8 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
     差异偏移：0x80 0x81 0x82 0x83 0x6b204 0x6b205 0x6b206 0x6b207
     ```
 
-  即 `0x80..0x83`（TimeDateStamp）与 `0x6b204..0x6b207`（时间派生字段）。
+    即 `0x80..0x83`（TimeDateStamp）与 `0x6b204..0x6b207`（时间派生字段）。
+
 - **正确判据**：用两个不同的 `SOURCE_DATE_EPOCH` 各编一次，两次产物的差异集合
   就是「时间派生字节」全集；把入库版这些偏移对齐后，必须与全新构建**逐字节相同**。
   集合**不写死**——它是 clang 版本与链接布局的函数，写死会在升级工具链时假红。
@@ -1465,12 +1481,12 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
   `libshell-<hash>.dll`。没有它就别往下测——先看导入在不在。
 - **验证**（删掉 `%LOCALAPPDATA%\BunAppWindow\runtime\`，产物单独放空目录）：
 
-    | 条件 | 结果 |
-    | --- | --- |
-    | 修前，空目录 | exit 1，`cannot locate libshell.dll` |
-    | 修前，exe + DLL 同级 | exit 0，`source=package` |
-    | 修后，空目录 | **exit 0，`source=embedded`**，释放到 `%LOCALAPPDATA%\BunAppWindow\runtime\libshell-15ef6452e3fcc26f.dll` |
-    | 修后，二次运行 | `source` 仍 `embedded`，释放文件 **mtime 不变**（`reused === true`） |
+    | 条件                 | 结果                                                                                                      |
+    | -------------------- | --------------------------------------------------------------------------------------------------------- |
+    | 修前，空目录         | exit 1，`cannot locate libshell.dll`                                                                      |
+    | 修前，exe + DLL 同级 | exit 0，`source=package`                                                                                  |
+    | 修后，空目录         | **exit 0，`source=embedded`**，释放到 `%LOCALAPPDATA%\BunAppWindow\runtime\libshell-15ef6452e3fcc26f.dll` |
+    | 修后，二次运行       | `source` 仍 `embedded`，释放文件 **mtime 不变**（`reused === true`）                                      |
 
 - **副产物**：`ADR 0003` 的「自管理释放到 `%LOCALAPPDATA%`」这条路径，也是在这一刻
   才第一次被真实 exe 走通（此前只被单测覆盖过「同名同内容复用」的纯函数部分）。
@@ -1667,8 +1683,8 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
     bun run eyes --pid 16648 --class webview --shot out.png
     ```
 
-  窗口类名见 `AGENTS.md` §6：带边框是 `webview`，无边框是 `webview_shell`。
-  **凡是用项目名/目录名当标题去找窗口，就该想到它也在路径里。**
+    窗口类名见 `AGENTS.md` §6：带边框是 `webview`，无边框是 `webview_shell`。
+    **凡是用项目名/目录名当标题去找窗口，就该想到它也在路径里。**
 
 - **附带一层**：`eyes` 拒绝截图最小化窗口是对的（`PrintWindow` 对最小化窗口
   返回 `TRUE` 但内容是噪声）。所以看到 `minimized` 时，先用
@@ -1685,13 +1701,13 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
 
 - **真因**：两处各用了一套编号，而且都不算错：
 
-    | 处 | 收/给什么 |
-    | --- | --- |
-    | `src/shell/types.ts` 的 `RESIZE_EDGE` | Win32 `HT*`：`LEFT=10 … BOTTOMRIGHT=17` |
+    | 处                                              | 收/给什么                                                   |
+    | ----------------------------------------------- | ----------------------------------------------------------- |
+    | `src/shell/types.ts` 的 `RESIZE_EDGE`           | Win32 `HT*`：`LEFT=10 … BOTTOMRIGHT=17`                     |
     | `native/shell.cc` 的 `shell_begin_resize(edge)` | **数组下标 0–7**：`if (edge >= 0 && edge <= 7) codes[edge]` |
 
     `codes[8]` 的排列是 `{HTLEFT, HTRIGHT, HTTOP, HTBOTTOM, HTTOPLEFT, HTTOPRIGHT,
-    HTBOTTOMLEFT, HTBOTTOMRIGHT}`。所以正确取值是
+HTBOTTOMLEFT, HTBOTTOMRIGHT}`。所以正确取值是
     `LEFT=0, RIGHT=1, TOP=2, BOTTOM=3, TOPLEFT=4, TOPRIGHT=5, BOTTOMLEFT=6, BOTTOMRIGHT=7`
     ——和 `RESIZE_EDGE` 差一个常数，且**排序也不同**（`RESIZE_EDGE` 是顺时针，`codes[]`
     是先四边后四角）。
@@ -1707,10 +1723,10 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
 
     三条新判据把这次误判钉死（`tests/types.test.ts`）：
 
-    | 判据 | 防的是 |
-    | --- | --- |
-    | `RESIZE_INDEX` 8 项逐项对齐 `codes[]` 顺序 | 表本身抄错 |
-    | 下标恰是 `0..7` 的一个排列 | 漏项 / 重号 |
+    | 判据                                          | 防的是                   |
+    | --------------------------------------------- | ------------------------ |
+    | `RESIZE_INDEX` 8 项逐项对齐 `codes[]` 顺序    | 表本身抄错               |
+    | 下标恰是 `0..7` 的一个排列                    | 漏项 / 重号              |
     | `RESIZE_INDEX[BOTTOM] !== BOTTOM - 10` 等三条 | 有人把它「简化」成减常数 |
 
     最后一条是这次事故的关键：**减 10 在前三项都对**（LEFT/RIGHT/TOP 正好 0/1/2），
@@ -1782,15 +1798,15 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
 
 - **实测对照**（同一套 `target: browser` / `esm` / `minify`）：
 
-    | 入口 | 产物 | 构建 |
-    | --- | --- | --- |
-    | 空 TS（baseline） | 18 B | 9 ms |
-    | React 19.3.1 最小 | 431,288 B（421.2 KiB） | 21 ms |
-    | **Solid 1.9.17 + `solid-js/h`** | **21,154 B（20.7 KiB）** | 20 ms |
-    | Solid + `importSource: "solid-js"` | **`AggregateError: Bundle failed`** | — |
+    | 入口                               | 产物                                | 构建  |
+    | ---------------------------------- | ----------------------------------- | ----- |
+    | 空 TS（baseline）                  | 18 B                                | 9 ms  |
+    | React 19.3.1 最小                  | 431,288 B（421.2 KiB）              | 21 ms |
+    | **Solid 1.9.17 + `solid-js/h`**    | **21,154 B（20.7 KiB）**            | 20 ms |
+    | Solid + `importSource: "solid-js"` | **`AggregateError: Bundle failed`** | —     |
 
-  React 直接可用（`importSource: "react"`）；Solid 必须换 `importSource`，
-  产物仍比 React 小 20 倍。
+    React 直接可用（`importSource: "react"`）；Solid 必须换 `importSource`，
+    产物仍比 React 小 20 倍。
 
 - **代价**：放弃模板编译优化，退化成 hyperscript 调用。体积优势保留，
   「编译期静态模板、运行时零协调」那一半优势拿不到。这不是缺陷，是
@@ -1849,37 +1865,37 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
 
 供后续对比回归：
 
-| 项 | 值（本机，200% 缩放） |
-| --- | --- |
-| 逻辑工作区 | 1536×912 |
-| 物理工作区 | 3072×1824 |
-| 窗口边框厚度 | 96dpi 下 8px，192dpi 下 13px |
-| 初始窗口（请求 1000×680） | `pos=536,232 win=client=2000×1360` |
-| 最大化 | `win=3098×1850 client=3072×1824` |
-| 还原 | 回到 `pos=536,232 win=client=2000×1360` |
-| 边缘命中 | 九点分别为 13/12/14/10/1/11/16/15/17 |
-| `FLAG_CENTER`（请求 900×820，带边框） | `pos=623,56 win=1826×1711`，四边留白 623/623/56/57 |
-| 单文件 exe 体积 | 约 92.7 MiB（97,176,576 B，含内嵌 DLL；0.6.0 实测） |
-| DLL 体积 | 约 993 KB（1,016,832 B，含外部导航守卫、窗口事件环与拖放处理器） |
-| 内嵌释放 | `%LOCALAPPDATA%\BunAppWindow\runtime\libshell-<sha 前 16 位>.dll`，二次运行复用（mtime 不变） |
-| 签名开销 | 约 7.2 KB |
+| 项                                    | 值（本机，200% 缩放）                                                                         |
+| ------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 逻辑工作区                            | 1536×912                                                                                      |
+| 物理工作区                            | 3072×1824                                                                                     |
+| 窗口边框厚度                          | 96dpi 下 8px，192dpi 下 13px                                                                  |
+| 初始窗口（请求 1000×680）             | `pos=536,232 win=client=2000×1360`                                                            |
+| 最大化                                | `win=3098×1850 client=3072×1824`                                                              |
+| 还原                                  | 回到 `pos=536,232 win=client=2000×1360`                                                       |
+| 边缘命中                              | 九点分别为 13/12/14/10/1/11/16/15/17                                                          |
+| `FLAG_CENTER`（请求 900×820，带边框） | `pos=623,56 win=1826×1711`，四边留白 623/623/56/57                                            |
+| 单文件 exe 体积                       | 约 92.7 MiB（97,176,576 B，含内嵌 DLL；0.6.0 实测）                                           |
+| DLL 体积                              | 约 993 KB（1,016,832 B，含外部导航守卫、窗口事件环与拖放处理器）                              |
+| 内嵌释放                              | `%LOCALAPPDATA%\BunAppWindow\runtime\libshell-<sha 前 16 位>.dll`，二次运行复用（mtime 不变） |
+| 签名开销                              | 约 7.2 KB                                                                                     |
 
 ### 6.1 WebGPU / WebGL 基线（2026-10-21 实测）
 
 `ADR 0004` 定的是「web 为主 + TypeGPU 局部」混合路线，所以这条基线决定那条路成不成立。
 在真实 WebView2 窗口里跑探针（不是 `--app` 模式），逐项读回：
 
-| 项 | 值 |
-| --- | --- |
-| UA | `Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0` |
-| `navigator.gpu` | `object` |
-| `requestAdapter()` | 成功 |
-| adapter `vendor` / `architecture` | `intel` / `xe-lpg` |
-| `requestDevice()` | 成功 |
-| **compute 读回** | `[1,2,3,4]` —— storage buffer 写入正确 |
-| **render 读回** | `[255,128,64,255]` —— 清屏色精确 |
-| canvas `getContext("webgpu")` | 成功，`getPreferredCanvasFormat()` = `bgra8unorm` |
-| WebGL2（对照） | 成功，`ANGLE (Intel, Intel(R) Arc(TM) Graphics (0x00007D55) Direct3D11 vs_5_0 ps_5_0, D3D11)` |
+| 项                                | 值                                                                                            |
+| --------------------------------- | --------------------------------------------------------------------------------------------- |
+| UA                                | `Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0`                                                |
+| `navigator.gpu`                   | `object`                                                                                      |
+| `requestAdapter()`                | 成功                                                                                          |
+| adapter `vendor` / `architecture` | `intel` / `xe-lpg`                                                                            |
+| `requestDevice()`                 | 成功                                                                                          |
+| **compute 读回**                  | `[1,2,3,4]` —— storage buffer 写入正确                                                        |
+| **render 读回**                   | `[255,128,64,255]` —— 清屏色精确                                                              |
+| canvas `getContext("webgpu")`     | 成功，`getPreferredCanvasFormat()` = `bgra8unorm`                                             |
+| WebGL2（对照）                    | 成功，`ANGLE (Intel, Intel(R) Arc(TM) Graphics (0x00007D55) Direct3D11 vs_5_0 ps_5_0, D3D11)` |
 
 `adapter.features`（20 项，含）：`shader-f16` / `timestamp-query` / `texture-compression-bc` /
 `subgroups` / `subgroup-size-control` / `texture-formats-tier2` / `dual-source-blending` /
@@ -1887,12 +1903,12 @@ DER 头 30 82 29 AB 说：总长 = 4 + 0x29AB = 10671
 
 `adapter.limits`：
 
-| limit | 值 |
-| --- | --- |
-| `maxTextureDimension2D` | 16384 |
-| `maxBufferSize` | 2,147,483,648（2 GiB） |
-| `maxStorageBufferBindingSize` | 2,147,483,644 |
-| `maxComputeWorkgroupStorageSize` | 32768 |
+| limit                            | 值                     |
+| -------------------------------- | ---------------------- |
+| `maxTextureDimension2D`          | 16384                  |
+| `maxBufferSize`                  | 2,147,483,648（2 GiB） |
+| `maxStorageBufferBindingSize`    | 2,147,483,644          |
+| `maxComputeWorkgroupStorageSize` | 32768                  |
 
 **three.js r186 WebGPU 在同一个窗口里跑通**（三个纯色球的真实场景）：
 
@@ -1908,14 +1924,14 @@ verdict         THREE-WEBGPU RENDERS REAL PIXELS
 
 **打包体积**（`Bun.build`，`target: browser` / `esm` / `minify`）：
 
-| 入口 | 产物 |
-| --- | --- |
-| 空 TS | 18 B |
-| React 19.3.1 最小 | 421.2 KiB |
-| Solid 1.9.17 + `solid-js/h` | 20.7 KiB |
-| three.js WebGL | 521.6 KiB |
-| three.js WebGPU | 778.6 KiB |
-| TypeGPU 0.12.8 | 275.5 KiB（构建 1292 ms） |
+| 入口                        | 产物                      |
+| --------------------------- | ------------------------- |
+| 空 TS                       | 18 B                      |
+| React 19.3.1 最小           | 421.2 KiB                 |
+| Solid 1.9.17 + `solid-js/h` | 20.7 KiB                  |
+| three.js WebGL              | 521.6 KiB                 |
+| three.js WebGPU             | 778.6 KiB                 |
+| TypeGPU 0.12.8              | 275.5 KiB（构建 1292 ms） |
 
 **两条不能当读数的数**：
 

@@ -440,19 +440,9 @@ export function isCommittedRegion(r: MemoryRegion): boolean {
 }
 
 /** 读目标进程内存；返回实际读到的字节数，0 表示失败 */
-export function readProcessMemory(
-    hProcess: bigint,
-    address: bigint,
-    target: Uint8Array,
-): number {
+export function readProcessMemory(hProcess: bigint, address: bigint, target: Uint8Array): number {
     const read = new Uint8Array(8);
-    const ok = kernel32.symbols.ReadProcessMemory(
-        hProcess,
-        address,
-        target,
-        BigInt(target.length),
-        read,
-    );
+    const ok = kernel32.symbols.ReadProcessMemory(hProcess, address, target, BigInt(target.length), read);
     if (ok !== true) return 0;
     const view = new DataView(read.buffer);
     return Number(view.getBigUint64(0, true));
@@ -545,10 +535,7 @@ export function listModules(hProcess: bigint): ModuleInfo[] {
         const name = n > 0 ? readUtf16(textBuf) : "";
         let size = 0;
         let base = hModule;
-        if (
-            psapi.symbols.GetModuleInformation(hProcess, hModule, moduleInfoBuf, moduleInfoBuf.length) !==
-            0
-        ) {
+        if (psapi.symbols.GetModuleInformation(hProcess, hModule, moduleInfoBuf, moduleInfoBuf.length) !== 0) {
             const mview = new DataView(moduleInfoBuf.buffer);
             base = mview.getBigUint64(0, true);
             size = mview.getUint32(16, true);

@@ -107,9 +107,7 @@ export function createDib(width: number, height: number): Dib | null {
 
     const info = makeBitmapInfo(width, height);
     const bitsOut = new BigUint64Array(1);
-    const hBitmap = toHandle(
-        gdi32.symbols.CreateDIBSection(hdc, info, DIB_RGB_COLORS, bitsOut, 0n, 0),
-    );
+    const hBitmap = toHandle(gdi32.symbols.CreateDIBSection(hdc, info, DIB_RGB_COLORS, bitsOut, 0n, 0));
     if (hBitmap === 0n) {
         gdi32.symbols.DeleteDC(hdc);
         return null;
@@ -187,17 +185,7 @@ export function extractIcon(exePath: Uint8Array, index = 0): ExtractedIcon | nul
             try {
                 // DI_NORMAL = 0x0003：画图像 + 用掩码做透明
                 // 九个参数：hdc, x, y, hIcon, cx, cy, istep, hbrFlickerFree, diFlags
-                const ok = api.user32.symbols.DrawIconEx(
-                    dib.hdc,
-                    0,
-                    0,
-                    hIcon,
-                    size.width,
-                    size.height,
-                    0,
-                    0n,
-                    0x0003,
-                );
+                const ok = api.user32.symbols.DrawIconEx(dib.hdc, 0, 0, hIcon, size.width, size.height, 0, 0n, 0x0003);
                 if (ok !== true) return null;
                 return {
                     count,
@@ -242,4 +230,3 @@ export function closeGdi(): void {
         }
     }
 }
-

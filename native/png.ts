@@ -154,11 +154,7 @@ export function bgraToPng(
 }
 
 /** 从行优先的 RGBA（Buffer 常见顺序）取任意像素，越界返回 null */
-export function getPixel(
-    img: PngImage,
-    x: number,
-    y: number,
-): { r: number; g: number; b: number; a: number } | null {
+export function getPixel(img: PngImage, x: number, y: number): { r: number; g: number; b: number; a: number } | null {
     if (x < 0 || y < 0 || x >= img.width || y >= img.height) return null;
     const at = (y * img.width + x) * img.channels;
     const r = img.pixels[at];
@@ -193,15 +189,11 @@ export function encodePng(img: PngImage, format: PngFormat, level = 9): Uint8Arr
     }
     const channels = CHANNELS[format];
     if (img.channels !== channels) {
-        throw new Error(
-            `format ${format} needs ${channels} channels, image has ${img.channels}`,
-        );
+        throw new Error(`format ${format} needs ${channels} channels, image has ${img.channels}`);
     }
     const expected = img.width * img.height * channels;
     if (img.pixels.length !== expected) {
-        throw new Error(
-            `pixel buffer size mismatch: expected ${expected}, got ${img.pixels.length}`,
-        );
+        throw new Error(`pixel buffer size mismatch: expected ${expected}, got ${img.pixels.length}`);
     }
 
     // IHDR：width, height, bitDepth=8, colorType, compression=0, filter=0, interlace=0
@@ -237,12 +229,7 @@ export function encodePng(img: PngImage, format: PngFormat, level = 9): Uint8Arr
     // 判据见 tests/png.test.ts：IDAT 首字节必须是 0x78，且用 zlib.inflateSync 验。
     const idat = new Uint8Array(deflateSync(raw, { level: Math.min(9, Math.max(1, level)) }));
 
-    const parts = [
-        PNG_SIGNATURE,
-        chunk("IHDR", ihdr),
-        chunk("IDAT", idat),
-        chunk("IEND", new Uint8Array(0)),
-    ];
+    const parts = [PNG_SIGNATURE, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", new Uint8Array(0))];
     const total = parts.reduce((n, p) => n + p.length, 0);
     const out = new Uint8Array(total);
     let at = 0;

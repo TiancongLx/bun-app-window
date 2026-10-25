@@ -84,14 +84,7 @@ export function parseBounds(text: string): WindowPlacement | null {
     if (nums.some((n) => !Number.isFinite(n))) {
         return null;
     }
-    const [x, y, width, height, maximized, dpi] = nums as [
-        number,
-        number,
-        number,
-        number,
-        number,
-        number,
-    ];
+    const [x, y, width, height, maximized, dpi] = nums as [number, number, number, number, number, number];
     // 尺寸为 0 或负数说明窗口还没建好（原生在无窗口时返回 0 长度文本，这里再兜一层）
     if (width <= 0 || height <= 0 || dpi <= 0) {
         return null;
@@ -217,15 +210,9 @@ export type PlacementStoreOptions = {
  * 首次 `attach` 会立刻抓一次快照并写盘——程序若在用户操作前崩溃，也还有
  * 初始位置可恢复。
  */
-export function attachPlacementStore(
-    shell: Shell,
-    file: string,
-    opts: PlacementStoreOptions = {},
-): PlacementStore {
+export function attachPlacementStore(shell: Shell, file: string, opts: PlacementStoreOptions = {}): PlacementStore {
     const debounceMs = Math.max(0, opts.debounceMs ?? DEFAULTS.debounceMs);
-    const pump =
-        opts.events ??
-        attachEventPump(shell, { intervalMs: Math.max(1, opts.pumpMs ?? DEFAULTS.pumpMs) });
+    const pump = opts.events ?? attachEventPump(shell, { intervalMs: Math.max(1, opts.pumpMs ?? DEFAULTS.pumpMs) });
     const ownsPump = opts.events === undefined;
 
     let last: WindowPlacement | null = null;
@@ -277,9 +264,11 @@ export function attachPlacementStore(
             return;
         }
         // 串行化写入：并发 rename 同一目标会互相踩
-        pending = pending.then(() => savePlacement(file, now)).catch(() => {
-            // 写盘失败不该打断应用；下一次变化会重试
-        });
+        pending = pending
+            .then(() => savePlacement(file, now))
+            .catch(() => {
+                // 写盘失败不该打断应用；下一次变化会重试
+            });
     };
 
     const scheduleWrite = (): void => {

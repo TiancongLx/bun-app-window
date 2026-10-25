@@ -83,7 +83,13 @@ describe("gradientT", () => {
 
     test("值域恒在 [0,1]", () => {
         for (const t of [0, 30, 45, 60, 90, 135, 180]) {
-            for (const [x, y] of [[0, 0], [100, 0], [0, 100], [100, 100], [50, 50]]) {
+            for (const [x, y] of [
+                [0, 0],
+                [100, 0],
+                [0, 100],
+                [100, 100],
+                [50, 50],
+            ]) {
                 const v = gradientT(x!, y!, ...box, t);
                 expect(v).toBeGreaterThanOrEqual(0);
                 expect(v).toBeLessThanOrEqual(1);

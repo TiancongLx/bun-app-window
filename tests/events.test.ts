@@ -25,14 +25,7 @@ import {
  */
 
 /** 按原生 `EventRecord` 的布局拼一条记录（小端，32 字节定长） */
-function record(f: {
-    seq: number;
-    type: number;
-    a?: number;
-    b?: number;
-    c?: number;
-    flags?: number;
-}): Uint8Array {
+function record(f: { seq: number; type: number; a?: number; b?: number; c?: number; flags?: number }): Uint8Array {
     const buf = new Uint8Array(EVENT_RECORD_BYTES);
     const view = new DataView(buf.buffer);
     view.setUint32(0, f.seq, true);

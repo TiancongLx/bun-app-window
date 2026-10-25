@@ -184,15 +184,7 @@ export function renderIcon(size: number, samples = 4): PngImage {
                     const dBack = sdRoundRect(px, py, bgCx, bgCy, bgHw, bgHh, bgRadius);
                     if (dBack <= 0) {
                         bgCov += inv * inv;
-                        const t = gradientT(
-                            px,
-                            py,
-                            bgRect.left,
-                            bgRect.top,
-                            bgRect.right,
-                            bgRect.bottom,
-                            45,
-                        );
+                        const t = gradientT(px, py, bgRect.left, bgRect.top, bgRect.right, bgRect.bottom, 45);
                         const c = mix(BG_TOP, BG_BOTTOM, t);
                         bgR += c.r * inv * inv;
                         bgG += c.g * inv * inv;
@@ -206,11 +198,7 @@ export function renderIcon(size: number, samples = 4): PngImage {
                     if (Math.abs(dFrame) <= strokeWidth / 2) strokeCov += inv * inv;
 
                     // 3) 标题栏分隔线（水平线段，限制在框内）
-                    if (
-                        Math.abs(py - barY) <= barHalf &&
-                        px >= fRect.left &&
-                        px <= fRect.right
-                    ) {
+                    if (Math.abs(py - barY) <= barHalf && px >= fRect.left && px <= fRect.right) {
                         barCov += inv * inv;
                     }
 
@@ -308,7 +296,10 @@ export function buildIco(pngs: readonly { size: number; png: Uint8Array }[]): Ui
 }
 
 /** 读 ICO 头部，返回每项的尺寸与载荷偏移（用于回读校验，不解析 PNG） */
-export function readIcoIndex(ico: Uint8Array): { count: number; entries: { size: number; bytes: number; offset: number }[] } {
+export function readIcoIndex(ico: Uint8Array): {
+    count: number;
+    entries: { size: number; bytes: number; offset: number }[];
+} {
     if (ico.length < 6) throw new Error("ICO too short");
     const view = new DataView(ico.buffer, ico.byteOffset, ico.byteLength);
     if (view.getUint16(0, true) !== 0 || view.getUint16(2, true) !== 1) {

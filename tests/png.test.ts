@@ -1,15 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { inflateSync } from "node:zlib";
 
-import {
-    bgraToPng,
-    chunk,
-    crc32,
-    encodePng,
-    getPixel,
-    pngFromBgra,
-    type PngImage,
-} from "../native/png";
+import { bgraToPng, chunk, crc32, encodePng, getPixel, pngFromBgra, type PngImage } from "../native/png";
 
 /**
  * PNG 编码器的判据。
@@ -99,7 +91,7 @@ describe("crc32", () => {
         expect(crc32(new Uint8Array(0))).toBe(0);
     });
 
-    test("已知向量：\"123456789\" = 0xCBF43926", () => {
+    test('已知向量："123456789" = 0xCBF43926', () => {
         expect(crc32(new TextEncoder().encode("123456789"))).toBe(0xcbf43926);
     });
 
@@ -207,9 +199,7 @@ describe("encodePng", () => {
     });
 
     test("尺寸为 0 时抛错", () => {
-        expect(() =>
-            encodePng({ width: 0, height: 1, channels: 4, pixels: new Uint8Array(0) }, "rgba"),
-        ).toThrow();
+        expect(() => encodePng({ width: 0, height: 1, channels: 4, pixels: new Uint8Array(0) }, "rgba")).toThrow();
     });
 
     test("格式与通道数不匹配时抛错", () => {
@@ -272,7 +262,7 @@ describe("encodePng", () => {
         }
         expect(first).not.toBeNull();
         // zlib CMF：低 4 位必须是 8（deflate），高 4 位是窗口大小（通常是 7 → 0x78）
-        expect((first! & 0x0f)).toBe(8);
+        expect(first! & 0x0f).toBe(8);
         expect(first).toBe(0x78);
     });
 
@@ -298,10 +288,7 @@ describe("getPixel", () => {
         width: 2,
         height: 2,
         channels: 4,
-        pixels: new Uint8Array([
-            1, 2, 3, 4, 5, 6, 7, 8,
-            9, 10, 11, 12, 13, 14, 15, 16,
-        ]),
+        pixels: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
     };
 
     test("取到正确像素", () => {

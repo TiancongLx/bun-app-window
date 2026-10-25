@@ -8,9 +8,7 @@ import { FLAG_ACCEPT_DROP, FLAG_CENTER, FLAG_DEFER_SHOW, FLAG_FRAMELESS } from "
  * 这些断言锁的是「顺序 / 位数 / 入口隔离」，不是行为——行为靠真机验收。
  * 改回去不会报错，只会静默退化，所以必须有静态守护。
  */
-const SHELL_CC = await Bun.file(
-    `${import.meta.dir}/../native/shell.cc`,
-).text();
+const SHELL_CC = await Bun.file(`${import.meta.dir}/../native/shell.cc`).text();
 
 /**
  * 剔掉整行注释后的源码。
@@ -79,9 +77,7 @@ test("拖放走 AdditionalObjects 取真实路径，且禁止再关 WebView2 的
     expect(enableBody).toContain("install_drop_handler()");
 
     // 老运行时没有 EventArgs2：QueryInterface 失败时必须静默放过，不能阻断其它消息
-    expect(SHELL_CODE).toContain(
-        "FAILED(args->QueryInterface(IID_ICoreWebView2WebMessageReceivedEventArgs2,",
-    );
+    expect(SHELL_CODE).toContain("FAILED(args->QueryInterface(IID_ICoreWebView2WebMessageReceivedEventArgs2,");
 
     // 反注册必须在 destroy 之前，否则处理器挂在已死的 core 上
     const runAt = SHELL_CODE.indexOf("webview_run(g_webview)");

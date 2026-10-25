@@ -52,11 +52,7 @@ test("bundlePage 产出 ESM，且 bytes 是 UTF-8 字节数而非字符数", asy
     // 源码里放中文：字符数与字节数会因此不同，这正是要抓的偏差
     const entry = fixture(
         "with-cjk.ts",
-        [
-            'export const label = "中文日志文本，用于拉开字符数与字节数的差距";',
-            'console.log(label);',
-            "",
-        ].join("\n"),
+        ['export const label = "中文日志文本，用于拉开字符数与字节数的差距";', "console.log(label);", ""].join("\n"),
     );
 
     const { code, bytes } = await bundlePage({ entry });
@@ -125,7 +121,7 @@ test("bundlePage 的 target 与 format 不可由调用方指定", () => {
 });
 
 test("writePageBundle 写盘后复报实际字节数", async () => {
-    const entry = fixture("for-write.ts", 'export const n = 1;\nconsole.log(n);\n');
+    const entry = fixture("for-write.ts", "export const n = 1;\nconsole.log(n);\n");
     const out = join(WORK, "out", "page.bundle.txt");
     mkdirSync(join(WORK, "out"), { recursive: true });
 

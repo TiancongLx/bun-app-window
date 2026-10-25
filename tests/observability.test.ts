@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import {
-    PAGE_JS_PATH,
-    assertPageWiring,
-    injectPageErrorRelay,
-    parsePageError,
-} from "@/shell/app";
+import { PAGE_JS_PATH, assertPageWiring, injectPageErrorRelay, parsePageError } from "@/shell/app";
 import { RESERVED_CLIENT_KEYS, connect, createIpcServer, type Channel } from "@/shell/ipc";
 
 /**
@@ -19,9 +14,7 @@ import { RESERVED_CLIENT_KEYS, connect, createIpcServer, type Channel } from "@/
 
 describe("createIpcServer：服务表保留名校验", () => {
     test("服务表含 close 时创建即抛错", () => {
-        expect(() => createIpcServer({ service: { greet: () => "hi", close: () => "x" } })).toThrow(
-            /保留名/,
-        );
+        expect(() => createIpcServer({ service: { greet: () => "hi", close: () => "x" } })).toThrow(/保留名/);
     });
 
     test("错误信息指出冲突的名字，而不是只说不合法", () => {
@@ -201,13 +194,11 @@ describe("assertPageWiring", () => {
             warned.push(String(msg));
         };
         try {
-            expect(() =>
-                assertPageWiring(`<script src="${PAGE_JS_PATH}"></script>`, "code"),
-            ).not.toThrow();
+            expect(() => assertPageWiring(`<script src="${PAGE_JS_PATH}"></script>`, "code")).not.toThrow();
         } finally {
             console.warn = original;
         }
-        expect(warned.join("\n")).toContain("type=\"module\"");
+        expect(warned.join("\n")).toContain('type="module"');
     });
 
     test("**反向**：写法正确时不产生警告", () => {
@@ -231,7 +222,7 @@ describe("injectPageErrorRelay", () => {
     test("脚本插入在 <head> 之后，早于页面自身的任何脚本", () => {
         const html = `<html><head><script src="/page.js"></script></head><body></body></html>`;
         const out = injectPageErrorRelay(html);
-        expect(out.indexOf("addEventListener(\"error\"")).toBeLessThan(out.indexOf("/page.js"));
+        expect(out.indexOf('addEventListener("error"')).toBeLessThan(out.indexOf("/page.js"));
     });
 
     test("**反向**：没有 <head> 时退到 <html> 之后", () => {
@@ -284,9 +275,7 @@ describe("parsePageError", () => {
     });
 
     test("kind 为 unhandledrejection 时保留", () => {
-        expect(parsePageError({ kind: "unhandledrejection", message: "x" })?.kind).toBe(
-            "unhandledrejection",
-        );
+        expect(parsePageError({ kind: "unhandledrejection", message: "x" })?.kind).toBe("unhandledrejection");
     });
 
     test("**反向**：message 缺失时给固定占位，不返回空串", () => {

@@ -171,14 +171,14 @@ export const BROWSER_UI_ALL =
  * `Shell.beginResize()` 在 TS 层查表转换，本常量成为真正的入参契约。
  */
 export const RESIZE_EDGE = {
-  LEFT: 10,
-  RIGHT: 11,
-  TOP: 12,
-  TOPLEFT: 13,
-  TOPRIGHT: 14,
-  BOTTOM: 15,
-  BOTTOMLEFT: 16,
-  BOTTOMRIGHT: 17,
+    LEFT: 10,
+    RIGHT: 11,
+    TOP: 12,
+    TOPLEFT: 13,
+    TOPRIGHT: 14,
+    BOTTOM: 15,
+    BOTTOMLEFT: 16,
+    BOTTOMRIGHT: 17,
 } as const;
 
 export type ResizeEdge = (typeof RESIZE_EDGE)[keyof typeof RESIZE_EDGE];
@@ -201,14 +201,14 @@ export type ResizeEdge = (typeof RESIZE_EDGE)[keyof typeof RESIZE_EDGE];
  * 时需要它，而那种时候手写映射必然抄错。
  */
 export const RESIZE_INDEX: Readonly<Record<number, number>> = {
-  [RESIZE_EDGE.LEFT]: 0,
-  [RESIZE_EDGE.RIGHT]: 1,
-  [RESIZE_EDGE.TOP]: 2,
-  [RESIZE_EDGE.BOTTOM]: 3,
-  [RESIZE_EDGE.TOPLEFT]: 4,
-  [RESIZE_EDGE.TOPRIGHT]: 5,
-  [RESIZE_EDGE.BOTTOMLEFT]: 6,
-  [RESIZE_EDGE.BOTTOMRIGHT]: 7,
+    [RESIZE_EDGE.LEFT]: 0,
+    [RESIZE_EDGE.RIGHT]: 1,
+    [RESIZE_EDGE.TOP]: 2,
+    [RESIZE_EDGE.BOTTOM]: 3,
+    [RESIZE_EDGE.TOPLEFT]: 4,
+    [RESIZE_EDGE.TOPRIGHT]: 5,
+    [RESIZE_EDGE.BOTTOMLEFT]: 6,
+    [RESIZE_EDGE.BOTTOMRIGHT]: 7,
 };
 
 /**
@@ -218,7 +218,7 @@ export const RESIZE_INDEX: Readonly<Record<number, number>> = {
  * `rc=-1`，与「窗口已销毁」是同一个外部表现，调用方按 `rc` 处理即可。
  */
 export function resizeIndex(edge: number): number {
-  return RESIZE_INDEX[edge] ?? -1;
+    return RESIZE_INDEX[edge] ?? -1;
 }
 
 /**
@@ -230,9 +230,7 @@ export function resizeIndex(edge: number): number {
  *
  * 过去消费者只能自己抄一份（抄了 14 个数，没有任何门禁能发现它与 C++ 漂移）。
  */
-export const ZOOM_LADDER = [
-  0.25, 0.33, 0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
-] as const;
+export const ZOOM_LADDER = [0.25, 0.33, 0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] as const;
 
 /** 缩放倍率的上下限（`ZOOM_LADDER` 的首尾两项） */
 export const ZOOM_MIN = ZOOM_LADDER[0];
@@ -275,74 +273,74 @@ export const STATE_MINIMIZED = 2;
 export const STATE_FOCUSED = 4;
 
 export type WindowState = {
-  raw: number;
-  maximized: boolean;
-  minimized: boolean;
-  focused: boolean;
-  /** 系统当前是否深色（原生侧读 AppsUseLightTheme，并随 WM_SETTINGCHANGE 刷新） */
-  dark: boolean;
+    raw: number;
+    maximized: boolean;
+    minimized: boolean;
+    focused: boolean;
+    /** 系统当前是否深色（原生侧读 AppsUseLightTheme，并随 WM_SETTINGCHANGE 刷新） */
+    dark: boolean;
 };
 
 /** 原生库的解析结果 */
 export type NativeLibInfo = {
-  path: string;
-  /**
-   * explicit  — 调用方显式指定
-   * dev       — 本仓开发态（build/ 或 dist/）
-   * package   — 包内 dist/ 或可执行文件同级
-   * embedded  — 从编译产物内嵌字节释放
-   * fallback-tmp — 受限环境下退回 Bun 默认释放
-   */
-  source: "explicit" | "dev" | "package" | "embedded" | "fallback-tmp";
-  /**
-   * `bun-app-window` 自身的版本号（取自包内 `package.json`，不是 DLL 的 PE 版本）。
-   *
-   * 加它的理由：消费者要在界面上显示「连上的确实是这个版本」时，过去只能
-   * `import libPkg from "bun-app-window/package.json"` 再拼字符串——那是一条
-   * 额外的子路径依赖，且 `package.json` 在 `files` 白名单里所以要跟着发布面走。
-   * 现在顺手带出来，页面侧直接读 `shell.libInfo.version`。
-   */
-  version: string;
-  sha256: string;
-  bytes: number;
-  reused: boolean;
-  pruned: string[];
+    path: string;
+    /**
+     * explicit  — 调用方显式指定
+     * dev       — 本仓开发态（build/ 或 dist/）
+     * package   — 包内 dist/ 或可执行文件同级
+     * embedded  — 从编译产物内嵌字节释放
+     * fallback-tmp — 受限环境下退回 Bun 默认释放
+     */
+    source: "explicit" | "dev" | "package" | "embedded" | "fallback-tmp";
+    /**
+     * `bun-app-window` 自身的版本号（取自包内 `package.json`，不是 DLL 的 PE 版本）。
+     *
+     * 加它的理由：消费者要在界面上显示「连上的确实是这个版本」时，过去只能
+     * `import libPkg from "bun-app-window/package.json"` 再拼字符串——那是一条
+     * 额外的子路径依赖，且 `package.json` 在 `files` 白名单里所以要跟着发布面走。
+     * 现在顺手带出来，页面侧直接读 `shell.libInfo.version`。
+     */
+    version: string;
+    sha256: string;
+    bytes: number;
+    reused: boolean;
+    pruned: string[];
 };
 
 export type ShellOptions = {
-  /** 要加载的 URL（通常是本地回环地址） */
-  url: string;
-  title?: string;
-  width?: number;
-  height?: number;
-  /** FLAG_* 位组合 */
-  flags?: number;
-  /** 启动后立即设置的最小尺寸（逻辑像素） */
-  minWidth?: number;
-  minHeight?: number;
-  /**
-   * 原生库路径。给定时跳过所有自动解析。
-   * 用于测试或多副本部署。
-   */
-  nativeLibPath?: string;
-  /**
-   * 运行时数据目录名（`%LOCALAPPDATA%\<appName>\runtime`）。
-   * 同一机器上多个应用共用一个包时应各自指定，避免互相清理 DLL 副本。
-   */
-  appName?: string;
-  /**
-   * 关闭哪些浏览器行为，取 `BROWSER_UI_*` 的按位或。缺省 0（保持 WebView2 默认）。
-   *
-   * 桌面应用一般传 `BROWSER_UI_ALL`：关掉右键 Edge 菜单、`Ctrl+P`/`Ctrl+F`/`Ctrl+S`、
-   * 左下角状态栏、触控板滑动导航与表单自动填充。关掉默认右键菜单后若要右键有反应，
-   * 用 `showContextMenu()` 弹原生菜单。
-   */
-  browserUi?: number;
-  /**
-   * 编译产物内嵌字节的提供者。
-   * 使用 `bun build --compile` 时传入 `embeddedDll`（见 `bun-app-window/embedded`）。
-   */
-  embedded?: () => Promise<Uint8Array | null>;
+    /** 要加载的 URL（通常是本地回环地址） */
+    url: string;
+    title?: string;
+    width?: number;
+    height?: number;
+    /** FLAG_* 位组合 */
+    flags?: number;
+    /** 启动后立即设置的最小尺寸（逻辑像素） */
+    minWidth?: number;
+    minHeight?: number;
+    /**
+     * 原生库路径。给定时跳过所有自动解析。
+     * 用于测试或多副本部署。
+     */
+    nativeLibPath?: string;
+    /**
+     * 运行时数据目录名（`%LOCALAPPDATA%\<appName>\runtime`）。
+     * 同一机器上多个应用共用一个包时应各自指定，避免互相清理 DLL 副本。
+     */
+    appName?: string;
+    /**
+     * 关闭哪些浏览器行为，取 `BROWSER_UI_*` 的按位或。缺省 0（保持 WebView2 默认）。
+     *
+     * 桌面应用一般传 `BROWSER_UI_ALL`：关掉右键 Edge 菜单、`Ctrl+P`/`Ctrl+F`/`Ctrl+S`、
+     * 左下角状态栏、触控板滑动导航与表单自动填充。关掉默认右键菜单后若要右键有反应，
+     * 用 `showContextMenu()` 弹原生菜单。
+     */
+    browserUi?: number;
+    /**
+     * 编译产物内嵌字节的提供者。
+     * 使用 `bun build --compile` 时传入 `embeddedDll`（见 `bun-app-window/embedded`）。
+     */
+    embedded?: () => Promise<Uint8Array | null>;
 };
 
 export type StartResult = { rc: number; error: string };

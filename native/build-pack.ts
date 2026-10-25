@@ -39,13 +39,7 @@ import { mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { isEntrypoint } from "../scripts/lib/entrypoint";
-import {
-    findEmbeddedAssets,
-    hasAuthenticodeSignature,
-    readCertificateDir,
-    readSubsystem,
-    subsystemLabel,
-} from "./pe";
+import { findEmbeddedAssets, hasAuthenticodeSignature, readCertificateDir, readSubsystem, subsystemLabel } from "./pe";
 
 // ---- 常量 -------------------------------------------------------------------
 
@@ -65,11 +59,16 @@ export const REPO_ROOT = resolve(import.meta.dir, "..");
  *
  * `--windows-version` 的值在 `packArgs()` 里写成**字面量**，不抽成常量：
  *
- *   - `scripts/bump-version.ts` 要用正则原位改写那一行（单一事实源在源码里）
+ *   - `scripts/bump-version.ts` 要用正则原位改写它（单一事实源在源码里）
  *   - `tests/version.test.ts` 要在不执行任何代码的前提下比对两处版本
  *
  * 抽成常量会让这两件事都失效——「版本号只有一处需要改」这个属性比「避免字面量重复」
  * 重要得多。重复的那一份由测试守住，不是靠人记得。
+ *
+ * **契约只约束「是字面量且紧随 `--windows-version`」，不约束排版。**
+ * 这两个元素写在一行还是被格式化拆成两行，两处解析都成立：
+ * `bump-version.ts` 的 `\s*` 跨行匹配且保留原有空白，
+ * `version.test.ts` 在整段文本上匹配而非逐行。
  */
 export const WINDOWS_METADATA = {
     title: "WebView Shell",
@@ -118,9 +117,10 @@ export function packArgs(opts: PackOptions): PackPlan {
         WINDOWS_METADATA.description,
         "--windows-publisher",
         WINDOWS_METADATA.publisher,
-        // 下面这一行的版本号必须保持「字面量 + 与 --windows-version 同行」的形状：
-        // bump-version.ts 原地改写它，version.test.ts 静态读取它。
-        "--windows-version", "0.9.0.0",
+        // 版本号必须是字面量且紧随 --windows-version：bump-version.ts 原地改写它，
+        // version.test.ts 静态读取它。排版不限（同行或另起一行都可）。
+        "--windows-version",
+        "0.9.0.0",
     ];
 
     let warning: string | null = null;
@@ -172,10 +172,7 @@ type SpawnResult = { code: number; out: string; err: string };
 
 async function spawn(argv: readonly string[], cwd: string): Promise<SpawnResult> {
     const proc = Bun.spawn([...argv], { cwd, stdout: "pipe", stderr: "pipe" });
-    const [out, err] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-    ]);
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
     return { code, out, err };
 }
@@ -196,14 +193,13 @@ const REAL_DEPS: PackDeps = {
  *
  * 返回退出码：0 成功，1 打包失败，2 参数或环境问题。
  */
-export async function main(
-    argv: readonly string[],
-    root: string,
-    deps: PackDeps = REAL_DEPS,
-): Promise<number> {
+export async function main(argv: readonly string[], root: string, deps: PackDeps = REAL_DEPS): Promise<number> {
     let keepConsole = false;
     for (const raw of argv) {
-        const arg = raw.replace(/^-{1,2}/, "").toLowerCase().replace(/_/g, "-");
+        const arg = raw
+            .replace(/^-{1,2}/, "")
+            .toLowerCase()
+            .replace(/_/g, "-");
         if (arg === "keep-console" || arg === "keepconsole") {
             keepConsole = true;
         } else if (arg === "help" || arg === "h") {
@@ -254,9 +250,7 @@ export async function main(
         bytes = new Uint8Array(readFileSync(plan.outfile));
     } catch (err) {
         console.error(
-            `build reported success but artifact is unreadable: ${
-                err instanceof Error ? err.message : String(err)
-            }`,
+            `build reported success but artifact is unreadable: ${err instanceof Error ? err.message : String(err)}`,
         );
         return 1;
     }
@@ -286,9 +280,7 @@ export async function main(
     if (!report.assets.some((n) => n.startsWith("libshell-"))) {
         // 当前入口 src/host.ts 只用 type:"text" 内嵌 HTML，DLL 靠 resolve.ts 从磁盘解析。
         // 没有 libshell-* 是正常形态，别误读成「内嵌失败」。
-        console.log(
-            "  (no libshell-* : 入口未静态 import 内嵌 DLL，DLL 走 resolve.ts 的磁盘解析)",
-        );
+        console.log("  (no libshell-* : 入口未静态 import 内嵌 DLL，DLL 走 resolve.ts 的磁盘解析)");
     }
     console.log("");
     console.log("=== signature ===");

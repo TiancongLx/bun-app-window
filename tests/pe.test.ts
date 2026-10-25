@@ -47,13 +47,15 @@ function putU32(buf: Uint8Array, offset: number, value: number): void {
  * 只填本模块会读的字段：e_lfanew、PE signature、SizeOfOptionalHeader、
  * Magic、Subsystem、NumberOfRvaAndSizes、Certificate Table 条目。
  */
-function makeFakePe(opts: {
-    isPe32Plus?: boolean;
-    subsystem?: number;
-    certOffset?: number;
-    certSize?: number;
-    trailing?: string;
-} = {}): Uint8Array {
+function makeFakePe(
+    opts: {
+        isPe32Plus?: boolean;
+        subsystem?: number;
+        certOffset?: number;
+        certSize?: number;
+        trailing?: string;
+    } = {},
+): Uint8Array {
     const isPe32Plus = opts.isPe32Plus ?? true;
     const buf = new Uint8Array(512);
 
@@ -135,12 +137,8 @@ describe("真实 dist/libshell.dll", () => {
 
 describe("构造的 PE32+", () => {
     test("Subsystem 字段读得准", () => {
-        expect(readSubsystem(makeFakePe({ subsystem: SUBSYSTEM_WINDOWS_GUI }))).toBe(
-            SUBSYSTEM_WINDOWS_GUI,
-        );
-        expect(readSubsystem(makeFakePe({ subsystem: SUBSYSTEM_WINDOWS_CUI }))).toBe(
-            SUBSYSTEM_WINDOWS_CUI,
-        );
+        expect(readSubsystem(makeFakePe({ subsystem: SUBSYSTEM_WINDOWS_GUI }))).toBe(SUBSYSTEM_WINDOWS_GUI);
+        expect(readSubsystem(makeFakePe({ subsystem: SUBSYSTEM_WINDOWS_CUI }))).toBe(SUBSYSTEM_WINDOWS_CUI);
     });
 
     test("证书表非空 → 判定为已签名", () => {
@@ -182,8 +180,7 @@ describe("构造的 PE32+", () => {
 
 describe("findEmbeddedAssets", () => {
     test("抓出 libshell-<hash>.dll 与 index-<hash>.html", () => {
-        const text =
-            "...padding...libshell-a1b2c3d4.dll...more...index-9f8e7d6c.html...tail...";
+        const text = "...padding...libshell-a1b2c3d4.dll...more...index-9f8e7d6c.html...tail...";
         const bytes = new TextEncoder().encode(text);
         const found = findEmbeddedAssets(bytes, ["libshell-", "index-"]);
         expect(found).toContain("libshell-a1b2c3d4.dll");
@@ -213,9 +210,7 @@ describe("findEmbeddedAssets", () => {
 
     test("空输入与空前缀列表都不炸", () => {
         expect(findEmbeddedAssets(new Uint8Array(0), ["libshell-"])).toEqual([]);
-        expect(findEmbeddedAssets(new TextEncoder().encode("libshell-aaaa1111.dll"), [])).toEqual(
-            [],
-        );
+        expect(findEmbeddedAssets(new TextEncoder().encode("libshell-aaaa1111.dll"), [])).toEqual([]);
     });
 
     test("真实 dll 里不该有 bun 的内嵌资源名（DLL 不是编译产物）", () => {

@@ -147,9 +147,7 @@ describe("downscaleBgra：alpha 加权（预乘语义）", () => {
         //
         // 直接平均会得到 (191,191,191,191) 的灰 —— 那就是黑边。
         // alpha 加权是 255 白，alpha = 765/4 = 191：颜色不受透明像素污染。
-        const src = makeBgra(2, 2, (x, y) =>
-            x === 0 && y === 0 ? [0, 0, 0, 0] : [255, 255, 255, 255],
-        );
+        const src = makeBgra(2, 2, (x, y) => (x === 0 && y === 0 ? [0, 0, 0, 0] : [255, 255, 255, 255]));
         const out = downscaleBgra(src, 2, 2, 1, 1);
         expect(out).not.toBeNull();
         const [b, g, r, a] = px(out!.bgra, 1, 0, 0);

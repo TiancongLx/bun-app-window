@@ -3,13 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import {
-    detectEol,
-    main,
-    planBump,
-    replacePeVersion,
-    replacePkgVersion,
-} from "../scripts/bump-version";
+import { detectEol, main, planBump, replacePeVersion, replacePkgVersion } from "../scripts/bump-version";
 
 const REPO = resolve(import.meta.dir, "..");
 
@@ -134,6 +128,28 @@ describe("replacePeVersion", () => {
         expect(out).toContain(`"--other", "keep-me"`);
     });
 
+    /**
+     * `bun fmt` 以 120 列排版时会把这个数组元素拆成两行。
+     * 这条用例钉住「排版变了也能改写，且改写后排版不被压平」——
+     * 否则下一次格式化会把 `bump-version` 的产物再改一遍，形成来回漂移。
+     */
+    test("被格式化拆成两行时仍能改写，且保持两行", () => {
+        const wrapped = `const argv = [
+    "--windows-version",
+    "0.2.0.0",
+    "--other",
+    "keep-me",
+]
+`;
+        const out = replacePeVersion(wrapped, "0.4.0.0");
+        expect(out).not.toBeNull();
+        // 新值落在 --windows-version 的下一行，且两行结构保持
+        expect(out).toContain(`    "--windows-version",\n    "0.4.0.0",`);
+        // 没有把两行压成一行
+        expect(out).not.toContain(`"--windows-version", "0.4.0.0"`);
+        expect(out).toContain(`"--other"`);
+    });
+
     test("定位不到返回 null", () => {
         expect(replacePeVersion("$args = @()", "1.0.0.0")).toBeNull();
         expect(replacePeVersion("const argv = [];", "1.0.0.0")).toBeNull();
@@ -168,10 +184,11 @@ describe("main 的端到端行为", () => {
         );
         const nativeDir = join(dir, "native");
         mkdirSync(nativeDir, { recursive: true });
-        // 夹具用与真实源码相同的形状（TS + 双引号 + 同行）
+        // 夹具用与真实源码相同的形状。真实源码已被 `bun fmt` 按 120 列排成
+        // 「--windows-version 与版本号各占一行」，端到端就该测这个形状。
         writeFileSync(
             join(nativeDir, "build-pack.ts"),
-            `const argv = [\n    "--windows-version", "${peVersion}",\n];\n`,
+            `const argv = [\n    "--windows-version",\n    "${peVersion}",\n];\n`,
             "utf8",
         );
         return dir;
@@ -184,7 +201,7 @@ describe("main 的端到端行为", () => {
         const pkg = readFileSync(join(root, "package.json"), "utf8");
         const pack = readFileSync(join(root, "native", "build-pack.ts"), "utf8");
         expect(pkg).toContain(`"version": "0.3.0"`);
-        expect(pack).toContain(`"--windows-version", "0.3.0.0"`);
+        expect(pack).toContain(`"--windows-version",\n    "0.3.0.0"`);
         expect(detectEol(pkg)).toBe("\n");
         expect(detectEol(pack)).toBe("\n");
     });

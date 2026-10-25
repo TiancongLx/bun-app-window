@@ -80,11 +80,7 @@ async function runCase(label: string, flags: number): Promise<void> {
     const states = (): StateEvent[] => seen.filter(isState);
 
     // 1. 首个 STATE 必须自己到达
-    check(
-        `${label}：启动后收到 STATE 事件`,
-        await waitFor(() => states().length > 0, 3000),
-        `${seen.length} 条`,
-    );
+    check(`${label}：启动后收到 STATE 事件`, await waitFor(() => states().length > 0, 3000), `${seen.length} 条`);
 
     // 2. 载荷是快照：尺寸与 DPI 必须是真的
     const initial = states().at(-1);
@@ -96,10 +92,7 @@ async function runCase(label: string, flags: number): Promise<void> {
 
     // 3. 最大化
     shell.toggleMaximize();
-    check(
-        `${label}：最大化后收到 maximized=true`,
-        await waitFor(() => states().some((e) => e.maximized), 3000),
-    );
+    check(`${label}：最大化后收到 maximized=true`, await waitFor(() => states().some((e) => e.maximized), 3000));
 
     // 4. 还原
     shell.toggleMaximize();

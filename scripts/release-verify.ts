@@ -301,7 +301,9 @@ if (PRE_PUBLISH) {
             const ok = latest === VERSION;
             return {
                 ok,
-                detail: ok ? `latest = ${VERSION}` : `latest = ${latest}，期望 ${VERSION}（registry 可见性有数分钟延迟）`,
+                detail: ok
+                    ? `latest = ${VERSION}`
+                    : `latest = ${latest}，期望 ${VERSION}（registry 可见性有数分钟延迟）`,
             };
         },
     });
@@ -347,7 +349,8 @@ if (PRE_PUBLISH) {
             const bad: string[] = [];
             const actualSha1 = sha1Of(dl.buf);
             const actualIntegrity = sha512Of(dl.buf);
-            if (dist.shasum !== actualSha1) bad.push(`shasum 记 ${dist.shasum?.slice(0, 12)} 实为 ${actualSha1.slice(0, 12)}`);
+            if (dist.shasum !== actualSha1)
+                bad.push(`shasum 记 ${dist.shasum?.slice(0, 12)} 实为 ${actualSha1.slice(0, 12)}`);
             if (dist.integrity !== actualIntegrity) bad.push("integrity 与字节不符");
             return {
                 ok: bad.length === 0,

@@ -131,9 +131,7 @@ test("uninstall_nav_guard 有调用点，且在 webview_destroy 之前", () => {
 
 test("SHELL_FLAG_ALLOW_EXTERNAL_NAV 在 shell_start_ex 里真的被解析", () => {
     // 枚举定义处不算解析：必须是 `g_allow_external_nav = (flags & ...)` 这种形态
-    expect(SHELL_CODE).toMatch(
-        /g_allow_external_nav\s*=\s*\(flags\s*&\s*SHELL_FLAG_ALLOW_EXTERNAL_NAV\)\s*!=\s*0/,
-    );
+    expect(SHELL_CODE).toMatch(/g_allow_external_nav\s*=\s*\(flags\s*&\s*SHELL_FLAG_ALLOW_EXTERNAL_NAV\)\s*!=\s*0/);
 });
 
 test("g_origin 从启动地址算出，不是只声明不使用", () => {
@@ -265,9 +263,7 @@ test("TITLEBAR_RESERVE 只在 frameless 时生效（带边框模式的标题栏�
 test("TITLEBAR_RESERVE 在 ui_thread 与 shell_start_ex 两处都被解析", () => {
     // 与既有 flag 同构：ui_thread 那份决定窗口创建期的行为，
     // shell_start_ex 那份让「启动前的静态属性」尽早定下来。
-    const matches = SHELL_CODE.match(
-        /g_titlebar_reserve\s*=\s*\(flags\s*&\s*SHELL_FLAG_TITLEBAR_RESERVE\)\s*!=\s*0/g,
-    );
+    const matches = SHELL_CODE.match(/g_titlebar_reserve\s*=\s*\(flags\s*&\s*SHELL_FLAG_TITLEBAR_RESERVE\)\s*!=\s*0/g);
     expect(matches?.length).toBe(2);
 });
 
@@ -278,9 +274,7 @@ test("TITLEBAR_RESERVE 在 ui_thread 与 shell_start_ex 两处都被解析", () 
 // 所以必须逐条钉住，不能只测总效果。
 
 test("NATIVE_CAPTIONS 在 ui_thread 与 shell_start_ex 两处都被解析", () => {
-    const matches = SHELL_CODE.match(
-        /g_native_captions\s*=\s*\(flags\s*&\s*SHELL_FLAG_NATIVE_CAPTIONS\)\s*!=\s*0/g,
-    );
+    const matches = SHELL_CODE.match(/g_native_captions\s*=\s*\(flags\s*&\s*SHELL_FLAG_NATIVE_CAPTIONS\)\s*!=\s*0/g);
     expect(matches?.length).toBe(2);
 });
 

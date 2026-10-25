@@ -35,13 +35,6 @@
         "inlineSources": true
     },
 
-    "include": [
-        "src/**/*.ts",
-        "tests/**/*.ts",
-        "scripts/**/*.ts",
-        "native/**/*.ts"
-    ],
-    "exclude": [
-        "node_modules"
-    ]
+    "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "native/**/*.ts"],
+    "exclude": ["node_modules"]
 }

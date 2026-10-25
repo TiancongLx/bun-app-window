@@ -90,10 +90,7 @@ function normalizeArg(arg: string): string {
  * 只保留纯解析部分，git 调用交给调用方——这样这段逻辑可以在没有仓库的地方测。
  * 相对路径按仓库根解析（git 的语义），绝对路径原样返回。
  */
-export function resolveHooksDir(
-    repoRoot: string,
-    coreHooksPath: string | null | undefined,
-): string {
+export function resolveHooksDir(repoRoot: string, coreHooksPath: string | null | undefined): string {
     const custom = coreHooksPath?.trim();
     if (custom) {
         return isAbsolute(custom) ? custom : join(repoRoot, custom);
@@ -127,8 +124,7 @@ export function planInstall(opts: {
     if (!opts.exists) {
         return "created";
     }
-    const same = opts.existingContent !== null
-        && normalizeEol(opts.existingContent) === normalizeEol(opts.template);
+    const same = opts.existingContent !== null && normalizeEol(opts.existingContent) === normalizeEol(opts.template);
     if (same) {
         return "unchanged";
     }
@@ -141,10 +137,7 @@ async function gitConfigGet(cwd: string, key: string): Promise<string | null> {
         stdout: "pipe",
         stderr: "pipe",
     });
-    const [out] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-    ]);
+    const [out] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
     if (code !== 0) {
         return null;

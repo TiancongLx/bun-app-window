@@ -100,7 +100,7 @@ describe("parsePackageSize：能解析，也能拒绝", () => {
 
 describe("declaredFlags / mentionedFlags", () => {
     test("从源码抓出全部 FLAG_*", () => {
-        const got = declaredFlags('export const FLAG_A = 1;\nexport const FLAG_B = 2;\n');
+        const got = declaredFlags("export const FLAG_A = 1;\nexport const FLAG_B = 2;\n");
         expect(got).toEqual(["FLAG_A", "FLAG_B"]);
     });
 

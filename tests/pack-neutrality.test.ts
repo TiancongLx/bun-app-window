@@ -183,11 +183,7 @@ test("plugins 被原样交给 Bun.build —— 自定义扩展名可被编译", 
     const mod = fixture("payload.txt", "FROM_PLUGIN");
     const entry = fixture(
         "uses-plugin.ts",
-        [
-            'import { COMPILED } from "./payload.txt";',
-            "console.log(COMPILED);",
-            "",
-        ].join("\n"),
+        ['import { COMPILED } from "./payload.txt";', "console.log(COMPILED);", ""].join("\n"),
     );
 
     const { code } = await bundlePage({

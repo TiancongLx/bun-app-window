@@ -261,5 +261,5 @@ test("app 不被主入口导出（避免 app → index → app 循环）", async
     const indexPath = resolve(import.meta.dir, "../src/shell/index.ts");
     const index = await Bun.file(indexPath).text();
     expect(index).not.toContain('from "./app"');
-    expect(index).not.toContain("export * from \"./app\"");
+    expect(index).not.toContain('export * from "./app"');
 });

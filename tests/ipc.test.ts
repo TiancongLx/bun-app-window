@@ -1,11 +1,6 @@
 import { expect, test } from "bun:test";
 
-import {
-    connect,
-    createIpcServer,
-    type Channel,
-    type IpcPeer,
-} from "@/shell/ipc";
+import { connect, createIpcServer, type Channel, type IpcPeer } from "@/shell/ipc";
 
 /**
  * 这一组用例只测协议与状态机，不起真服务。
@@ -21,10 +16,7 @@ import {
  * 不用真 WebSocket 的理由：协议正确性（id 配对、pending、超时、错误形状）
  * 与传输无关，起真服务只会让用例变慢、变脆。
  */
-function harness(
-    service: Parameters<typeof createIpcServer>[0]["service"],
-    opts?: { exposeStack?: boolean },
-) {
+function harness(service: Parameters<typeof createIpcServer>[0]["service"], opts?: { exposeStack?: boolean }) {
     const server = createIpcServer({ service, ...(opts ?? {}) });
 
     let toPage: ((data: string) => void) | null = null;

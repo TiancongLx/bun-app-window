@@ -146,7 +146,11 @@ equal("types.ZOOM_LADDER 末档", ZOOM_LADDER[ZOOM_LADDER.length - 1], 3.0);
 equal("types.resizeIndex 把 HTLEFT 映射为 0", resizeIndex(TYPES_RESIZE_EDGE.LEFT), 0);
 equal("types.resizeIndex 把 HTBOTTOM 映射为 3（不是减 10）", resizeIndex(TYPES_RESIZE_EDGE.BOTTOM), 3);
 equal("types.resizeIndex 拒非法值", resizeIndex(0), -1);
-equal("types.libInfo.version 与 package.json 同源", (await createShell({ url: "http://127.0.0.1:1/" })).libInfo.version, String(meta["version"]));
+equal(
+    "types.libInfo.version 与 package.json 同源",
+    (await createShell({ url: "http://127.0.0.1:1/" })).libInfo.version,
+    String(meta["version"]),
+);
 
 // ---- 2c. pack：构建期打包工具 -------------------------------------------------
 
@@ -156,11 +160,7 @@ check("pack.bundlePage 是函数", typeof bundlePage === "function");
 
 // ---- 3. 原生库：真的能定位、真的是 PE ----------------------------------------
 
-check(
-    "bun-app-window/native 解析为 libshell dll",
-    /libshell.*\.dll$/i.test(nativeLibPath),
-    nativeLibPath,
-);
+check("bun-app-window/native 解析为 libshell dll", /libshell.*\.dll$/i.test(nativeLibPath), nativeLibPath);
 const dllFile = Bun.file(nativeLibPath);
 check("native 子路径指向的文件存在", await dllFile.exists());
 
@@ -204,14 +204,15 @@ check(
 // ---- 6. debug：排障面可用 ----------------------------------------------------
 
 const dbg = debugOf(shell);
-check("debugOf 提供五个排障口径", [
-    dbg.hittest(0, 0),
-    dbg.metrics(),
-    dbg.dpi(),
-    dbg.selfBase(),
+check(
+    "debugOf 提供五个排障口径",
+    [dbg.hittest(0, 0), dbg.metrics(), dbg.dpi(), dbg.selfBase(), dbg.selfPath()].every((v) => v !== undefined),
+);
+check(
+    "debugOf.selfPath 指向同一份 DLL",
+    dbg.selfPath().toLowerCase() === shell.libInfo.path.toLowerCase(),
     dbg.selfPath(),
-].every((v) => v !== undefined));
-check("debugOf.selfPath 指向同一份 DLL", dbg.selfPath().toLowerCase() === shell.libInfo.path.toLowerCase(), dbg.selfPath());
+);
 
 shell.stop();
 
@@ -251,7 +252,14 @@ type Api = { greet(name: string): string; fail(): void };
 
 const api = await connect<Api>({ channel });
 equal("ipc 请求/回复往返", await api.greet("baw"), "hi baw");
-equal("ipc 未知方法拒绝", await api.fail().then(() => "resolved", (e: Error) => e.message), "boom");
+equal(
+    "ipc 未知方法拒绝",
+    await api.fail().then(
+        () => "resolved",
+        (e: Error) => e.message,
+    ),
+    "boom",
+);
 
 let pushed: unknown = null;
 api.on("tick", (payload) => {
@@ -264,7 +272,11 @@ api.close();
 // ---- 8. state：外部输入的形状校验 --------------------------------------------
 
 const bounds = parseBounds("10,20,1024,768,1,144");
-equal("state.parseBounds 解析六字段", JSON.stringify(bounds), '{"x":10,"y":20,"width":1024,"height":768,"maximized":true,"dpi":144}');
+equal(
+    "state.parseBounds 解析六字段",
+    JSON.stringify(bounds),
+    '{"x":10,"y":20,"width":1024,"height":768,"maximized":true,"dpi":144}',
+);
 equal("state.parseBounds 拒绝残缺输入", parseBounds("10,20"), null);
 equal("state.parsePlacement 拒绝越界尺寸", parsePlacement({ x: 0, y: 0, width: 99999, height: 768, dpi: 96 }), null);
 

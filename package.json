@@ -14,8 +14,12 @@
     "bugs": {
         "url": "https://github.com/TiancongLx/bun-app-window/issues"
     },
-    "os": ["win32"],
-    "cpu": ["x64"],
+    "os": [
+        "win32"
+    ],
+    "cpu": [
+        "x64"
+    ],
     "keywords": [
         "bun",
         "webview",

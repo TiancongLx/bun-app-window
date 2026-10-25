@@ -71,7 +71,8 @@ test("types.ts 只从本文件的声明导出（没有运行时依赖）", async
 
     expect(exports.length).toBeGreaterThan(0);
 
-    const allowed = /^[ \t]*export[ \t]+(?:declare[ \t]+)?(?:const|let|type|function|interface|abstract class|class)[ \t]/;
+    const allowed =
+        /^[ \t]*export[ \t]+(?:declare[ \t]+)?(?:const|let|type|function|interface|abstract class|class)[ \t]/;
     const bad = exports.filter((line) => !allowed.test(line));
     expect(bad).toEqual([]);
 });
@@ -79,21 +80,13 @@ test("types.ts 只从本文件的声明导出（没有运行时依赖）", async
 test("这条判据本身能红 —— 拿一段带 import 的样本自检", () => {
     // 判据失效的最常见方式是它恒真（比如正则写错）。这里用构造样本做反向验证：
     // 样本必须是「会被判死」的，否则前面两条等于没跑。
-    const sample = [
-        "export const A = 1;",
-        "",
-        'import { x } from "./y";',
-    ].join("\n");
+    const sample = ["export const A = 1;", "", 'import { x } from "./y";'].join("\n");
 
     const detected = IMPORT_FORMS.some(({ re }) => re.test(sample));
     expect(detected).toBe(true);
 
     // 再确认它对合法样本不误报（注释里出现 import 这个词是允许的）
-    const clean = [
-        "/** 不得出现任何 `import` */",
-        "export const A = 1;",
-        "export type B = { a: number };",
-    ].join("\n");
+    const clean = ["/** 不得出现任何 `import` */", "export const A = 1;", "export type B = { a: number };"].join("\n");
     const falsePositive = IMPORT_FORMS.some(({ re }) => re.test(clean));
     expect(falsePositive).toBe(false);
 });

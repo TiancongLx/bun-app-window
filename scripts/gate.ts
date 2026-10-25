@@ -168,9 +168,7 @@ export function parseGateArgs(argv: readonly string[]): GateOptions & { help: bo
  */
 export function checkedFileCount(res: RunResult): number {
     const combined = `${res.out}\n${res.err}`;
-    const m =
-        /No type errors in (\d+)\s+files?/i.exec(combined) ??
-        /checked\s+(\d+)\s+files?/i.exec(combined);
+    const m = /No type errors in (\d+)\s+files?/i.exec(combined) ?? /checked\s+(\d+)\s+files?/i.exec(combined);
     return m?.[1] ? Number(m[1]) : 0;
 }
 
@@ -316,11 +314,7 @@ export function summarize(results: readonly StageResult[]): string[] {
  * 短路不是优化，是语义：类型都过不了就没必要跑消费方验收，否则日志会被
  * 后续阶段的失败淹没，人只会看最后一行。
  */
-export async function runGate(
-    workDir: string,
-    opts: GateOptions,
-    deps: GateDeps,
-): Promise<boolean> {
+export async function runGate(workDir: string, opts: GateOptions, deps: GateDeps): Promise<boolean> {
     if (!(await deps.hasPackageJson(workDir))) {
         deps.io.warn(`not a package root: ${workDir}`);
         return false;
@@ -390,10 +384,7 @@ function reportFailure(result: StageResult, io: GateIO): void {
 
 async function spawn(argv: readonly string[], cwd: string): Promise<RunResult> {
     const proc = Bun.spawn([...argv], { cwd, stdout: "pipe", stderr: "pipe" });
-    const [out, err] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-    ]);
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
     return { code, out, err };
 }
@@ -431,10 +422,7 @@ async function runTest(cwd: string): Promise<StageResult> {
     // pass 数只掉几条，摘要里看着仍然正常；文件数掉了才是真的掉了。
     const counts = parseTestCounts(res);
     const files = parseTestFileCount(res);
-    const detail = [
-        counts ? `${counts.pass} pass / ${counts.fail} fail` : "",
-        files > 0 ? `${files} files` : "",
-    ]
+    const detail = [counts ? `${counts.pass} pass / ${counts.fail} fail` : "", files > 0 ? `${files} files` : ""]
         .filter((p) => p.length > 0)
         .join(" / ");
 
@@ -634,9 +622,7 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
         ok = opts.clean ? await gateClean(root, opts, deps) : await runGate(root, opts, deps);
     } catch (err) {
         CONSOLE_IO.warn("");
-        CONSOLE_IO.warn(
-            `gate: unexpected error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-        );
+        CONSOLE_IO.warn(`gate: unexpected error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
         ok = false;
         envProblem = true;
     }

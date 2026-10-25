@@ -86,10 +86,7 @@ async function spawn(argv: readonly string[], cwd: string): Promise<RunResult> {
     // 诊断脚本必须把「工具缺失」当成一种可报告的状态，而不是让调用方崩掉。
     try {
         const proc = Bun.spawn([...argv], { cwd, stdout: "pipe", stderr: "pipe" });
-        const [out, err] = await Promise.all([
-            new Response(proc.stdout).text(),
-            new Response(proc.stderr).text(),
-        ]);
+        const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
         const code = await proc.exited;
         return { code, out, err };
     } catch (err) {
@@ -134,11 +131,7 @@ export type AvDeps = {
 
 const REAL_DEPS: AvDeps = { spawn };
 
-export async function main(
-    argv: readonly string[],
-    root: string,
-    deps: AvDeps = REAL_DEPS,
-): Promise<number> {
+export async function main(argv: readonly string[], root: string, deps: AvDeps = REAL_DEPS): Promise<number> {
     let rootDir = root;
     for (let i = 0; i < argv.length; i++) {
         const arg = (argv[i] ?? "").replace(/^-{1,2}/, "").toLowerCase();
@@ -201,10 +194,7 @@ export async function main(
         console.log(`=== scan: ${t.path} ===`);
         const started = performance.now();
         // -DisableRemediation：只检测不处置，避免扫描过程改动样本
-        const res = await deps.spawn(
-            [mp, "-Scan", "-ScanType", "3", "-File", t.path, "-DisableRemediation"],
-            rootDir,
-        );
+        const res = await deps.spawn([mp, "-Scan", "-ScanType", "3", "-File", t.path, "-DisableRemediation"], rootDir);
         const seconds = ((performance.now() - started) / 1000).toFixed(1);
         for (const line of `${res.out}${res.err}`.split(/\r?\n/)) {
             if (line.trim()) console.log(`  ${line.trim()}`);

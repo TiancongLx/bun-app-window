@@ -401,7 +401,7 @@ test("三个按钮分别触发对应动作", () => {
         const btn = controls?.children[index];
         controls?.fire("click", {
             target: {
-                closest: (sel: string) => (sel === "[data-act]" ? btn ?? null : null),
+                closest: (sel: string) => (sel === "[data-act]" ? (btn ?? null) : null),
             },
         });
     };
@@ -486,9 +486,7 @@ test("destroy 从 DOM 摘掉并解绑事件", () => {
 
 test("没有 document 且未注入时抛出可读错误", () => {
     // lib 里没有 DOM 类型，globalThis.document 在 Bun 下不存在
-    expect(() => mountTitleBar({ bridge: recordingBridge() })).toThrow(
-        "mountTitleBar: no document available",
-    );
+    expect(() => mountTitleBar({ bridge: recordingBridge() })).toThrow("mountTitleBar: no document available");
 });
 
 test("resolveDocument 的全局访问是双层断言（单层在带 DOM lib 的消费者里报 TS2352）", () => {
@@ -624,14 +622,14 @@ test("禁用的按钮不派发动作…", () => {
     // …鼠标那条路已被 CSS 的 pointer-events: none 堵住，
     // 但键盘（Tab + Enter）仍会走到 click 处理器，所以这里也要拦。
     controls?.fire("click", {
-        target: { closest: (sel: string) => (sel === "[data-act]" ? maxBtn ?? null : null) },
+        target: { closest: (sel: string) => (sel === "[data-act]" ? (maxBtn ?? null) : null) },
     });
     expect(bridge.calls).toEqual([]);
 
     bar.setEnabled("maximize", true);
     expect(maxBtn?.getAttribute("aria-disabled")).toBe("false");
     controls?.fire("click", {
-        target: { closest: (sel: string) => (sel === "[data-act]" ? maxBtn ?? null : null) },
+        target: { closest: (sel: string) => (sel === "[data-act]" ? (maxBtn ?? null) : null) },
     });
     expect(bridge.calls).toEqual(["toggleMaximize"]);
 });
@@ -647,7 +645,7 @@ test("禁用态与其它按钮互不影响", () => {
     const clickOn = (index: number): void => {
         const btn = controls?.children[index];
         controls?.fire("click", {
-            target: { closest: (sel: string) => (sel === "[data-act]" ? btn ?? null : null) },
+            target: { closest: (sel: string) => (sel === "[data-act]" ? (btn ?? null) : null) },
         });
     };
     clickOn(0);

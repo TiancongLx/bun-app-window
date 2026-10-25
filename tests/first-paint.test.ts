@@ -52,10 +52,7 @@ test("WebView2 默认底色在 navigate 之前设置", () => {
 });
 
 test("show_now 会激活窗口（接管显示后必须自己补 SetFocus）", () => {
-    const showNow = SHELL_CC.slice(
-        SHELL_CC.indexOf("void show_now()"),
-        SHELL_CC.indexOf("void min_track_size"),
-    );
+    const showNow = SHELL_CC.slice(SHELL_CC.indexOf("void show_now()"), SHELL_CC.indexOf("void min_track_size"));
     expect(showNow).toContain("SetForegroundWindow");
     expect(showNow).toContain("SetFocus");
 });
@@ -109,9 +106,7 @@ test("两条显示路径都调用 force_visible（frameless 与带边框同源�
     expect(calls).toBeGreaterThanOrEqual(2);
 
     // show_now 内的调用必须在 ShowWindow 之后
-    const showWindowAt = SHELL_CODE.indexOf(
-        "ShowWindow(g_hwnd, g_start_maximized ? SW_SHOWMAXIMIZED : SW_SHOW);",
-    );
+    const showWindowAt = SHELL_CODE.indexOf("ShowWindow(g_hwnd, g_start_maximized ? SW_SHOWMAXIMIZED : SW_SHOW);");
     const callAt = SHELL_CODE.indexOf("force_visible();", showWindowAt);
     expect(showWindowAt).toBeGreaterThan(0);
     expect(callAt).toBeGreaterThan(showWindowAt);

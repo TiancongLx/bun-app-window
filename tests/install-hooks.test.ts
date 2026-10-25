@@ -1,12 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { isAbsolute, join, resolve } from "node:path";
 
-import {
-    PRE_PUSH_HOOK,
-    normalizeEol,
-    planInstall,
-    resolveHooksDir,
-} from "../scripts/install-hooks";
+import { PRE_PUSH_HOOK, normalizeEol, planInstall, resolveHooksDir } from "../scripts/install-hooks";
 
 /**
  * 钩子安装器的行为断言。
@@ -114,19 +109,13 @@ describe("planInstall", () => {
     });
 
     test("存在且内容不同但给了 --force → updated", () => {
-        expect(
-            planInstall({ ...base, exists: true, existingContent: "#!/bin/sh\n", force: true }),
-        ).toBe("updated");
+        expect(planInstall({ ...base, exists: true, existingContent: "#!/bin/sh\n", force: true })).toBe("updated");
     });
 
     test("--dry-run 优先于一切判断", () => {
         expect(planInstall({ ...base, dryRun: true })).toBe("dry-run");
-        expect(
-            planInstall({ ...base, exists: true, existingContent: "x", dryRun: true }),
-        ).toBe("dry-run");
-        expect(
-            planInstall({ ...base, exists: true, existingContent: TEMPLATE, dryRun: true }),
-        ).toBe("dry-run");
+        expect(planInstall({ ...base, exists: true, existingContent: "x", dryRun: true })).toBe("dry-run");
+        expect(planInstall({ ...base, exists: true, existingContent: TEMPLATE, dryRun: true })).toBe("dry-run");
     });
 
     test("existingContent 为 null 但 exists 为真 → 按冲突处理，不静默覆盖", () => {

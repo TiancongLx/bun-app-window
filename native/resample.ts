@@ -43,11 +43,7 @@ export type ResampleResult = {
  *
  * 返回 null 表示参数无意义（非正数）。长边已经不超过上限时原样返回。
  */
-export function fitInside(
-    width: number,
-    height: number,
-    maxEdge: number,
-): { width: number; height: number } | null {
+export function fitInside(width: number, height: number, maxEdge: number): { width: number; height: number } | null {
     if (!Number.isInteger(width) || !Number.isInteger(height)) return null;
     if (width <= 0 || height <= 0 || maxEdge <= 0) return null;
     const longest = Math.max(width, height);
@@ -108,13 +104,7 @@ function isOpaque(bgra: Uint8Array, pixels: number): boolean {
  * 两趟分离对加权平均不是严格等价（垂直那趟用的是已经平均过的 alpha 作权重），
  * 但误差在 8 位量化以下，且我们的主用例 alpha 全 255 时两条路径完全等价。
  */
-export function downscaleBgra(
-    src: Uint8Array,
-    sw: number,
-    sh: number,
-    dw: number,
-    dh: number,
-): ResampleResult | null {
+export function downscaleBgra(src: Uint8Array, sw: number, sh: number, dw: number, dh: number): ResampleResult | null {
     if (!Number.isInteger(sw) || !Number.isInteger(sh)) return null;
     if (!Number.isInteger(dw) || !Number.isInteger(dh)) return null;
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return null;

@@ -6,11 +6,11 @@
  */
 
 declare module "*.dll" {
-  const path: string;
-  export default path;
+    const path: string;
+    export default path;
 }
 
 declare module "*.html" {
-  const content: string;
-  export default content;
+    const content: string;
+    export default content;
 }

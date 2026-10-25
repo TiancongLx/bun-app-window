@@ -83,14 +83,7 @@ export function openStore(name: StoreName): bigint {
 /** 读证书的简单显示名 */
 function certDisplayName(context: bigint): string {
     const buf = new Uint8Array(512);
-    const n = crypt32.symbols.CertGetNameStringW(
-        context,
-        CERT_NAME_SIMPLE_DISPLAY_TYPE,
-        0,
-        0,
-        buf,
-        buf.length / 2,
-    );
+    const n = crypt32.symbols.CertGetNameStringW(context, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, 0, buf, buf.length / 2);
     if (typeof n !== "number" || n <= 1) return "";
     // 返回的是字符数（含 NUL），转成字节偏移
     const bytes = buf.subarray(0, (n - 1) * 2);
@@ -121,10 +114,7 @@ function certHasPrivateKey(context: bigint): boolean {
  * `CN=WebView Shell Dev` 会返回 `WebView Shell Dev`，与原版比较对象不同。
  * 这里两者都接受——把 `CN=` 前缀去掉再比，避免调用方困惑。
  */
-export function findCertificate(
-    storeNameValue: StoreName,
-    subject: string,
-): CertInfo | null {
+export function findCertificate(storeNameValue: StoreName, subject: string): CertInfo | null {
     const store = openStore(storeNameValue);
     if (store === 0n) return null;
 

@@ -23,13 +23,7 @@
 
 import { dlopen } from "bun:ffi";
 
-import {
-    findWindows,
-    foregroundWindow,
-    listChildWindows,
-    toHandle,
-    windowRect,
-} from "../native/win32.ts";
+import { findWindows, foregroundWindow, listChildWindows, toHandle, windowRect } from "../native/win32.ts";
 import { FLAG_CENTER, FLAG_RESIZABLE, openShell } from "../src/shell/index.ts";
 
 /** 与 `native/shell.cc` 里的 `handle_accelerator_key` 对齐的虚拟键码 */
@@ -89,13 +83,15 @@ function forceForeground(hwnd: bigint): boolean {
     const targetThread = user32.symbols.GetWindowThreadProcessId(hwnd, 0n);
 
     // 挂到前台线程：临时共享「前台身份」，SetForegroundWindow 才不会被拒
-    const attachedFg = fgThread !== 0 && fgThread !== selfThread
-        ? user32.symbols.AttachThreadInput(selfThread, fgThread, 1) !== 0
-        : false;
+    const attachedFg =
+        fgThread !== 0 && fgThread !== selfThread
+            ? user32.symbols.AttachThreadInput(selfThread, fgThread, 1) !== 0
+            : false;
     // 挂到**目标**线程：SetFocus 只对同线程窗口生效
-    const attachedTarget = targetThread !== 0 && targetThread !== selfThread
-        ? user32.symbols.AttachThreadInput(selfThread, targetThread, 1) !== 0
-        : false;
+    const attachedTarget =
+        targetThread !== 0 && targetThread !== selfThread
+            ? user32.symbols.AttachThreadInput(selfThread, targetThread, 1) !== 0
+            : false;
 
     user32.symbols.SetForegroundWindow(hwnd);
     user32.symbols.SetActiveWindow(hwnd);

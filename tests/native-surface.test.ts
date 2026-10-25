@@ -60,10 +60,7 @@ test("libshell.dll 是合法 PE 映像", async () => {
     expect(bytes[1]).toBe(0x5a);
     // e_lfanew 指向的签名必须是 PE\0\0
     const lfanew =
-        (bytes[0x3c] ?? 0) |
-        ((bytes[0x3d] ?? 0) << 8) |
-        ((bytes[0x3e] ?? 0) << 16) |
-        ((bytes[0x3f] ?? 0) << 24);
+        (bytes[0x3c] ?? 0) | ((bytes[0x3d] ?? 0) << 8) | ((bytes[0x3e] ?? 0) << 16) | ((bytes[0x3f] ?? 0) << 24);
     expect(lfanew).toBeGreaterThan(0);
     expect(bytes[lfanew]).toBe(0x50); // P
     expect(bytes[lfanew + 1]).toBe(0x45); // E

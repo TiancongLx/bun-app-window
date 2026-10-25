@@ -222,9 +222,7 @@ describe("parsePackSummary", () => {
             "verify-pack: something went wrong",
             "",
         ].join("\n");
-        expect(parsePackSummary({ code: 1, out, err: "" })).toBe(
-            "verify-pack: something went wrong",
-        );
+        expect(parsePackSummary({ code: 1, out, err: "" })).toBe("verify-pack: something went wrong");
     });
 
     test("没有结论行时返回空串", () => {
@@ -292,9 +290,9 @@ describe("formatStage / summarize", () => {
 
     test("每个阶段都有标签，不会打出 undefined", () => {
         for (const stage of Object.keys(LABELS) as Stage[]) {
-            expect(
-                formatStage({ stage, ok: true, rc: 0, ms: 0, detail: "", out: "", err: "" }),
-            ).toContain(LABELS[stage]);
+            expect(formatStage({ stage, ok: true, rc: 0, ms: 0, detail: "", out: "", err: "" })).toContain(
+                LABELS[stage],
+            );
         }
     });
 
@@ -526,4 +524,3 @@ describe("仓库里没有 .ps1（第二段退役的前提）", () => {
         expect(relative).toEqual([]);
     });
 });
-

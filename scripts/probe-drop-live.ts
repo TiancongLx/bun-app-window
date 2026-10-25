@@ -80,9 +80,7 @@ function parseArgs(argv: string[]): Args {
             timeoutSec = Number(argv[i + 1] ?? "90");
             i += 1;
         } else if (arg === "--help" || arg === "-h") {
-            console.log(
-                "用法：bun run scripts/probe-drop-live.ts [--file <path>] [--dir <path>] [--timeout <秒>]",
-            );
+            console.log("用法：bun run scripts/probe-drop-live.ts [--file <path>] [--dir <path>] [--timeout <秒>]");
             process.exit(0);
         }
     }
@@ -301,10 +299,7 @@ const server = serveOnSafePort({
                 `  ·  投递 via=${postedVia || "?"}  ${postedOk ? "成功返回" : "没有返回成功"}${postError ? `  抛错：${postError}` : ""}`,
             );
             console.log(`  ·  宿主推回的原文：${rawPayload || "（空）"}`);
-            onReport(
-                parseList(url.searchParams.get("paths")),
-                parseList(url.searchParams.get("dirs")),
-            );
+            onReport(parseList(url.searchParams.get("paths")), parseList(url.searchParams.get("dirs")));
             return new Response("ok");
         }
         return new Response("not found", { status: 404 });
@@ -398,9 +393,7 @@ check(
 check(
     "页面收到 drop 事件",
     dropFileCount >= 0,
-    dropFileCount >= 0
-        ? `files=${dropFileCount}  items=${dropItemCount}`
-        : "一条 drop 都没到",
+    dropFileCount >= 0 ? `files=${dropFileCount}  items=${dropItemCount}` : "一条 drop 都没到",
 );
 check(
     "注入脚本的 postMessageWithAdditionalObjects 成功返回",

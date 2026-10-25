@@ -110,14 +110,7 @@ export function buildPaths(root: string): BuildPaths {
 export function clangArgs(paths: BuildPaths): string[] {
     const includes = paths.includeDirs.map((dir) => `-I${dir}`);
     const libs = LIBS.map((lib) => `-l${lib}`);
-    return [
-        ...BASE_FLAGS,
-        ...includes,
-        paths.source,
-        "-o",
-        paths.outDll,
-        ...libs,
-    ];
+    return [...BASE_FLAGS, ...includes, paths.source, "-o", paths.outDll, ...libs];
 }
 
 /** 三份输入是否齐备。返回缺失项，空数组表示齐备 */
@@ -152,10 +145,7 @@ function assertTool(name: string, hint: string): string {
 
 async function runCapture(argv: string[], cwd: string): Promise<{ code: number; out: string; err: string }> {
     const proc = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe" });
-    const [out, err] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-    ]);
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     const code = await proc.exited;
     return { code, out, err };
 }
@@ -252,9 +242,7 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
             console.log("");
             console.log("=== exported symbols ===");
             const res = await runCapture([nm, "--defined-only", "--extern-only", "--demangle", paths.outDll], base);
-            const symbols = `${res.out}\n${res.err}`
-                .split(/\r?\n/)
-                .filter((line) => line.includes("shell_"));
+            const symbols = `${res.out}\n${res.err}`.split(/\r?\n/).filter((line) => line.includes("shell_"));
             for (const line of symbols) {
                 console.log(line);
             }
@@ -266,9 +254,7 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
             console.log("");
             console.log("=== runtime deps ===");
             const res = await runCapture([objdump, "-p", paths.outDll], base);
-            const deps = `${res.out}\n${res.err}`
-                .split(/\r?\n/)
-                .filter((line) => line.includes("DLL Name"));
+            const deps = `${res.out}\n${res.err}`.split(/\r?\n/).filter((line) => line.includes("DLL Name"));
             for (const line of deps) {
                 console.log(line);
             }

@@ -26,13 +26,13 @@ await openShell({ url: `http://127.0.0.1:${server.port}`, flags: FLAG_FRAMELESS 
 
 在引入本项目前，请确认以下技术前提与架构取舍是否符合你的应用场景：
 
-| 维度 | 限制与说明 |
-| --- | --- |
-| 仅支持 Windows x64 | `package.json` 中的 `os` 与 `cpu` 字段已做硬性限制，拒绝在其他平台安装（包名保持平台中立仅为预留命名空间）。预编译动态库 `libshell.dll` 随包分发，无需在安装期编译 |
-| 仅支持 Bun 运行时 | 包内直接发布 TypeScript 源码，要求 Bun ≥ 1.4.4。Node.js 环境虽可完成包安装，但无法直接运行 |
+| 维度                            | 限制与说明                                                                                                                                                                                                                       |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 仅支持 Windows x64              | `package.json` 中的 `os` 与 `cpu` 字段已做硬性限制，拒绝在其他平台安装（包名保持平台中立仅为预留命名空间）。预编译动态库 `libshell.dll` 随包分发，无需在安装期编译                                                               |
+| 仅支持 Bun 运行时               | 包内直接发布 TypeScript 源码，要求 Bun ≥ 1.4.4。Node.js 环境虽可完成包安装，但无法直接运行                                                                                                                                       |
 | 类型检查要求 TypeScript ≥ 7.0.2 | API 在 TypeScript 7.0.2 下设计与检查，`devDependencies` 中精确锁版；不为更旧的编译器做兼容。高于 7.0.2 的结果未作断言——`bun-types` 只在那一侧才打开 `typesVersions: ">= 7.1"` 门控，`with { type: "text" }` 的解析结果会随之改变 |
-| 类型检查需自备 `@types/bun` | 包内是 `.ts` 源文件，消费方的 `bun check` 会一并编译它们。需执行 `bun add -d @types/bun`，否则类型检查会在 `node_modules` 内报 `TS2868: Cannot find name 'Bun'` |
-| 基于 `bun:ffi` 构建 | `bun:ffi` 在 Bun 中仍标记为实验性特性（Experimental）。官方建议生产环境优先采用 Node-API，本项目选择 `bun:ffi` 是为了换取零第三方依赖的轻量架构 |
+| 类型检查需自备 `@types/bun`     | 包内是 `.ts` 源文件，消费方的 `bun check` 会一并编译它们。需执行 `bun add -d @types/bun`，否则类型检查会在 `node_modules` 内报 `TS2868: Cannot find name 'Bun'`                                                                  |
+| 基于 `bun:ffi` 构建             | `bun:ffi` 在 Bun 中仍标记为实验性特性（Experimental）。官方建议生产环境优先采用 Node-API，本项目选择 `bun:ffi` 是为了换取零第三方依赖的轻量架构                                                                                  |
 
 运行环境与能力边界：
 
@@ -48,7 +48,7 @@ bun add bun-app-window
 
 ### 包内包含什么
 
-发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 22 个文件（0.50 MB，解包后 1.44 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
+发布的 tarball 只有预编译的 `dist/libshell.dll` 与 TypeScript 源码，共 22 个文件（0.50 MB，解包后 1.47 MB）。原生 C++ 层（`native/`）与上游 vendored 头文件（`vendor/`）**不随包分发**：它们只在重编 `libshell.dll` 时需要，而重编必须 clone 仓库。因此 `bun run build:native` 与 `build:exe` 是本仓库专用脚本，装进 `node_modules` 后执行没有意义。
 
 ## 快速开始
 
@@ -56,22 +56,23 @@ bun add bun-app-window
 import { openShell, serveOnSafePort, FLAG_FRAMELESS, FLAG_CENTER } from "bun-app-window";
 
 const server = serveOnSafePort({
-  fetch: () => new Response("<h1>Hello</h1>", {
-    headers: { "content-type": "text/html; charset=utf-8" },
-  }),
+    fetch: () =>
+        new Response("<h1>Hello</h1>", {
+            headers: { "content-type": "text/html; charset=utf-8" },
+        }),
 });
 
 const shell = await openShell({
-  url: `http://127.0.0.1:${server.port}`,
-  title: "My App",
-  width: 1000,
-  height: 680,
-  flags: FLAG_FRAMELESS | FLAG_CENTER,
-  minWidth: 480,
-  minHeight: 320,
+    url: `http://127.0.0.1:${server.port}`,
+    title: "My App",
+    width: 1000,
+    height: 680,
+    flags: FLAG_FRAMELESS | FLAG_CENTER,
+    minWidth: 480,
+    minHeight: 320,
 });
 
-shell.post(JSON.stringify({ t: "ready" }));   // 宿主 → 页面单向消息
+shell.post(JSON.stringify({ t: "ready" })); // 宿主 → 页面单向消息
 shell.setTitle("Doing work…");
 ```
 
@@ -83,45 +84,45 @@ shell.setTitle("Doing work…");
 
 ### 实例方法与属性
 
-| 成员 | 说明 |
-| --- | --- |
-| `start()` | 创建并启动窗口，返回 `{ rc, error }`。调用后立即返回，UI 消息循环运行于独立原生线程 |
-| `stop()` | 销毁窗口并释放底层资源，支持幂等重复调用 |
-| `show()` | 显示窗口。常配合 `FLAG_DEFER_SHOW` 使用，实现在页面渲染就绪后再展现窗口 |
-| `isAlive()` | 检测窗口是否存活（注：`state()` 无法区分「尚未启动」与「已销毁」状态）。等窗口关闭请用 `pollEvents()` 的 `CLOSED`，别轮询它 |
-| `pollEvents(max?)` | 批量拉取窗口生命周期事件（`STATE` / `CLOSED`），同步、消费式。详见下文「窗口事件」 |
-| `state()` | 获取当前窗口状态：`{ maximized, minimized, focused, dark, raw }` |
-| `lastError()` | 获取最近一次操作失败的错误信息，无错误时返回空字符串 |
-| `setTitle` / `minimize` / `toggleMaximize` / `close` | 基础窗口控制操作，返回状态码 `rc` |
-| `setMinSize(w, h)` | 设置窗口最小尺寸（单位：逻辑像素） |
-| `drag()` | 触发原生窗口拖拽（在页面 `pointerdown` 事件中调用，完整保留 Windows 贴边分屏特性） |
-| `beginResize(edge)` | 触发原生边框缩放（在页面 `pointermove` 事件中调用，`edge` 取值见 `RESIZE_EDGE.*`） |
-| `post(json)` | 宿主向页面单向投递 JSON 消息，异步发送且不等待返回结果 |
-| `setZoom(f)` / `getZoom()` | 设置或获取页面缩放比例（有效范围 `0.25`–`3.0`，越界值自动钳制） |
-| `reload()` / `openDevTools()` / `toggleFullscreen()` | 页面重载、打开开发者工具、切换全屏（分别对应 `Ctrl+R` / `F12` / `F11`） |
-| `setFrameless(frameless)` / `isFrameless()` | 运行时切换窗口形态并读取当前形态。只有**创建时**给了 `FLAG_FRAMELESS` 的窗口能切；带边框起点的窗口返回 `rc=-1`，理由在 `lastError()`。详见下文「窗口标志位」 |
-| `setBrowserUi(mask)` | 禁用指定的浏览器默认行为，传入 `BROWSER_UI_*` 标志位的按位或组合 |
-| `showContextMenu(x, y, items)` | 在指定屏幕坐标弹出 Win32 原生上下文菜单（详见下文用法） |
-| `pickFolder(title?)` | 调用原生文件夹选择对话框（同步阻塞当前调用线程；**经 IPC 暴露时务必配 `timeoutMs: 0`**，见下文） |
-| `libInfo` | 原生动态库解析元数据（包含实际路径、加载来源、SHA-256 校验值） |
-| `symbols` | 底层直通接口：直接访问通过 `dlopen` 导出的底层 C 符号 |
+| 成员                                                 | 说明                                                                                                                                                         |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `start()`                                            | 创建并启动窗口，返回 `{ rc, error }`。调用后立即返回，UI 消息循环运行于独立原生线程                                                                          |
+| `stop()`                                             | 销毁窗口并释放底层资源，支持幂等重复调用                                                                                                                     |
+| `show()`                                             | 显示窗口。常配合 `FLAG_DEFER_SHOW` 使用，实现在页面渲染就绪后再展现窗口                                                                                      |
+| `isAlive()`                                          | 检测窗口是否存活（注：`state()` 无法区分「尚未启动」与「已销毁」状态）。等窗口关闭请用 `pollEvents()` 的 `CLOSED`，别轮询它                                  |
+| `pollEvents(max?)`                                   | 批量拉取窗口生命周期事件（`STATE` / `CLOSED`），同步、消费式。详见下文「窗口事件」                                                                           |
+| `state()`                                            | 获取当前窗口状态：`{ maximized, minimized, focused, dark, raw }`                                                                                             |
+| `lastError()`                                        | 获取最近一次操作失败的错误信息，无错误时返回空字符串                                                                                                         |
+| `setTitle` / `minimize` / `toggleMaximize` / `close` | 基础窗口控制操作，返回状态码 `rc`                                                                                                                            |
+| `setMinSize(w, h)`                                   | 设置窗口最小尺寸（单位：逻辑像素）                                                                                                                           |
+| `drag()`                                             | 触发原生窗口拖拽（在页面 `pointerdown` 事件中调用，完整保留 Windows 贴边分屏特性）                                                                           |
+| `beginResize(edge)`                                  | 触发原生边框缩放（在页面 `pointermove` 事件中调用，`edge` 取值见 `RESIZE_EDGE.*`）                                                                           |
+| `post(json)`                                         | 宿主向页面单向投递 JSON 消息，异步发送且不等待返回结果                                                                                                       |
+| `setZoom(f)` / `getZoom()`                           | 设置或获取页面缩放比例（有效范围 `0.25`–`3.0`，越界值自动钳制）                                                                                              |
+| `reload()` / `openDevTools()` / `toggleFullscreen()` | 页面重载、打开开发者工具、切换全屏（分别对应 `Ctrl+R` / `F12` / `F11`）                                                                                      |
+| `setFrameless(frameless)` / `isFrameless()`          | 运行时切换窗口形态并读取当前形态。只有**创建时**给了 `FLAG_FRAMELESS` 的窗口能切；带边框起点的窗口返回 `rc=-1`，理由在 `lastError()`。详见下文「窗口标志位」 |
+| `setBrowserUi(mask)`                                 | 禁用指定的浏览器默认行为，传入 `BROWSER_UI_*` 标志位的按位或组合                                                                                             |
+| `showContextMenu(x, y, items)`                       | 在指定屏幕坐标弹出 Win32 原生上下文菜单（详见下文用法）                                                                                                      |
+| `pickFolder(title?)`                                 | 调用原生文件夹选择对话框（同步阻塞当前调用线程；**经 IPC 暴露时务必配 `timeoutMs: 0`**，见下文）                                                             |
+| `libInfo`                                            | 原生动态库解析元数据（包含实际路径、加载来源、SHA-256 校验值）                                                                                               |
+| `symbols`                                            | 底层直通接口：直接访问通过 `dlopen` 导出的底层 C 符号                                                                                                        |
 
 ### 窗口标志位（Flags）
 
 通过按位或（`|`）组合传入 `opts.flags`：
 
-| 标志位 | 作用说明 |
-| --- | --- |
-| `FLAG_FRAMELESS` | 无边框窗口模式，移除系统默认标题栏，交由前端页面自行绘制。以这种方式创建的窗口可在运行时用 `setFrameless(false)` 切回带边框 |
-| `FLAG_RESIZABLE` | 允许用户调整窗口大小 |
-| `FLAG_CENTER` | 启动时在当前显示器工作区居中显示（有边框与无边框模式均生效） |
-| `FLAG_TOPMOST` | 窗口始终置顶 |
-| `FLAG_DEFER_SHOW` | 创建窗口后保持隐藏状态，等待显式调用 `show()` |
-| `FLAG_ACCEPT_DROP` | 允许窗口接收外部文件或文件夹拖放事件 |
-| `FLAG_START_MAXIMIZED` | 窗口首次显示即处于最大化状态，避免从普通尺寸跳变到最大化的中间闪烁帧 |
-| `FLAG_ALLOW_EXTERNAL_NAV` | 放弃外部导航拦截——用于本身就是浏览器的应用 |
-| `FLAG_TITLEBAR_RESERVE` | 无边框模式下把网页内容整体下移一个标题栏高度，让顶部那条归原生窗口。**已被 `FLAG_NATIVE_CAPTIONS` 取代**：caption 命中区固定在客户区 `y ∈ [0, 32)`，这条路会把页面自绘的标题栏放到与点击真正落点相差 32 px 的位置 |
-| `FLAG_NATIVE_CAPTIONS` | 无边框模式下，由壳层自己的 layered 子窗口绘制三个 caption 按钮并在那里应答 `HTMAXBUTTON`。这是 Snap Layouts 唯一能触发的途径：WebView2 的渲染子窗口在另一个进程里，恒回 `HTCLIENT`。必须与 `mountTitleBar({ captions: "native" })` 配套，页面才会留出 `46 × 3` 而不是自己画一套 |
+| 标志位                    | 作用说明                                                                                                                                                                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FLAG_FRAMELESS`          | 无边框窗口模式，移除系统默认标题栏，交由前端页面自行绘制。以这种方式创建的窗口可在运行时用 `setFrameless(false)` 切回带边框                                                                                                                                                     |
+| `FLAG_RESIZABLE`          | 允许用户调整窗口大小                                                                                                                                                                                                                                                            |
+| `FLAG_CENTER`             | 启动时在当前显示器工作区居中显示（有边框与无边框模式均生效）                                                                                                                                                                                                                    |
+| `FLAG_TOPMOST`            | 窗口始终置顶                                                                                                                                                                                                                                                                    |
+| `FLAG_DEFER_SHOW`         | 创建窗口后保持隐藏状态，等待显式调用 `show()`                                                                                                                                                                                                                                   |
+| `FLAG_ACCEPT_DROP`        | 允许窗口接收外部文件或文件夹拖放事件                                                                                                                                                                                                                                            |
+| `FLAG_START_MAXIMIZED`    | 窗口首次显示即处于最大化状态，避免从普通尺寸跳变到最大化的中间闪烁帧                                                                                                                                                                                                            |
+| `FLAG_ALLOW_EXTERNAL_NAV` | 放弃外部导航拦截——用于本身就是浏览器的应用                                                                                                                                                                                                                                      |
+| `FLAG_TITLEBAR_RESERVE`   | 无边框模式下把网页内容整体下移一个标题栏高度，让顶部那条归原生窗口。**已被 `FLAG_NATIVE_CAPTIONS` 取代**：caption 命中区固定在客户区 `y ∈ [0, 32)`，这条路会把页面自绘的标题栏放到与点击真正落点相差 32 px 的位置                                                               |
+| `FLAG_NATIVE_CAPTIONS`    | 无边框模式下，由壳层自己的 layered 子窗口绘制三个 caption 按钮并在那里应答 `HTMAXBUTTON`。这是 Snap Layouts 唯一能触发的途径：WebView2 的渲染子窗口在另一个进程里，恒回 `HTCLIENT`。必须与 `mountTitleBar({ captions: "native" })` 配套，页面才会留出 `46 × 3` 而不是自己画一套 |
 
 ### 外部导航默认被拦截
 
@@ -165,19 +166,19 @@ import htmlText from "./index.html" with { type: "text" };
 const html = htmlText as unknown as string;
 
 const app = await createApp({
-  html,
-  title: "我的应用",
-  flags: FLAG_FRAMELESS,          // 想要自绘标题栏就显式加
-  browserUi: BROWSER_UI_ALL,
-  service: {
-    greet: (name: string) => `hi ${name}`,
-    // 人机交互的调用耗时不可控：页面侧必须 connect({ timeoutMs: 0 })，见 ipc 一节
-    pickFolder: () => app.shell.pickFolder(),
-  },
+    html,
+    title: "我的应用",
+    flags: FLAG_FRAMELESS, // 想要自绘标题栏就显式加
+    browserUi: BROWSER_UI_ALL,
+    service: {
+        greet: (name: string) => `hi ${name}`,
+        // 人机交互的调用耗时不可控：页面侧必须 connect({ timeoutMs: 0 })，见 ipc 一节
+        pickFolder: () => app.shell.pickFolder(),
+    },
 });
 
-await app.wait();                  // 窗口关闭时 resolve
-await app.stop();                  // 释放事件泵与服务；幂等，已关闭时立即返回
+await app.wait(); // 窗口关闭时 resolve
+await app.stop(); // 释放事件泵与服务；幂等，已关闭时立即返回
 ```
 
 传 `page` 就能把打包好的页面脚本交给骨架，不必自己写那条路由。`createApp` 会应答
@@ -204,7 +205,7 @@ const app = await createApp({ html, page: code, service });
 ```ts
 // page.ts —— index.html 的 bundle 里
 import { connect } from "bun-app-window/ipc";
-const api = await connect();       // token 从页面 URL 的 ?t= 取
+const api = await connect(); // token 从页面 URL 的 ?t= 取
 await api.greet("Ada");
 ```
 
@@ -265,19 +266,21 @@ export type Events = { windowState: { maximized: boolean } };
 import { createIpcServer } from "bun-app-window/ipc";
 
 const ipc = createIpcServer({
-  service: { greet: (name: string) => `Hello ${name}` },
+    service: { greet: (name: string) => `Hello ${name}` },
 });
 
 serveOnSafePort({
-  fetch(req) { /* 处理静态页面与鉴权 */ },
-  websocket: {
-    open: (ws) => ipc.attach(ws),
-    message: (ws, raw) => ipc.handle(ws, raw),
-    close: (ws) => ipc.detach(ws),
-  },
+    fetch(req) {
+        /* 处理静态页面与鉴权 */
+    },
+    websocket: {
+        open: (ws) => ipc.attach(ws),
+        message: (ws, raw) => ipc.handle(ws, raw),
+        close: (ws) => ipc.detach(ws),
+    },
 });
 
-ipc.emit("windowState", { maximized: false });   // 向页面主动推送事件
+ipc.emit("windowState", { maximized: false }); // 向页面主动推送事件
 ```
 
 #### 迟连接的状态投递
@@ -289,7 +292,7 @@ ipc.emit("windowState", { maximized: false });   // 向页面主动推送事件
 把「状态类」事件标为粘性，服务端就会在每次连接建立时回放最后一份载荷：
 
 ```ts
-ipc.emit("windowState", { maximized: false }, { sticky: true });   // attach() 时回放
+ipc.emit("windowState", { maximized: false }, { sticky: true }); // attach() 时回放
 ```
 
 粘性是**显式开启**的，且每个事件名只保留一份载荷，不是历史队列。语义上是「通知」而非
@@ -301,7 +304,7 @@ import { connect } from "bun-app-window/ipc";
 import type { Api, Events } from "./api";
 
 const api = await connect<Api, Events>();
-await api.greet("Ada");                        // 返回类型自动推导为 string
+await api.greet("Ada"); // 返回类型自动推导为 string
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
 ```
 
@@ -334,13 +337,13 @@ const api = await connect<Api, Events>({ timeoutMs: 0 });
 客户端是一个 `Proxy`：有几个名字会解析到客户端自己身上，永远到不了远端方法。服务表里若有
 同名方法，**那个服务端方法就永远调不到**——页面调的是客户端自己的成员，两端都不会报错。
 
-| 名字 | 页面实际拿到的东西 |
-| --- | --- |
-| `on` / `off` | 事件订阅辅助函数 |
-| `close()` | 关闭 WebSocket 通道——之后所有调用都会被 reject |
-| `connected` | `boolean`，通道当前是否可用 |
-| `pending` | `number`，尚未收到回复的调用数 |
-| `then` | `undefined`，否则 `await client` 会把这个永不兑现的 thenable 等下去 |
+| 名字         | 页面实际拿到的东西                                                  |
+| ------------ | ------------------------------------------------------------------- |
+| `on` / `off` | 事件订阅辅助函数                                                    |
+| `close()`    | 关闭 WebSocket 通道——之后所有调用都会被 reject                      |
+| `connected`  | `boolean`，通道当前是否可用                                         |
+| `pending`    | `number`，尚未收到回复的调用数                                      |
+| `then`       | `undefined`，否则 `await client` 会把这个永不兑现的 thenable 等下去 |
 
 Symbol 键同样保留。给服务方法换个名字（`winClose` 而不是 `close`），在页面侧映射回去 ——
 见下面的标题栏一节。
@@ -358,12 +361,12 @@ Symbol 键同样保留。给服务方法换个名字（`winClose` 而不是 `clo
 ```ts
 // 宿主端 —— 扁平服务；`close` 是 IPC 客户端的保留名
 createIpcServer({
-  service: {
-    minimize: () => shell.minimize(),
-    toggleMaximize: () => shell.toggleMaximize(),
-    winClose: () => shell.close(),
-    drag: () => shell.drag(),
-  },
+    service: {
+        minimize: () => shell.minimize(),
+        toggleMaximize: () => shell.toggleMaximize(),
+        winClose: () => shell.close(),
+        drag: () => shell.drag(),
+    },
 });
 ```
 
@@ -372,14 +375,14 @@ createIpcServer({
 import { mountTitleBar, bridgeFromWindowService } from "bun-app-window/titlebar";
 
 const bar = mountTitleBar({
-  title: "我的应用",
-  icon: "/icon.svg",
-  bridge: bridgeFromWindowService({
-    minimize: () => api.minimize(),
-    toggleMaximize: () => api.toggleMaximize(),
-    close: () => api.winClose(),          // 桥接时再映射回 close
-    drag: () => api.drag(),
-  }),
+    title: "我的应用",
+    icon: "/icon.svg",
+    bridge: bridgeFromWindowService({
+        minimize: () => api.minimize(),
+        toggleMaximize: () => api.toggleMaximize(),
+        close: () => api.winClose(), // 桥接时再映射回 close
+        drag: () => api.drag(),
+    }),
 });
 
 api.on("windowState", (s) => bar.setMaximized(s.maximized));
@@ -407,7 +410,7 @@ if (saved) restorePlacement(shell, saved);
 
 shell.show();
 
-const store = attachPlacementStore(shell, FILE);   // 订阅窗口事件，拖动停手后写一次盘
+const store = attachPlacementStore(shell, FILE); // 订阅窗口事件，拖动停手后写一次盘
 process.on("beforeExit", () => store.flush());
 ```
 
@@ -441,8 +444,10 @@ const store = attachPlacementStore(app.shell, FILE, { events: app.events });
 import { EVENT_CLOSED, EVENT_STATE } from "bun-app-window/events";
 
 for (const e of shell.pollEvents()) {
-  if (e.type === EVENT_CLOSED) break;          // 窗口已销毁，原生单例已释放
-  if (e.type === EVENT_STATE && e.maximized) { /* ... */ }
+    if (e.type === EVENT_CLOSED) break; // 窗口已销毁，原生单例已释放
+    if (e.type === EVENT_STATE && e.maximized) {
+        /* ... */
+    }
 }
 ```
 
@@ -453,7 +458,9 @@ for (const e of shell.pollEvents()) {
 import { EVENT_CLOSED, attachEventPump } from "bun-app-window/events";
 
 const pump = attachEventPump(shell, { intervalMs: 16 });
-pump.on((e) => { if (e.type === EVENT_CLOSED) pump.stop(); });
+pump.on((e) => {
+    if (e.type === EVENT_CLOSED) pump.stop();
+});
 pump.onGap((missing) => console.warn(`漏了 ${missing} 条事件`));
 ```
 
@@ -472,8 +479,8 @@ pump.onGap((missing) => console.warn(`漏了 ${missing} 条事件`));
 import { debugOf } from "bun-app-window/debug";
 
 const d = debugOf(shell);
-d.metrics();   // → "pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1"
-d.dpi();       // → "awareness=-1 dpi=192 scale=200%"
+d.metrics(); // → "pos=196,196 win=1960x1400 client=1960x1400 work=3072x1824 border=13x13 round=1"
+d.dpi(); // → "awareness=-1 dpi=192 scale=200%"
 d.hittest(x, y);
 ```
 
@@ -520,10 +527,10 @@ await writePageBundle({ entry: "src/ui/page.ts", out: "src/ui/page.bundle.txt" }
 
 ```ts
 const built = await bundlePage({
-  entry: "src/main.ts",
-  plugins: [myFrameworkPlugin()],              // .vue / .svelte / .tsx —— 插件能编译什么就传什么
-  define: { __VUE_OPTIONS_API__: "false" },    // 编译期常量
-  loader: { ".thing": "ts" },                  // 自定义扩展名
+    entry: "src/main.ts",
+    plugins: [myFrameworkPlugin()], // .vue / .svelte / .tsx —— 插件能编译什么就传什么
+    define: { __VUE_OPTIONS_API__: "false" }, // 编译期常量
+    loader: { ".thing": "ts" }, // 自定义扩展名
 });
 ```
 
@@ -533,14 +540,14 @@ Bun 1.4.4 的 `BuildConfig` 没有 `alias` 属性，而且传进去不会报错�
 四种写法都试过，全部解析失败。因此本包用自带的 `onResolve` 插件支撑 `alias`：
 
 ```ts
-await bundlePage({ entry, alias: { "@": "./src", "lib": "./src/lib" } });
+await bundlePage({ entry, alias: { "@": "./src", lib: "./src/lib" } });
 ```
 
-| 模块说明符 | 是否重写 |
-| --- | --- |
-| 与某个键相等，或以 `键/` 为前缀 | 是 |
-| 以 `.` 或 `/` 开头 | 否 |
-| 带 `scheme:` 前缀 | 否 |
+| 模块说明符                      | 是否重写 |
+| ------------------------------- | -------- |
+| 与某个键相等，或以 `键/` 为前缀 | 是       |
+| 以 `.` 或 `/` 开头              | 否       |
+| 带 `scheme:` 前缀               | 否       |
 
 **默认是空的。** `$lib` 是 SvelteKit 的约定，`@/` 是某些项目自己的 `tsconfig` 别名，
 两者都不属于本包。别名与调用方的插件是合并关系而非替换，且只在传入 `alias` 时才注册该插件。
@@ -594,13 +601,13 @@ const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 
 也可按需组合以下标志位：
 
-| 标志位 | 禁用的浏览器行为 |
-| --- | --- |
-| `BROWSER_UI_MENU` | 默认网页右键菜单（Edge 上下文菜单） |
-| `BROWSER_UI_KEYS` | 浏览器内置快捷键（如 `Ctrl+P` / `Ctrl+F` / `Ctrl+S`） |
-| `BROWSER_UI_STATUSBAR` | 左下角链接悬停状态栏 |
-| `BROWSER_UI_SWIPE` | 触控板双指横滑前进 / 后退手势 |
-| `BROWSER_UI_AUTOFILL` | 表单自动填充提示 |
+| 标志位                 | 禁用的浏览器行为                                      |
+| ---------------------- | ----------------------------------------------------- |
+| `BROWSER_UI_MENU`      | 默认网页右键菜单（Edge 上下文菜单）                   |
+| `BROWSER_UI_KEYS`      | 浏览器内置快捷键（如 `Ctrl+P` / `Ctrl+F` / `Ctrl+S`） |
+| `BROWSER_UI_STATUSBAR` | 左下角链接悬停状态栏                                  |
+| `BROWSER_UI_SWIPE`     | 触控板双指横滑前进 / 后退手势                         |
+| `BROWSER_UI_AUTOFILL`  | 表单自动填充提示                                      |
 
 注：`F11`、`F12` 及 `Ctrl±` 缩放由窗口壳层直接接管，不受上述标志位影响。
 
@@ -611,26 +618,22 @@ const shell = await openShell({ url, browserUi: BROWSER_UI_ALL });
 ```ts
 // 宿主端：把菜单能力挂到扁平服务上
 createIpcServer({
-  service: {
-    showContextMenu: (x: number, y: number, items: string) => shell.showContextMenu(x, y, items),
-  },
+    service: {
+        showContextMenu: (x: number, y: number, items: string) => shell.showContextMenu(x, y, items),
+    },
 });
 ```
 
 ```ts
 // 页面端触发菜单
 document.addEventListener("contextmenu", async (e) => {
-  e.preventDefault();
-  await api.showContextMenu(
-    Math.round(e.screenX),
-    Math.round(e.screenY),
-    "open|打开\nrefresh|刷新\n-\nquit|退出"
-  );
+    e.preventDefault();
+    await api.showContextMenu(Math.round(e.screenX), Math.round(e.screenY), "open|打开\nrefresh|刷新\n-\nquit|退出");
 });
 
 // 页面端监听菜单点击结果
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "menu") console.log("选中菜单项 ID:", e.detail.id);
+    if (e.detail.t === "menu") console.log("选中菜单项 ID:", e.detail.id);
 });
 ```
 
@@ -648,7 +651,7 @@ const shell = await openShell({ url, flags: FLAG_ACCEPT_DROP });
 ```js
 // 页面端接收路径列表
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t === "drop") console.log("拖入文件路径:", e.detail.paths);
+    if (e.detail.t === "drop") console.log("拖入文件路径:", e.detail.paths);
 });
 ```
 
@@ -656,10 +659,10 @@ window.addEventListener("shell-msg", (e) => {
 
 ```js
 window.addEventListener("shell-msg", (e) => {
-  if (e.detail.t !== "drop") return;
-  for (const p of e.detail.paths) {
-    console.log(e.detail.dirs.includes(p) ? "文件夹" : "文件", p);
-  }
+    if (e.detail.t !== "drop") return;
+    for (const p of e.detail.paths) {
+        console.log(e.detail.dirs.includes(p) ? "文件夹" : "文件", p);
+    }
 });
 ```
 
@@ -670,14 +673,27 @@ window.addEventListener("shell-msg", (e) => {
 窗口壳层不会向页面隐式注入任何 DOM 或全局样式。为消除「网页感」，建议应用在前端自行补充以下基础规则：
 
 ```css
-html, body { cursor: default; }
-body { user-select: none; }
-input, textarea, .log { user-select: text; cursor: auto; }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+html,
+body {
+    cursor: default;
+}
+body {
+    user-select: none;
+}
+input,
+textarea,
+.log {
+    user-select: text;
+    cursor: auto;
+}
+button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
 ```
 
 ```html
-<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off">
+<input type="text" spellcheck="false" autocomplete="off" autocapitalize="off" />
 ```
 
 尤其建议为输入框设置 `spellcheck="false"`，否则浏览器拼写检查极易在文件路径或专业数值下绘制红色波浪线，破坏桌面应用的原生观感。
@@ -688,7 +704,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 ```ts
 import { createShell } from "bun-app-window";
-import { embeddedDll } from "bun-app-window/embedded";   // 将 DLL 字节内嵌至打包产物
+import { embeddedDll } from "bun-app-window/embedded"; // 将 DLL 字节内嵌至打包产物
 
 const shell = await createShell({ url, embedded: embeddedDll });
 ```
@@ -727,14 +743,14 @@ bun build --compile --windows-hide-console src/index.ts --outfile dist/app.exe
 
 ### 内置快捷键与鼠标行为
 
-| 触发方式 | 默认行为 |
-| --- | --- |
-| `Ctrl +` / `Ctrl -` / `Ctrl 0` | 页面缩放：放大一档 / 缩小一档 / 重置为 100% |
-| `Ctrl + 鼠标滚轮` | 页面缩放：放大 / 缩小 |
-| `F11` | 切换全屏模式（隐藏窗口边框并覆盖系统任务栏） |
-| `F5` / `Ctrl + R` | 重新加载当前页面 |
-| `F12` | 打开 WebView2 开发者工具 |
-| `Alt + Space` / 标题栏右键 | 弹出 Windows 系统窗口菜单 |
+| 触发方式                       | 默认行为                                     |
+| ------------------------------ | -------------------------------------------- |
+| `Ctrl +` / `Ctrl -` / `Ctrl 0` | 页面缩放：放大一档 / 缩小一档 / 重置为 100%  |
+| `Ctrl + 鼠标滚轮`              | 页面缩放：放大 / 缩小                        |
+| `F11`                          | 切换全屏模式（隐藏窗口边框并覆盖系统任务栏） |
+| `F5` / `Ctrl + R`              | 重新加载当前页面                             |
+| `F12`                          | 打开 WebView2 开发者工具                     |
+| `Alt + Space` / 标题栏右键     | 弹出 Windows 系统窗口菜单                    |
 
 ## 开发与验证
 
@@ -765,10 +781,10 @@ bun run demo       # 启动交互式自检示例程序（需在桌面会话下�
 
 自动化测试或截图脚本若需通过 Win32 `EnumWindows` 过滤窗口句柄，请根据窗口模式匹配对应的窗口类名（Window Class）：
 
-| 窗口模式 | 对应窗口类名 |
-| --- | --- |
-| 标准带边框模式（未传 `FLAG_FRAMELESS`） | `webview` |
-| 无边框模式（传入 `FLAG_FRAMELESS`） | `webview_shell` |
+| 窗口模式                                | 对应窗口类名    |
+| --------------------------------------- | --------------- |
+| 标准带边框模式（未传 `FLAG_FRAMELESS`） | `webview`       |
+| 无边框模式（传入 `FLAG_FRAMELESS`）     | `webview_shell` |
 
 ## 致谢
 

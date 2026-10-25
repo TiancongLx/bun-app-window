@@ -24,18 +24,17 @@ const DLL_PATTERN = /^libshell.*\.dll$/i;
 
 /** 返回内嵌 DLL 的字节；不在编译产物内或未内嵌时返回 null */
 export async function embeddedDll(): Promise<Uint8Array | null> {
-  const files = (Bun as unknown as { embeddedFiles?: ReadonlyArray<Blob & { name: string }> })
-    .embeddedFiles;
-  if (!files || files.length === 0) return null;
+    const files = (Bun as unknown as { embeddedFiles?: ReadonlyArray<Blob & { name: string }> }).embeddedFiles;
+    if (!files || files.length === 0) return null;
 
-  const hit = files.find((f) => DLL_PATTERN.test(f.name));
-  if (!hit) return null;
+    const hit = files.find((f) => DLL_PATTERN.test(f.name));
+    if (!hit) return null;
 
-  const buf = new Uint8Array(await hit.arrayBuffer());
-  if (buf.length < 2 || buf[0] !== 0x4d || buf[1] !== 0x5a) {
-    throw new Error(`embedded native library is not a PE file (${hit.name})`);
-  }
-  return buf;
+    const buf = new Uint8Array(await hit.arrayBuffer());
+    if (buf.length < 2 || buf[0] !== 0x4d || buf[1] !== 0x5a) {
+        throw new Error(`embedded native library is not a PE file (${hit.name})`);
+    }
+    return buf;
 }
 
 /** 打包器记录的 DLL 路径（仅排障时有用，运行期不要用它读文件） */

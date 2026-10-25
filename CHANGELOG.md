@@ -51,10 +51,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
     Two behaviours were re-measured on this baseline rather than assumed unchanged:
 
-    | Probe | Result |
-    | --- | --- |
-    | `FFIType.buffer` as `args` / `returns` | throws `invalid ABI type` |
-    | `"buffer"` string literal as `args` | accepted, and rejected as `returns` |
+    | Probe                                  | Result                              |
+    | -------------------------------------- | ----------------------------------- |
+    | `FFIType.buffer` as `args` / `returns` | throws `invalid ABI type`           |
+    | `"buffer"` string literal as `args`    | accepted, and rejected as `returns` |
 
     So the `bun:ffi` constraint in `AGENTS.md` §5.1 holds on this baseline unchanged.
 
@@ -93,7 +93,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Rationale and rejected alternatives are in `ADR 0021` (repository-local).
 
 - The three READMEs gain a subsection on multi-artifact output; package size re-measured as
-  22 files / 0.50 MB packed / 1.44 MB unpacked.
+  22 files / 0.50 MB packed / 1.47 MB unpacked.
+
+- **`bun fmt` adopted with an explicit style, and one contract moved off source layout.**
+  `bunfig.toml` pins `useTabs = false`, `tabWidth = 4`, `printWidth = 120`; `.prettierignore` excludes
+  `vendor/` first, because that tree is a verbatim upstream copy and editing it manufactures
+  conflicts with the next upstream sync. 73 files were reformatted; `vendor/` verified unchanged.
+
+    The style had to be declared rather than defaulted: `bun fmt --help` documents `tabWidth` as
+    `default: 2`, while 1.4.4 actually emits 4. A default that disagrees with its own documentation
+    is not a fact to depend on.
+
+    Reformatting exposed a real defect rather than a cosmetic one. `tests/version.test.ts` read
+    `--windows-version` **line by line**, so it only recognised the version literal when
+    `"--windows-version", "0.9.0.0",` sat on one line. At 120 columns the formatter splits those two
+    elements, and four assertions went red against code that had not changed. The contract was
+    anchored on layout instead of on the value. It now matches over the whole text after blanking
+    comment lines, so both layouts parse; `bump-version.ts` already spanned lines via `\s*` and
+    preserves the surrounding whitespace, which is now pinned by a test that asserts the rewritten
+    version stays on its own line rather than being collapsed back.
+
+    `bun fmt` does **not** honour `// prettier-ignore` on array elements — measured: the comment is
+    kept, the element is still split. That is why the fix moved the parser instead of silencing the
+    formatter.
+
+    The reformat adds 30 KB to the unpacked tarball (1.44 → 1.47 MB): splitting array elements adds
+    a level of indentation. Declared size updated in all three READMEs.
 
 ## [0.8.0] - 2026-10-25
 
@@ -154,7 +179,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **`setFrameless()` switches the window form at runtime; `isFrameless()` reports the current one.** `FLAG_FRAMELESS` had been a creation-time flag since 0.3, so comparing a frameless window against a framed one meant restarting the process. That is a real cost for acceptance: the form check has three branches (`frameless` + restored, `frameless` + maximized, `framed`), one run only ever proves one of them — and a restart throws away the event ring, the zoom factor and the restored geometry, which are exactly the state that makes "is the geometry consistent across a switch" testable. Consumers can now also expose a title-bar toggle instead of shipping two builds.
 
-    **The creation path and the behaviour predicates are now two variables.** `g_frameless` decides *which window creation path runs* — our own `webview_shell` window (embedded `webview_create(1, hwnd)`, full `shell_wnd_proc`) versus the window the webview library creates (`toplevel_proc` subclassing only). That is fixed the moment `CreateWindowExW` / `webview_create` returns and cannot change. `g_frameless_live` decides *behaviour*: whether `WM_NCCALCSIZE` intercepts, whether resize borders and caption buttons take part in hit-testing, whether `fit_widget` reserves the title-bar strip, and what `push_state` reports as `frameless`. Five predicates moved to the live variable; the creation path stayed where it was.
+    **The creation path and the behaviour predicates are now two variables.** `g_frameless` decides _which window creation path runs_ — our own `webview_shell` window (embedded `webview_create(1, hwnd)`, full `shell_wnd_proc`) versus the window the webview library creates (`toplevel_proc` subclassing only). That is fixed the moment `CreateWindowExW` / `webview_create` returns and cannot change. `g_frameless_live` decides _behaviour_: whether `WM_NCCALCSIZE` intercepts, whether resize borders and caption buttons take part in hit-testing, whether `fit_widget` reserves the title-bar strip, and what `push_state` reports as `frameless`. Five predicates moved to the live variable; the creation path stayed where it was.
 
     **Switching does not touch the style bits.** `create_own_window` already passes `WS_OVERLAPPEDWINDOW` — the caption, border and sizing frame are all there. Frameless is achieved by `WM_NCCALCSIZE` returning 0, which erases the non-client area; it is not achieved by removing style bits. So going back to framed takes two steps: let `WM_NCCALCSIZE` fall through, then `SetWindowPos(SWP_FRAMECHANGED)` to force the system to recompute. Assembling `WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` by hand would give five chances to produce a window that cannot be dragged or has no system menu; `WM_NCCALCSIZE` just hands the system back the answer it would have computed anyway.
 
@@ -178,16 +203,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Six README defects fixed, then the checks that would have caught them were written.** The two worst:
 
-    | Defect | Before | Now |
-    | --- | --- | --- |
-    | `FLAG_TITLEBAR_RESERVE` (256) / `FLAG_NATIVE_CAPTIONS` (512) | **absent from the flag table entirely** — the latter is the only way Snap Layouts can trigger | documented, including why the first is superseded by the second |
-    | All three READMEs | pointed readers at `AGENTS.md` for "shape A / shape B" — gitignored, not in `files`, so **unreachable for anyone who installed the package** from the day those sentences were written | rewritten self-contained |
-    | `ackOf()`, `titleBarCss()`, `detectIconSet()`, `captions: "native"` | never mentioned | documented |
-    | Default glyph set | "buttons default to geometric glyphs; setting `icons: \"fluent\"` switches to Segoe Fluent Icons" — **backwards since 0.6.1** | `detectIconSet()` picks `fluent` by default, `unicode` only as fallback |
-    | `types` subpath constants | `STATE_*` only | three named constants plus the `CAPTION_*` trio, and why the caption order is load-bearing |
-    | Tarball size | 1.37 MB unpacked | 1.39 MB — measured, not estimated |
+    | Defect                                                              | Before                                                                                                                                                                                 | Now                                                                                        |
+    | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+    | `FLAG_TITLEBAR_RESERVE` (256) / `FLAG_NATIVE_CAPTIONS` (512)        | **absent from the flag table entirely** — the latter is the only way Snap Layouts can trigger                                                                                          | documented, including why the first is superseded by the second                            |
+    | All three READMEs                                                   | pointed readers at `AGENTS.md` for "shape A / shape B" — gitignored, not in `files`, so **unreachable for anyone who installed the package** from the day those sentences were written | rewritten self-contained                                                                   |
+    | `ackOf()`, `titleBarCss()`, `detectIconSet()`, `captions: "native"` | never mentioned                                                                                                                                                                        | documented                                                                                 |
+    | Default glyph set                                                   | "buttons default to geometric glyphs; setting `icons: \"fluent\"` switches to Segoe Fluent Icons" — **backwards since 0.6.1**                                                          | `detectIconSet()` picks `fluent` by default, `unicode` only as fallback                    |
+    | `types` subpath constants                                           | `STATE_*` only                                                                                                                                                                         | three named constants plus the `CAPTION_*` trio, and why the caption order is load-bearing |
+    | Tarball size                                                        | 1.37 MB unpacked                                                                                                                                                                       | 1.39 MB — measured, not estimated                                                          |
 
-    The glyph row was the worst of the six: a reader following it would set `icons: "fluent"` to *get* the Win 11 glyphs, when that had been the default since 0.6.1 — the documentation described the opposite of what the code did. Two `about 0.4 s` / `about two seconds` figures were removed rather than updated; they drift with the machine and the reader cannot verify them. Two first-person phrasings were also removed from the Chinese READMEs (`各替我省一次调用` → `各能省掉一次调用`).
+    The glyph row was the worst of the six: a reader following it would set `icons: "fluent"` to _get_ the Win 11 glyphs, when that had been the default since 0.6.1 — the documentation described the opposite of what the code did. Two `about 0.4 s` / `about two seconds` figures were removed rather than updated; they drift with the machine and the reader cannot verify them. Two first-person phrasings were also removed from the Chinese READMEs (`各替我省一次调用` → `各能省掉一次调用`).
 
     Then the checks above were written, and verified in both directions: four mutations were injected into the real documents — deleting a flag mention, adding a heading to one file, corrupting one file's size, adding an `AGENTS.md` reference — and each turned exactly the expected assertion red. All four were reverted and the suite returned green.
 
@@ -230,7 +255,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
     **Still manual:** whether the focus-dimmed glyph actually renders dimmer on screen. The check needs the window to lose foreground, and in this session `SetForegroundWindow` never took it away from the host chat window — both readings came back at full brightness, i.e. the window never left the active state, so the probe measured nothing. The logic is covered by unit tests and the CSS is a plain attribute selector, but the end-to-end path (native `focused` bit → `windowState` push → `setActive` → repaint) has not been observed.
 
-- **Caption buttons on a frameless window now answer `HTMAXBUTTON`, so Windows 11 Snap Layouts works.** The only documented trigger is `WM_NCHITTEST` returning `HTMAXBUTTON` for the maximize/restore button (*Support snap layouts for desktop apps on Windows 11*). Previously `hit_test_client` returned only the eight resize codes and `HTCLIENT`, so hovering maximize never opened the layout picker — the last piece of "looks like a Win 11 app" that CSS cannot buy.
+- **Caption buttons on a frameless window now answer `HTMAXBUTTON`, so Windows 11 Snap Layouts works.** The only documented trigger is `WM_NCHITTEST` returning `HTMAXBUTTON` for the maximize/restore button (_Support snap layouts for desktop apps on Windows 11_). Previously `hit_test_client` returned only the eight resize codes and `HTCLIENT`, so hovering maximize never opened the layout picker — the last piece of "looks like a Win 11 app" that CSS cannot buy.
 
     Three constants became a single source of truth in `types.ts` — `CAPTION_BAR_HEIGHT` (32), `CAPTION_BUTTON_WIDTH` (46), `CAPTION_BUTTONS` (`close` / `maximize` / `minimize`, right to left). Two copies follow it: `kCaptionBarHeight` / `kCaptionButtonWidth` plus the `caption_button_at()` order in `native/shell.cc` (C++ cannot import TS), and the `32px` / `46px` in `titlebar.css`.
 
@@ -256,7 +281,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
       HTMINBUTTON → minimized   state=2, win=314x50 (sentinel — really minimized)
     ```
 
-    **Still manual**: whether the Snap flyout actually *appears* on hover. It is a DWM-owned popup, so `PrintWindow` cannot capture it and no readout exposes it. Automating the hover was attempted and blocked — the Windows MCP refused the cursor move (`USER_CONTROL`, `state: user`), and `SetCursorPos` landed 216 px away, i.e. the pointer was in use. What is verified is the precondition the documentation names; what is not verified is the flyout itself.
+    **Still manual**: whether the Snap flyout actually _appears_ on hover. It is a DWM-owned popup, so `PrintWindow` cannot capture it and no readout exposes it. Automating the hover was attempted and blocked — the Windows MCP refused the cursor move (`USER_CONTROL`, `state: user`), and `SetCursorPos` landed 216 px away, i.e. the pointer was in use. What is verified is the precondition the documentation names; what is not verified is the flyout itself.
 
     One measurement worth keeping: the outer 13 physical pixels of the window are the resize border, so the title bar's top ~6.5 logical pixels answer `HTTOP` rather than the button code. Caption buttons win where they overlap (they are checked first), but a probe that samples `y=1` will read `HTTOP` and should not be read as "the button is missing".
 
@@ -264,9 +289,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **The caption buttons sat 18 CSS px left of where they belong, and the title bar was squeezed to a third of its height — because a consumer's `header { … }` rule leaked into the component.** The component mounts on `<header class="ws-titlebar">`, and `baw-mvp`'s page has an element-selector rule for its own page header: `header { padding: 12px 18px 10px; gap: 12px }`. `.ws-titlebar` never declared `padding`, so the 18px right padding pushed all three buttons left by 18 CSS px (measured: 36 physical px @192dpi), and under `box-sizing: border-box` the 12/10 vertical padding squeezed the 32px bar down to 9px of content, shrinking the buttons to 18 physical px tall.
 
-    **It reads as "the glyph is not centred", and that diagnosis is wrong.** Measuring the hover backplate — `background` covers the whole button, so its edges *are* the button's edges — put the backplate at 92 physical px wide with the glyph's centre and the backplate's centre both at `d=137.5`: the glyph was centred all along. The whole group was displaced, then squashed.
+    **It reads as "the glyph is not centred", and that diagnosis is wrong.** Measuring the hover backplate — `background` covers the whole button, so its edges _are_ the button's edges — put the backplate at 92 physical px wide with the glyph's centre and the backplate's centre both at `d=137.5`: the glyph was centred all along. The whole group was displaced, then squashed.
 
-    **Specificity is not the mechanism.** An element selector (`0,0,1`) does lose to a class selector (`0,1,0`) — but only where the component *declares* the property. An undeclared property does not compete at all, so it is handed to the consumer. The mounting tag is part of the public contract, and `<header>` / `<button>` / `<div>` are exactly the tags consumers write global rules for.
+    **Specificity is not the mechanism.** An element selector (`0,0,1`) does lose to a class selector (`0,1,0`) — but only where the component _declares_ the property. An undeclared property does not compete at all, so it is handed to the consumer. The mounting tag is part of the public contract, and `<header>` / `<button>` / `<div>` are exactly the tags consumers write global rules for.
 
     The fix declares `margin` / `padding` / `gap` on `.ws-titlebar` and `margin` on `.ws-titlebar__btn`. The consumer sides changes too: `header { … }` becomes `.app-header { … }`, and `button { … }` becomes `button:not(.ws-titlebar__btn)` — the latter also stops `button:active { transform: translateY(1px) }` from reaching the caption buttons, which had been sinking the glyph 1px on press where Win 11 only swaps the backplate.
 
@@ -332,7 +357,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **`App.attachPlacement(file, opts?)`** — wires placement persistence to the skeleton's single event pump. Calling `attachPlacementStore(shell, file)` without `{ events }` makes it start a **second** pump, and `shell.pollEvents()` is consumptive: the two pumps each get part of the stream, window position is dropped at random, and neither side reports anything. This was the library's easiest way to fail silently, so the choice was removed rather than documented harder.
 
-- **`bun-app-window/pack`** — the page-script bundler, so consumers stop writing it. `bundlePage({ entry })` returns `{ code, bytes }`; `writePageBundle({ entry, out })` also writes and re-checks the on-disk size. Three things are fixed rather than configurable: `target: "browser"` and `format: "esm"` (that is what a page script *is*), and reporting **bytes** instead of `string.length` — the latter is UTF-16 code units, which on a source containing CJK drifts from the byte count by a wide margin while the unit is printed as `B`. Measured on a consumer: reported `35,085 B`, on-disk `37,319 B`.
+- **`bun-app-window/pack`** — the page-script bundler, so consumers stop writing it. `bundlePage({ entry })` returns `{ code, bytes }`; `writePageBundle({ entry, out })` also writes and re-checks the on-disk size. Three things are fixed rather than configurable: `target: "browser"` and `format: "esm"` (that is what a page script _is_), and reporting **bytes** instead of `string.length` — the latter is UTF-16 code units, which on a source containing CJK drifts from the byte count by a wide margin while the unit is printed as `B`. Measured on a consumer: reported `35,085 B`, on-disk `37,319 B`.
 
     Failure handling covers both shapes `Bun.build` produces, which was not obvious: compile-time diagnostics come back as `{ success: false, logs }`, but an **unreachable entry point throws an `AggregateError`** whose `message` is only `Bundle failed` and whose members live on `.errors` — `.logs` does not exist on that path. Without the second branch, the most common mistake (a wrong entry path) produced a message with no information in it.
 
@@ -342,23 +367,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **BREAKING: `Shell.beginResize(edge)` takes `RESIZE_EDGE` values (10–17).** Migrating from 0.5.x:
 
-    | You were passing | Before | Now |
-    | --- | --- | --- |
-    | `RESIZE_EDGE.LEFT` (10) and friends | `rc=-1`, nothing moved | works |
-    | raw indices 0–7 | worked | `rc=-1` |
+    | You were passing                    | Before                 | Now     |
+    | ----------------------------------- | ---------------------- | ------- |
+    | `RESIZE_EDGE.LEFT` (10) and friends | `rc=-1`, nothing moved | works   |
+    | raw indices 0–7                     | worked                 | `rc=-1` |
 
     If you were passing raw indices, replace them with the matching `RESIZE_EDGE` member — `RESIZE_INDEX` is exported if you need to see the mapping.
 
 - `tests/gate.test.ts` shrank with the stage: `parsePs1Summary` and the `.ps1`-failure short-circuit assertions are gone, and `planStages` now asserts three stages.
 - **A new assertion keeps the deletion honest.** `tests/gate.test.ts` now fails if a `.ps1` appears anywhere in the repository. Deleting a stage and leaving nothing behind would mean the next `.ps1` arrives ungoverned and looks exactly like "the migration is complete". Verified in both directions: creating `scripts/__probe.ps1` turns it red naming that path, removing it returns green.
-- `docs/pitfalls.md` 3.18 keeps all five traps and is re-headed as *retired* rather than *paused* — the values and consequences were measured, so the record outlives the script. 5.2 and 5.6 no longer describe a `.ps1` that might come back.
+- `docs/pitfalls.md` 3.18 keeps all five traps and is re-headed as _retired_ rather than _paused_ — the values and consequences were measured, so the record outlives the script. 5.2 and 5.6 no longer describe a `.ps1` that might come back.
 - Two ghost instructions surfaced while deleting: `scripts/trust-cert.ts` told the user to run `scripts/test-sign.ts`, a path that never existed, and `native/build-pack.ts` told them to run `scripts/make-icon.ps1`, which was migrated to TypeScript long ago. Both now point at something that exists.
 
 ### Fixed
 
 - **`RESIZE_EDGE` and `shell_begin_resize()` were never the same numbering** (`pitfalls` 5.13). `RESIZE_EDGE` is the Win32 `HT*` constants (10–17); the native side reads `codes[edge]` as an **array index 0–7** over `{HTLEFT, HTRIGHT, HTTOP, HTBOTTOM, HTTOPLEFT, HTTOPRIGHT, HTBOTTOMLEFT, HTBOTTOMRIGHT}`. The mapping is therefore not an offset — `HTTOPLEFT` (13) lands at index 4 while `HTBOTTOM` (15) lands at 3. `beginResize` used to pass its argument straight through, so following the documentation produced `rc=-1` and a window that did not resize, while the gate stayed green.
 
-    Fixed in TypeScript, so **the DLL does not need rebuilding**. Three assertions now hold the mapping down, the important one being that it is *not* `value - 10`: subtracting ten happens to be correct for the first three entries (LEFT/RIGHT/TOP → 0/1/2) and wrong from the fourth on, which is exactly how a partial assertion would have given false confidence.
+    Fixed in TypeScript, so **the DLL does not need rebuilding**. Three assertions now hold the mapping down, the important one being that it is _not_ `value - 10`: subtracting ten happens to be correct for the first three entries (LEFT/RIGHT/TOP → 0/1/2) and wrong from the fourth on, which is exactly how a partial assertion would have given false confidence.
 
 ### Removed
 
@@ -383,7 +408,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Dropped files and folders are accepted again, and the page receives absolute paths.** 0.5.0 set `ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)` on the belief that it stepped aside from WebView2's internal `IDropTarget` and let the OLE chain fall through to the parent window's `DragAcceptFiles` handler. **Both halves of that reasoning were wrong**:
 
     1. `DragAcceptFiles` only sets `WS_EX_ACCEPTFILES`; it does **not** register an `IDropTarget`. Reading the `OleDropTargetInterface` window property across the whole chain (`webview` → `webview_widget` → `Chrome_WidgetWin_0` → `Chrome_WidgetWin_1` → `Chrome_RenderWidgetHostHWND` → `Intermediate D3D Window`) returns false for every window. Modern Windows does not fall back to that legacy path during OLE hit-testing.
-    2. `AllowExternalDrop` means *allow external drop*. `FALSE` refuses drops; it does not forward them.
+    2. `AllowExternalDrop` means _allow external drop_. `FALSE` refuses drops; it does not forward them.
 
     The user-visible symptom was a red "not allowed" cursor over the window on every drag, with no drop and no `WM_DROPFILES`.
 
@@ -393,7 +418,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- **Folders now work, and `dirs` tells them apart.** A dropped folder arrives as a `FileSystemDirectoryHandle`, but on the host side that handle does **not** survive — measured: the collection holds one entry, `QueryInterface` to both `ICoreWebView2File` and `ICoreWebView2FileSystemHandle` fails, and the item is simply unusable. What *does* work is that a folder also appears in `dataTransfer.files` as an ordinary `File`, whose `get_Path` returns the correct path.
+- **Folders now work, and `dirs` tells them apart.** A dropped folder arrives as a `FileSystemDirectoryHandle`, but on the host side that handle does **not** survive — measured: the collection holds one entry, `QueryInterface` to both `ICoreWebView2File` and `ICoreWebView2FileSystemHandle` fails, and the item is simply unusable. What _does_ work is that a folder also appears in `dataTransfer.files` as an ordinary `File`, whose `get_Path` returns the correct path.
 
     So the injected script posts **handles and files together**, the host tries `ICoreWebView2File` first and the handle second, and duplicate paths are collapsed. Because the surviving object is a `File`, `get_Kind` is unavailable — "is this a folder" is decided by `GetFileAttributesW` + `FILE_ATTRIBUTE_DIRECTORY`, the same predicate the `WM_DROPFILES` fallback uses, which is why both paths produce identical output:
 
@@ -405,7 +430,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **The host now always answers.** Previously, when `AdditionalObjects` yielded no usable path, the handler returned silently — the page waited, the host said nothing, and neither side had a clue. Every drop now produces exactly one `shell-msg`, carrying `ok`, `err`, and the counts `nFile` / `nHandle` / `nNoPath` that made this diagnosis possible in the first place.
 
-- **`scripts/probe-drop-live.ts`** — an interactive probe for the half that cannot be synthesised. `AdditionalObjects` only ever contains objects produced by a real drag; page JavaScript cannot fabricate one with a path, and `keybd_event` cannot hold a mouse button across processes. The probe opens a window, waits for one manual drop, and does the judging automatically: the page reports the received payload back over `fetch`, and the probe asserts paths are non-empty, absolute, existing, and classified exactly as the filesystem says. Twelve checks; a failure names *which* of the five gates closed.
+- **`scripts/probe-drop-live.ts`** — an interactive probe for the half that cannot be synthesised. `AdditionalObjects` only ever contains objects produced by a real drag; page JavaScript cannot fabricate one with a path, and `keybd_event` cannot hold a mouse button across processes. The probe opens a window, waits for one manual drop, and does the judging automatically: the page reports the received payload back over `fetch`, and the probe asserts paths are non-empty, absolute, existing, and classified exactly as the filesystem says. Twelve checks; a failure names _which_ of the five gates closed.
 
     `--file` and `--dir` are mutually exclusive — one target per run, because a run that asks for both will always fail the one you did not drag. It must run **non-elevated**; the file comment says why and how.
 
@@ -413,13 +438,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **This release went through five rounds of "nothing happens".** Each was a genuinely different cause with an identical symptom, and only the last two were in code this release changed. They are recorded as `docs/pitfalls.md` 2.16 and 2.17, and the injected script now carries a marker for each so the next failure names its own stage:
 
-    | Round | Cause | What made it visible |
-    | --- | --- | --- |
-    | 1 | The host ran elevated (High integrity) while Explorer runs at Medium; UIPI refuses the drag before any message is sent | Not a single `dragenter` |
-    | 2 | `preventDefault()` alone does not accept a drop — `dataTransfer.dropEffect` stayed `none` | `dragover=72` with `drop=0` |
-    | 3 | `chrome.webview.postMessage` is *not* the pair of `get_AdditionalObjects`; `File` serialises to `{}`, so the collection was empty while the call succeeded | `drop=1 files=1`, `count=0` |
-    | 4 | The probe reported its own post as failed — it fetched the marker 250 ms later, after the host had already closed the window | the only red check in an otherwise green run |
-    | 5 | A folder's `FileSystemHandle` does not survive the bridge; only the `File` in `dataTransfer.files` carries a path | `nHandle=0` while the collection was non-empty |
+    | Round | Cause                                                                                                                                                      | What made it visible                           |
+    | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+    | 1     | The host ran elevated (High integrity) while Explorer runs at Medium; UIPI refuses the drag before any message is sent                                     | Not a single `dragenter`                       |
+    | 2     | `preventDefault()` alone does not accept a drop — `dataTransfer.dropEffect` stayed `none`                                                                  | `dragover=72` with `drop=0`                    |
+    | 3     | `chrome.webview.postMessage` is _not_ the pair of `get_AdditionalObjects`; `File` serialises to `{}`, so the collection was empty while the call succeeded | `drop=1 files=1`, `count=0`                    |
+    | 4     | The probe reported its own post as failed — it fetched the marker 250 ms later, after the host had already closed the window                               | the only red check in an otherwise green run   |
+    | 5     | A folder's `FileSystemHandle` does not survive the bridge; only the `File` in `dataTransfer.files` carries a path                                          | `nHandle=0` while the collection was non-empty |
 
     Rounds 3 and 5 are the same lesson twice: **a call that does not throw is not a call that worked.** `__shellDropReady` / `__shellDropPosted` / `__shellDropVia` / `__shellDropError` now exist so "did the injection run", "which route was posted", "was the drop delivered" and "did the host receive a usable object" are four separate observations instead of one silent guess.
 
@@ -432,17 +457,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Verification
 
-| Command | Result |
-| --- | --- |
-| `bun check` | 69 files |
-| `bun test` | 558 pass / 0 fail |
-| `bun run scripts/gate.ts` | PASSED |
-| `bun run scripts/verify-dll.ts` | PASSED, same source as `native/shell.cc` (1,016,832 B) |
-| `scripts/probe-window-events.ts` | PASSED (21 checks) |
-| `scripts/probe-accelerator-keys.ts` | PASSED (6 checks) |
-| `scripts/probe-drop.ts` | PASSED (6 checks) |
-| `scripts/probe-drop-live.ts --file` | **PASSED (12 checks)** — one real file drag, absolute path |
-| `scripts/probe-drop-live.ts --dir` | **PASSED (12 checks)** — one real folder drag, path **and** folder classification |
+| Command                             | Result                                                                            |
+| ----------------------------------- | --------------------------------------------------------------------------------- |
+| `bun check`                         | 69 files                                                                          |
+| `bun test`                          | 558 pass / 0 fail                                                                 |
+| `bun run scripts/gate.ts`           | PASSED                                                                            |
+| `bun run scripts/verify-dll.ts`     | PASSED, same source as `native/shell.cc` (1,016,832 B)                            |
+| `scripts/probe-window-events.ts`    | PASSED (21 checks)                                                                |
+| `scripts/probe-accelerator-keys.ts` | PASSED (6 checks)                                                                 |
+| `scripts/probe-drop.ts`             | PASSED (6 checks)                                                                 |
+| `scripts/probe-drop-live.ts --file` | **PASSED (12 checks)** — one real file drag, absolute path                        |
+| `scripts/probe-drop-live.ts --dir`  | **PASSED (12 checks)** — one real folder drag, path **and** folder classification |
 
 ## [0.5.0] - 2026-10-21
 
@@ -450,13 +475,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **Keyboard shortcuts work again.** `F11`, `F12`, `F5`, `Ctrl+R`, `Ctrl+0` and `Ctrl±` were all dead, while `Ctrl+wheel` zoom kept working. The cause was message routing, not the handling logic: `WM_KEYDOWN` is delivered to the **focused** window, and focus sits on WebView2's render child window (`Chrome_RenderWidgetHostHWND`), which does not forward unhandled keys to its parent. Every `handle_input_message` call site on the two window procedures was unreachable by real keystrokes. `Ctrl+wheel` survived only because `WM_MOUSEWHEEL` *is* forwarded to the parent by the focused window's `DefWindowProc`.
+- **Keyboard shortcuts work again.** `F11`, `F12`, `F5`, `Ctrl+R`, `Ctrl+0` and `Ctrl±` were all dead, while `Ctrl+wheel` zoom kept working. The cause was message routing, not the handling logic: `WM_KEYDOWN` is delivered to the **focused** window, and focus sits on WebView2's render child window (`Chrome_RenderWidgetHostHWND`), which does not forward unhandled keys to its parent. Every `handle_input_message` call site on the two window procedures was unreachable by real keystrokes. `Ctrl+wheel` survived only because `WM_MOUSEWHEEL` _is_ forwarded to the parent by the focused window's `DefWindowProc`.
 
     The bug is easy to misdiagnose, because `PostMessage(hwnd, WM_KEYDOWN, VK_F11, 0)` toggles fullscreen correctly — that experiment simply bypasses what broke.
 
     The shell now subscribes to `ICoreWebView2Controller::add_AcceleratorKeyPressed`, which fires before the key reaches the page and does not depend on the focus chain. Key semantics live in one place (`handle_accelerator_key`), shared by the callback and the surviving `WM_KEYDOWN` path; only `KEY_DOWN` / `SYSTEM_KEY_DOWN` are handled (handling `KEY_UP` would toggle twice and look like "nothing installed"), and handled keys call `put_Handled(TRUE)`.
 
-- **`FLAG_ACCEPT_DROP` now delivers full paths.** With the flag on, pages received a DOM `drop` carrying only `name` and `size`; the promised `shell-msg { t: "drop", paths: [...] }` never arrived. `DragAcceptFiles` only sets `WS_EX_ACCEPTFILES` on the **top-level** window, but OLE hit-testing walks to the deepest window under the cursor (`webview_widget` → `Chrome_WidgetWin_1` → `Chrome_RenderWidgetHostHWND` → `Intermediate D3D Window`, all measured `ACCEPTFILES=False`). WebView2 registers its own `IDropTarget` on the render child, takes the drop, and turns it into a DOM event — the top-level default drop target never sees it. The three `ChangeWindowMessageFilterEx` calls only allow messages *in*; they do not decide where a message *goes*.
+- **`FLAG_ACCEPT_DROP` now delivers full paths.** With the flag on, pages received a DOM `drop` carrying only `name` and `size`; the promised `shell-msg { t: "drop", paths: [...] }` never arrived. `DragAcceptFiles` only sets `WS_EX_ACCEPTFILES` on the **top-level** window, but OLE hit-testing walks to the deepest window under the cursor (`webview_widget` → `Chrome_WidgetWin_1` → `Chrome_RenderWidgetHostHWND` → `Intermediate D3D Window`, all measured `ACCEPTFILES=False`). WebView2 registers its own `IDropTarget` on the render child, takes the drop, and turns it into a DOM event — the top-level default drop target never sees it. The three `ChangeWindowMessageFilterEx` calls only allow messages _in_; they do not decide where a message _goes_.
 
     The fix is upstream: `ICoreWebView2Controller4::put_AllowExternalDrop(FALSE)` steps aside from that internal target, so the OLE chain continues to the parent and `WM_DROPFILES` reaches `handle_drop`. No hand-written `IDropTarget` — that would fight WebView2's internals, and the layering can change between releases (which is exactly how this was hit). On an older runtime the `QueryInterface` fails and the shell keeps WebView2's default behaviour rather than blocking startup.
 
@@ -493,17 +518,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Verification
 
-| Command | Result |
-| --- | --- |
-| `bun check` | 68 files |
-| `bun test` | 556 pass / 0 fail |
-| `bun run scripts/gate.ts` | 4 stages, PASSED |
-| `bun run scripts/gate.ts --clean` | PASSED (clean) |
-| `bun run scripts/verify-dll.ts` | PASSED, `dist/libshell.dll` matches `native/shell.cc` |
-| `scripts/probe-window-events.ts` | 21 checks |
-| `scripts/probe-accelerator-keys.ts` | 6 checks |
-| `scripts/probe-drop.ts` | 6 checks |
-| shape B in an empty directory | exit 0, `source=embedded`, `reused=true` |
+| Command                             | Result                                                |
+| ----------------------------------- | ----------------------------------------------------- |
+| `bun check`                         | 68 files                                              |
+| `bun test`                          | 556 pass / 0 fail                                     |
+| `bun run scripts/gate.ts`           | 4 stages, PASSED                                      |
+| `bun run scripts/gate.ts --clean`   | PASSED (clean)                                        |
+| `bun run scripts/verify-dll.ts`     | PASSED, `dist/libshell.dll` matches `native/shell.cc` |
+| `scripts/probe-window-events.ts`    | 21 checks                                             |
+| `scripts/probe-accelerator-keys.ts` | 6 checks                                              |
+| `scripts/probe-drop.ts`             | 6 checks                                              |
+| shape B in an empty directory       | exit 0, `source=embedded`, `reused=true`              |
 
 Each of the two new probes was verified in both directions: removing `install_accelerator_handler()` makes a real `F11` do nothing (1826 px → 1826 px), and removing `handle_drop(...)` leaves the `HDROP` handle alive. With the fix in place both pass.
 
@@ -569,7 +594,7 @@ Dragging a real file into a window to confirm the page sees the **full path**. A
 
     Four decisions, each with a failure mode behind it:
 
-    **Capacity 128, drop the oldest.** A one-second drag at a 16 ms cadence is about 60 events, so 128 is a two-fold margin. Dropping the *newest* instead would freeze the ring at a stale state and the host would see "the window never changed" — far worse than losing history. Losses are reported as gaps in `seq` rather than synthesised into an overflow event: the gap carries the exact count, and no new `seq` special case is needed.
+    **Capacity 128, drop the oldest.** A one-second drag at a 16 ms cadence is about 60 events, so 128 is a two-fold margin. Dropping the _newest_ instead would freeze the ring at a stale state and the host would see "the window never changed" — far worse than losing history. Losses are reported as gaps in `seq` rather than synthesised into an overflow event: the gap carries the exact count, and no new `seq` special case is needed.
 
     **`CLOSED` is emitted after teardown completes.** That is the whole point: "saw `CLOSED`" must be equivalent to "the process-wide singleton is released, restart is safe". It follows that `shell_poll_events` must **not** return -1 when `g_webview` is null, unlike every other export — `CLOSED` is produced precisely after the handle is gone.
 
@@ -617,7 +642,7 @@ Dragging a real file into a window to confirm the page sees the **full path**. A
 
 - The acceptance for this release was bidirectional rather than one-sided. Commenting out `emit_event(SHELL_EVENT_STATE, ...)`, rebuilding, and running `scripts/probe-window-events.ts` turned it from 21/21 green to 11/21 red with `exit=1` — while the ten `CLOSED` assertions stayed green, confirming the injection was isolated to the state path. Restoring and rebuilding returned 21/21, and `verify-dll.ts` reported the same sha256 as before the injection, which also proves the build is reproducible. `docs/pitfalls.md` 2.4k records the four failure modes found along the way.
 
-- This is **not** a competitor to `Bun.WebView`, and the READMEs now say so explicitly. `Bun.WebView` is a *headless* browser for automation, testing and scraping: it has no window, and it can only screenshot its own page. This package draws a real desktop window — system title bar, DPI awareness, snap layouts, taskbar identity — and its capture tool can photograph **any** window, which is the whole point for computer-use. Comparing API surface between the two is comparing different problems.
+- This is **not** a competitor to `Bun.WebView`, and the READMEs now say so explicitly. `Bun.WebView` is a _headless_ browser for automation, testing and scraping: it has no window, and it can only screenshot its own page. This package draws a real desktop window — system title bar, DPI awareness, snap layouts, taskbar identity — and its capture tool can photograph **any** window, which is the whole point for computer-use. Comparing API surface between the two is comparing different problems.
 
 ## [0.3.0] - 2026-10-21
 
@@ -633,7 +658,7 @@ Dragging a real file into a window to confirm the page sees the **full path**. A
 
 - **`FLAG_ALLOW_EXTERNAL_NAV` (new, `128`) opts out of navigation interception** for applications that genuinely are browsers. This is the release's one breaking-in-effect change: without the flag, a cross-origin top-level navigation now opens the system browser instead of replacing the app. Nothing else about the flag's surrounding policy moved — `window.open` / `target=_blank` is still cancelled and opened externally **even with this flag**, because that is a capability boundary rather than a safety policy: the shell owns exactly one top-level window (the native side is a process-level singleton), so a second window would have no host API able to close, read or message it.
 - Only `http:` / `https:` ever reach `ShellExecuteW`. `file:`, `javascript:`, `ms-*:` and custom schemes are cancelled silently and never touch a protocol handler, and `mailto:` / `tel:` are deliberately **not** on the list either — a dead `mailto:` link is preferable to handing a page an arbitrary protocol dispatcher.
-- **An origin-less startup URL is no longer a free pass.** The old predicate returned "same origin" whenever `g_origin` was empty, which meant `file://`, `about:blank` and custom-scheme apps — the most common shape for a desktop shell — were the least protected. That branch now degrades to a *same-document* test: a navigation stays inside the window only if it matches the startup URL after stripping the `#fragment`. In-app hash routing keeps working; anything else is external.
+- **An origin-less startup URL is no longer a free pass.** The old predicate returned "same origin" whenever `g_origin` was empty, which meant `file://`, `about:blank` and custom-scheme apps — the most common shape for a desktop shell — were the least protected. That branch now degrades to a _same-document_ test: a navigation stays inside the window only if it matches the startup URL after stripping the `#fragment`. In-app hash routing keeps working; anything else is external.
 
 ### Added
 
@@ -651,37 +676,39 @@ Dragging a real file into a window to confirm the page sees the **full path**. A
 
 - **The PNG encoder produced IDAT chunks that were not zlib.** `Bun.deflateSync` is byte-identical to `zlib.deflateRawSync`, so the output was **raw deflate**, while the specification requires zlib framing (`0x78` header plus an adler32 trailer). What made this expensive to find is that **three decoders gave two different answers**: `System.Drawing` opened the files, and our own decoder plus `Bun.inflateSync` decompressed them — because they share the same raw-deflate assumption as the encoder. Only the strict decoder rejected them: `Bun.Image` (libspng) returned `ERR_IMAGE_DECODE_FAILED`, and so did the upstream validator behind `read_file`. Worse, `Bun.Image.metadata()` still succeeded, because it reads only the header and never touches the IDAT payload — so the failure looked like "correct size, correct format, just won't open". `native/png.ts` now imports `deflateSync` from `node:zlib` (Bun's built-in node compat module, not an external node runtime), and `tests/png.test.ts` asserts both that the first IDAT byte is `0x78` and that the payload decompresses under **strict** zlib inflate — never `Bun.inflateSync`, which would make the assertion vacuous. Recorded as `docs/pitfalls.md` 3.11.
 - **`Bun.Image.resize(w)` limits the width, not the longest edge.** The documented semantics are `resize(800)` → "width 800, keep aspect ratio". `native/model-image.ts` was calling `resize(maxEdge, undefined, { withoutEnlargement: true })`, which is correct for landscape images and silently wrong for portrait ones: `300×600` with `maxEdge: 100` produced `100×200`, four times the intended pixel count, with the token estimate and byte size inflated to match. The fix passes both dimensions with `fit: "inside"`. Caught by asserting on a **portrait** image; a landscape-only test would have stayed green. Recorded as `docs/pitfalls.md` 3.15.
-- Six references in `AGENTS.md` and `docs/pitfalls.md` pointed at files that no longer exist: `tools/capture-window.ps1` (three occurrences), `probe-memory.ps1`, `src/safe-port.ts` (the module is actually `src/shell/port.ts`), and `src/gui/page-script.test.ts` (the whole `src/gui/` directory was removed when the UI became a static `src/ui/index.html`). A migration leaves legitimate historical references behind, so the fix is not to delete them but to make the decision explicit — see the guard under *Added*.
+- Six references in `AGENTS.md` and `docs/pitfalls.md` pointed at files that no longer exist: `tools/capture-window.ps1` (three occurrences), `probe-memory.ps1`, `src/safe-port.ts` (the module is actually `src/shell/port.ts`), and `src/gui/page-script.test.ts` (the whole `src/gui/` directory was removed when the UI became a static `src/ui/index.html`). A migration leaves legitimate historical references behind, so the fix is not to delete them but to make the decision explicit — see the guard under _Added_.
 
 ### Added
 
 - `native/resample.ts` — area-average (box) downscaling over BGRA, and the reason `--max-edge` no longer goes through `Bun.Image` at all. Measured on a real 3098×1850 window scaled to 1300×776, median of five runs:
 
-    | route | ms | bytes |
-    | --- | --- | --- |
+    | route                                 | ms       | bytes       |
+    | ------------------------------------- | -------- | ----------- |
     | **our `downscaleBgra` + our encoder** | **45.9** | **102,036** |
-    | `Bun.Image` resize + png | 95.9 | 222,621 |
+    | `Bun.Image` resize + png              | 95.9     | 222,621     |
 
     **2.1× faster and 2.2× smaller — both directions, not a trade-off.** It is faster because `Bun.Image` takes a PNG as input, so it must encode and then decode again before it can resample; we hold the raw `CreateDIBSection` pointer and never pay that. It is smaller because its default filter is `lanczos3` — a **sharpening** filter that rings around text edges, and the resulting high-frequency detail is exactly what DEFLATE compresses worst. Area averaging is inherently smooth, so the correct algorithm saves both costs at once. A prefix-sum variant was tried and came out **slower** (51.3 vs 39.1 ms for the resample alone): the extra full-width pass and the larger intermediate buffer cost more in cache locality than the inner-loop subtraction saves. Recorded as `docs/pitfalls.md` 3.16.
+
 - `native/resample.ts` weights the average by alpha (`Σ(b·a)/Σa`) whenever any pixel is transparent, because a plain average mixes the RGB of fully transparent pixels — usually `0` — into the result and grows a black fringe around rounded corners and shadows. `scripts/make-icon.ts` produces exactly such rounded corners. Fully opaque input takes a fast path where the arithmetic is exact. `tests/resample.test.ts` pins this with a 2×2 → 1×1 construction (one opaque black pixel, three opaque whites): the right answer is white at alpha 191, the wrong one is grey 191.
 - `cropBgra` in `native/gdi.ts` — cropping is a per-row `memcpy` over the raw pointer, so it costs no FFI and no resample. It is deliberately applied **before** encoding: once the pixels are handed to `Bun.Image` they are an opaque object and can no longer be cut. `--crop x,y,w,h` exposes it, and the rectangle is clamped to the image rather than producing a malformed one.
 - `native/model-image.ts` — narrowed to the three things the in-repo code cannot do: **enlarging** (box averaging cannot interpolate), **palette** quantisation, and **jpeg / webp** encoding. Everything else on the PNG path now stays inside `native/`.
 - A **two-way** guard on the `AGENTS.md` directory tree. The existing assertion ("everything declared must exist on disk") cannot catch the opposite failure, and `native/model-image.ts` sat outside the tree for a whole round while the gate was green — an unlisted file is invisible to an agent reading the tree as its map. Writing the reverse assertion also exposed a blind spot in the forward one: the tree is aligned by longest name, so `probe-child-windows.ts` is followed by a **single** space, and the parser's `\s{2,}` separator meant that line had never been parsed — and therefore never checked — since the guard was written.
-- A guard for script paths referenced in the docs, backed by an explicit *deleted* allow-list (same orientation as `verify-pack.ts`'s `ALLOW`: adding an entry must be a deliberate decision). A second assertion fails if a listed-deleted file reappears, so the list cannot rot unnoticed.
+- A guard for script paths referenced in the docs, backed by an explicit _deleted_ allow-list (same orientation as `verify-pack.ts`'s `ALLOW`: adding an entry must be a deliberate decision). A second assertion fails if a listed-deleted file reappears, so the list cannot rot unnoticed.
 
 ### Changed
 
 - `tools/capture-window.ts` defaults are now set by measurement rather than intuition: `--format png`, `--level 6`, `--max-edge 0`, plus a new `--level <1-9>` and `--crop <x,y,w,h>`. Level 6 is the knee — 31% smaller than level 1 for about 3 ms, and 4× faster than level 9 for 13% more bytes. End-to-end on a real window (including Bun startup and `PrintWindow`):
 
-    | command | bytes | end-to-end ms |
-    | --- | --- | --- |
-    | `--level 1` | 704,353 | 148 |
-    | default (level 6) | 439,347 | 170 |
-    | `--level 9` | 411,366 | 330 |
-    | `--crop 700,300,800,600` | **50,836** | 170 |
+    | command                  | bytes      | end-to-end ms |
+    | ------------------------ | ---------- | ------------- |
+    | `--level 1`              | 704,353    | 148           |
+    | default (level 6)        | 439,347    | 170           |
+    | `--level 9`              | 411,366    | 330           |
+    | `--crop 700,300,800,600` | **50,836** | 170           |
 
     Level 9 buys 6% for double the time; cropping buys **88%** and also drops the token estimate from 1024 to 291. Recorded as `docs/pitfalls.md` 3.14.
-- The choice between the in-repo encoder and `Bun.Image` is now two conditions rather than one: **downscale *and* png** together keep the whole path inside `native/`; anything else (enlarging, palette, jpeg, webp) still goes to `Bun.Image`. Previously a crop was enough to trigger the `Bun.Image` detour, which re-encoded through it for no benefit — 50.0 ms / 84 KiB against 6.0 ms / 62 KiB for the same crop. **Cropping is a pixel operation and must not change the encoding route.**
+
+- The choice between the in-repo encoder and `Bun.Image` is now two conditions rather than one: **downscale _and_ png** together keep the whole path inside `native/`; anything else (enlarging, palette, jpeg, webp) still goes to `Bun.Image`. Previously a crop was enough to trigger the `Bun.Image` detour, which re-encoded through it for no benefit — 50.0 ms / 84 KiB against 6.0 ms / 62 KiB for the same crop. **Cropping is a pixel operation and must not change the encoding route.**
 
 ### Note
 

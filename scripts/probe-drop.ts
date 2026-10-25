@@ -154,7 +154,9 @@ shell.close();
 const gone = await waitFor(() => mine().length === 0, 5000);
 check("关闭后窗口消失", gone);
 
-await Bun.file(victim).delete().catch(() => {});
+await Bun.file(victim)
+    .delete()
+    .catch(() => {});
 
 const failed = checks.filter((c) => !c.ok);
 for (const c of checks) {

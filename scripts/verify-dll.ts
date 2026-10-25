@@ -52,8 +52,7 @@ const REPO_ROOT = resolve(import.meta.dir, "..");
 const EPOCH_A = "1600000000";
 const EPOCH_B = "1950000000";
 
-const short = (u: Uint8Array): string =>
-    createHash("sha256").update(u).digest("hex").slice(0, 16);
+const short = (u: Uint8Array): string => createHash("sha256").update(u).digest("hex").slice(0, 16);
 
 async function readBytes(path: string): Promise<Uint8Array> {
     return new Uint8Array(await Bun.file(path).arrayBuffer());
@@ -72,8 +71,7 @@ export function diffOffsets(a: Uint8Array, b: Uint8Array): number[] {
 }
 
 export type VerifyResult =
-    | { ok: true; hash: string; size: number; timeDerived: number[] }
-    | { ok: false; reason: string; detail: string[] };
+    { ok: true; hash: string; size: number; timeDerived: number[] } | { ok: false; reason: string; detail: string[] };
 
 /**
  * 重建并与入库产物比对。

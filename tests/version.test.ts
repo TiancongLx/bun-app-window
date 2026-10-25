@@ -37,16 +37,31 @@ const PE_VERSION = /^\d+\.\d+\.\d+\.\d+$/;
  *    这条断言仍然读到注释里的 0.2.0.0 并判失败 —— 而 `bump-version.ts`
  *    带行首锚定的正则改的是真代码。两处各自都对，合起来错。
  * 3. 因此注释里也不许写真实版本号（`build-pack.ts` 的文档注释里有说明）。
+ *
+ * ## 为什么在整段文本上匹配，而不是逐行
+ *
+ * 逐行匹配把契约绑在了**排版**上：`"--windows-version", "0.9.0.0",` 写在一行才认。
+ * `bun fmt` 以 120 列排版时会把这两个元素拆成两行，于是四条断言同时变红——
+ * 而代码本身一个字都没错。排版是格式化的产物，不是事实；契约应当锚在
+ * 「版本号字面量紧随 `--windows-version`」这一点上，跨不跨行都成立。
+ *
+ * 注释行先抹成空行再匹配，而不是删掉：删掉会改变行结构，
+ * 让「同一行内」与「下一行」这两种形状失去区分依据。
  */
 function windowsVersionFrom(source: string): string | null {
-    for (const raw of source.split(/\r?\n/)) {
-        const line = raw.trim();
-        // 跳过注释行：`//`、`*`（块注释续行）、`/*`
-        if (line.startsWith("//") || line.startsWith("*") || line.startsWith("/*")) continue;
-        const m = /["']--windows-version["']\s*,\s*["']([^"']+)["']/.exec(line);
-        if (m?.[1]) return m[1];
-    }
-    return null;
+    const cleaned = source
+        .split(/\r?\n/)
+        .map((raw) => {
+            const t = raw.trim();
+            const isComment = t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+            return isComment ? "" : raw;
+        })
+        .join("\n");
+
+    // `\s` 含换行，故同行与另起一行两种排版都能命中；
+    // `[^"'\r\n]+` 明确不跨行取值，避免把下一行的内容当成版本号。
+    const m = /["']--windows-version["']\s*,\s*["']([^"'\r\n]+)["']/.exec(cleaned);
+    return m?.[1] ?? null;
 }
 
 test("package.json 的 version 是合法 semver", () => {
@@ -105,8 +120,7 @@ test("注释里不得出现完整版本字面量", () => {
     const offenders: string[] = [];
     BUILD_PACK.split(/\r?\n/).forEach((line, i) => {
         const t = line.trim();
-        const isComment =
-            t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+        const isComment = t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
         if (!isComment) return;
         if (/["']--windows-version["']\s*,\s*["']\d+\.\d+\.\d+\.\d+["']/.test(t)) {
             offenders.push(`L${i + 1}: ${t}`);

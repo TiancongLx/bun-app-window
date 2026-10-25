@@ -91,10 +91,7 @@ describe("trust-cert", () => {
     });
 
     test("--stores 逗号分隔，空白被忽略", () => {
-        expect(parseTrustArgs(["--stores", "Root, TrustedPeople"]).stores).toEqual([
-            "Root",
-            "TrustedPeople",
-        ]);
+        expect(parseTrustArgs(["--stores", "Root, TrustedPeople"]).stores).toEqual(["Root", "TrustedPeople"]);
     });
 
     test("未知存储名抛错，并列出可选值", () => {
@@ -225,4 +222,3 @@ describe("与 build-pack 的互锁", () => {
         expect(WINDOWS_METADATA.title.length).toBeGreaterThan(0);
     });
 });
-

@@ -67,9 +67,7 @@ export function parsePackageSize(text: string): DeclaredPackageSize | null {
     for (const line of text.split(/\r?\n/)) {
         const files = /(\d+)\s*(?:files|个文件|個檔案)/.exec(line);
         if (!files?.[1]) continue;
-        const mb = [...line.matchAll(/([\d.]+)\s*MB/g)]
-            .map((m) => Number(m[1]))
-            .filter((n) => Number.isFinite(n));
+        const mb = [...line.matchAll(/([\d.]+)\s*MB/g)].map((m) => Number(m[1])).filter((n) => Number.isFinite(n));
         if (mb.length < 2) continue;
         const [packedMB, unpackedMB] = mb;
         if (packedMB === undefined || unpackedMB === undefined) continue;
@@ -183,7 +181,11 @@ export function forbiddenReferences(fileName: string, text: string): ForbiddenRe
  * 第三方依赖的版本（Bun `1.4.4`、WebView2 `1.0.4258.31`）不在禁止之列——它们是
  * 契约的一部分，且升级时是显式动作。
  */
-export function selfVersionLiterals(fileName: string, text: string, version: string): Array<{ file: string; line: number; text: string }> {
+export function selfVersionLiterals(
+    fileName: string,
+    text: string,
+    version: string,
+): Array<{ file: string; line: number; text: string }> {
     const out: Array<{ file: string; line: number; text: string }> = [];
     if (!version) return out;
     // 用边界包住：避免 `0.7.0` 命中 `1.0.7.0` 这类更长版本串的内部

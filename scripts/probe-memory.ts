@@ -290,9 +290,7 @@ export async function main(argv: readonly string[], root: string): Promise<numbe
         console.log(`=== scanning committed regions for '${FINGERPRINT}' ===`);
         const needle = new TextEncoder().encode(FINGERPRINT);
         const result = scanForFingerprint(hProcess, needle);
-        console.log(
-            `  scanned regions=${result.scannedRegions} bytes=${result.scannedBytes.toLocaleString("en-US")}`,
-        );
+        console.log(`  scanned regions=${result.scannedRegions} bytes=${result.scannedBytes.toLocaleString("en-US")}`);
         if (result.hit) {
             console.log(`  FOUND at VA ${result.hit.virtualAddress}`);
             console.log(`        region ${result.hit.regionBase}  protect ${result.hit.protect}`);

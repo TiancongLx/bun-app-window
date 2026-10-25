@@ -2,13 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import {
-    BASE_FLAGS,
-    LIBS,
-    buildPaths,
-    clangArgs,
-    missingInputs,
-} from "../native/build";
+import { BASE_FLAGS, LIBS, buildPaths, clangArgs, missingInputs } from "../native/build";
 import { INPUTS } from "../native/fetch";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -158,9 +152,7 @@ describe("missingInputs", () => {
         // 干净副本恰恰不满足。这里不断言「当前仓库齐备」，只断言两个方向一致：
         // 真实存在 → 不报缺失；真实缺失 → 报出来。
         const actual = missingInputs(REPO);
-        const reallyMissing = INPUTS.filter(
-            (i) => !existsSync(join(REPO, "vendor", i.rel)),
-        ).map((i) => i.rel);
+        const reallyMissing = INPUTS.filter((i) => !existsSync(join(REPO, "vendor", i.rel))).map((i) => i.rel);
         expect(actual).toEqual(reallyMissing);
     });
 });

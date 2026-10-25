@@ -458,7 +458,7 @@ export function decideWs(
  */
 export async function createApp(opts: AppOptions): Promise<App> {
     if (!opts.html || typeof opts.html !== "string") {
-        throw new Error("createApp: html is required (import it with { type: \"text\" })");
+        throw new Error('createApp: html is required (import it with { type: "text" })');
     }
 
     // html 与 page 分别由调用方提供，两者的不一致不会产生任何运行时错误，

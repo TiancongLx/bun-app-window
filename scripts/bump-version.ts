@@ -211,7 +211,9 @@ export async function main(argv: readonly string[], root: string = REPO_ROOT): P
     console.log("  2. bun run scripts/gate.ts    # version.test.ts 会复验两处一致");
     console.log(`  3. git commit -m "chore: 版本号升至 ${plan.version}"`);
     console.log("  4. bun publish               # 会弹 passkey 2FA，需人工确认");
-    console.log(`  5. git tag -a v${plan.version} -m "bun-app-window ${plan.version}" && git push origin v${plan.version}`);
+    console.log(
+        `  5. git tag -a v${plan.version} -m "bun-app-window ${plan.version}" && git push origin v${plan.version}`,
+    );
     return 0;
 }
 

@@ -25,13 +25,7 @@
  * 必须在**交互式桌面会话**里跑（要真起窗口）。它自己起窗、自己关窗，不碰用户的其它窗口，
  * 但会抢一次焦点。不是门禁。
  */
-import {
-    FLAG_FRAMELESS,
-    FLAG_NATIVE_CAPTIONS,
-    FLAG_RESIZABLE,
-    openShell,
-    serveOnSafePort,
-} from "../src/shell/index";
+import { FLAG_FRAMELESS, FLAG_NATIVE_CAPTIONS, FLAG_RESIZABLE, openShell, serveOnSafePort } from "../src/shell/index";
 import { debugOf } from "../src/shell/debug";
 
 const HTML = `<!doctype html><meta charset="utf-8">
@@ -134,11 +128,7 @@ try {
 
     const back = parseMetrics(debugOf(shell).metrics());
     record("isFrameless() 切回", shell.isFrameless() === true, `实际 ${shell.isFrameless()}`);
-    record(
-        "切回后 win == client",
-        back.win === back.client,
-        `win=${back.win} client=${back.client}`,
-    );
+    record("切回后 win == client", back.win === back.client, `win=${back.win} client=${back.client}`);
     // 这一条防的是「切回来之后客户区悄悄小了一圈」：只判 win==client 的话，
     // 两边一起缩小照样绿。
     record(
@@ -151,11 +141,7 @@ try {
     const rc3 = shell.setFrameless(true);
     await sleep(200);
     const again = parseMetrics(debugOf(shell).metrics());
-    record(
-        "重复设同一形态是 no-op",
-        rc3 === 0 && again.client === base.client,
-        `rc=${rc3} client=${again.client}`,
-    );
+    record("重复设同一形态是 no-op", rc3 === 0 && again.client === base.client, `rc=${rc3} client=${again.client}`);
 } catch (err) {
     record("探针自身", false, err instanceof Error ? err.message : String(err));
 } finally {
