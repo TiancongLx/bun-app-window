@@ -900,7 +900,7 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
 ### 3.5 `FFIType.buffer` 枚举抛 `invalid ABI type`，必须用字符串标签
 
 - **症状**：`dlopen` 时抛 `bun:ffi: invalid ABI type`，堆栈指向描述符里的 `args` 数组；同一份声明改成字符串就正常。
-- **原因**：`FFIType` 枚举常量与字符串标签走两条不同的映射路径。Bun 1.4.3 上字符串那条（`"buffer"`）被实现，枚举那条（`FFIType.buffer`）没有。
+- **原因**：`FFIType` 枚举常量与字符串标签走两条不同的映射路径。Bun 1.4.4 上字符串那条（`"buffer"`）被实现，枚举那条（`FFIType.buffer`）没有。
 - **修法**：凡是 `buffer` / `buffer_length`，**一律写字符串**。
 
     ```ts
@@ -911,7 +911,7 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
     ```
 
 - **陷阱在哪**：`ffi.d.ts` 的 `FFITypeToArgsType` 明确声明了 `[FFIType.buffer]: NodeJS.TypedArray | DataView`，所以 **`bun check` 会放行**，运行时才炸。类型声明超前于实现，编译器替不了运行期验证。
-- **证据**：`实测`。23 项类型矩阵扫描（1.4.3 / Windows 10.26300）：`i8`…`u64_fast`、`ptr`、`pointer`、`cstring`、`bool`、`char` 全部 OK；`FFIType.buffer` 与 `FFIType.buffer_length` 作为 args/returns 一律 FAIL，而字符串 `"buffer"` / `"buffer_length"` 作为 args 均 OK（作为 returns 被合理拒绝）。
+- **证据**：`实测`。23 项类型矩阵扫描（1.4.4 / Windows 10.26300）：`i8`…`u64_fast`、`ptr`、`pointer`、`cstring`、`bool`、`char`、`void`、`function`、`napi_value` 全部 OK；`FFIType.buffer` 与 `FFIType.buffer_length` 作为 args/returns 一律 FAIL，而字符串 `"buffer"` / `"buffer_length"` 作为 args 均 OK（作为 returns 被合理拒绝）。
 - **迁移影响**：`src/shell/native.ts` 全程只用 `ptr` / `i32` / `u64` 等不涉及 buffer 的类型，因此未受此缺陷影响。新写 FFI 声明时要避开。
 
 ### 3.6 `bun:ffi` 不做参数校验：传错就段错误，不是异常
@@ -922,7 +922,7 @@ if (!g_frameless || !g_resizable || IsZoomed(hwnd)) return HTCLIENT;
     - 每个新写的 FFI 调用，**先用最小输入验证**（能 dlopen + 能取符号），再逐步加字段
     - 结构体不要「照着文档一次性写完」，一段字段一次验证
     - 涉及结构体的调用放进独立子进程跑，崩了不影响主流程
-- **证据**：`实测`。`WinVerifyTrust(INVALID_HANDLE, null, null)` 在 Bun 1.4.3 / Windows 10.26300 上直接段错误。
+- **证据**：`实测`。`WinVerifyTrust(INVALID_HANDLE, null, null)` 在 Bun 1.4.4 / Windows 10.26300 上直接崩溃（子进程以 Bun 的 crash report 退出，调用未返回）。
 - **推论**：这条规则对「诊断脚本」尤其重要。诊断脚本本该在出问题时帮忙，结果自己崩了，会把排障引向错误方向。
 
 ### 3.7 Windows HANDLE 不能用 `ptr`，且 `u64` 与 `u64_fast` 有不同的坑

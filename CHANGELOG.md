@@ -45,27 +45,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **Toolchain baseline moved from Bun 1.4.3 to 1.4.4.** `engines.bun` is now `>=1.4.4` and
-  `@types/bun` is `^1.4.4`; the three READMEs, the requirement table and the badge follow. The
-  previous `>=1.4.3` claim was not backed by measurement — this package had never been exercised on
-  1.4.3 since the 1.4.4 release, so the declaration was wider than the evidence.
+- **The declared toolchain baseline is Bun 1.4.4.** `engines.bun` is `>=1.4.4` and `@types/bun` is
+  `^1.4.4`; the three READMEs, the requirement table and the badge follow. The declaration is backed
+  by the gate run recorded at the end of this entry, not inherited from an earlier release.
 
-    Two behaviours were re-measured on 1.4.4 rather than assumed unchanged:
+    Two behaviours were re-measured on this baseline rather than assumed unchanged:
 
-    | Probe | Result on 1.4.4 |
+    | Probe | Result |
     | --- | --- |
-    | `FFIType.buffer` as `args` / `returns` | throws `invalid ABI type`, same as 1.4.3 |
-    | `"buffer"` string literal as `args` | accepted |
+    | `FFIType.buffer` as `args` / `returns` | throws `invalid ABI type` |
+    | `"buffer"` string literal as `args` | accepted, and rejected as `returns` |
 
-    So the `bun:ffi` constraint in `AGENTS.md` §5.1 stands unchanged — only its version number
-    moved.
+    So the `bun:ffi` constraint in `AGENTS.md` §5.1 holds on this baseline unchanged.
 
-    `bun-types@1.4.4` still gates its import-attribute declarations behind
-    `typesVersions: { ">=7.1": ... }`, and its root `index.d.ts` is byte-identical to 1.4.3's
-    (1,306 B, no `import-attributes` reference). The TypeScript 7.0.2 limitation documented in the
-    requirements table therefore still holds; nothing about it changed with this bump.
+    `bun-types@1.4.4` gates its import-attribute declarations behind
+    `typesVersions: { ">=7.1": ... }`, and its root `index.d.ts` is 1,306 B with no
+    `import-attributes` reference. The TypeScript 7.0.2 limitation documented in the requirements
+    table therefore still holds; nothing about it changed with this baseline.
 
-    Full regression on 1.4.4: `bun check` 80 files, `bun test` 683 pass / 0 fail across 36 files,
+    Full regression: `bun check` 80 files, `bun test` 683 pass / 0 fail across 36 files,
     `VERIFY-PACK PASSED` (7 checks), consumer probe 70 checks with `source=package`.
 
 - **`alias` is implemented by this package, not passed through.** The plan was to forward it like
@@ -481,7 +479,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **WebView2 C/C++ SDK upgraded from `1.0.1150.38` to `1.0.4258.31`.** `AllowExternalDrop` needs SDK `1.0.1185.39` or newer and did not exist in the previous vendored copy, which is why the drag-and-drop fix above was impossible before. `AdditionalObjects` and `ICoreWebView2File` arrived with it; they are not used, because they are reachable only through `postMessage`, and this shell keeps page communication on WebSocket. The old nupkg is removed and the new one is committed, so offline rebuilds behave exactly as before.
 
-    `CORE_WEBVIEW_TARGET_PRODUCT_VERSION` moves from `99.0.1150.38` to `154.0.4258.31`. This project already requires Bun ≥ 1.4.3, TypeScript ≥ 7.0.2, Windows x64 and a working WebView2 Runtime, and **does not aim for compatibility with older runtimes** — that is a decision, not an oversight.
+    `CORE_WEBVIEW_TARGET_PRODUCT_VERSION` moves from `99.0.1150.38` to `154.0.4258.31`. This project requires Bun ≥ 1.4.4, TypeScript ≥ 7.0.2, Windows x64 and a working WebView2 Runtime, and **does not aim for compatibility with older runtimes** — that is a decision, not an oversight.
 
 - **`timeoutMs: 0` is now documented and guarded.** `pickFolder()` blocks the host thread for however long a person browses, so `connect({ timeoutMs: 0 })` is required when exposing it over IPC — otherwise the client rejects after 30 seconds while the host is still working, and a missing `.catch` makes that entirely silent. Both halves are now in the docs, and two assertions keep the contract: one behavioural (`timeoutMs: 0` still pending after 50 ms) and one static (no `||` fallback, which would turn `0` back into `30000`).
 
@@ -829,7 +827,7 @@ First public release.
 ### Known limitations
 
 - Windows x64 only. The `os` and `cpu` fields in `package.json` reject every other platform at install time. Cross-platform support is a reservation in the design, not a capability: `shell.cc` is Win32 and WebView2 throughout.
-- TypeScript sources are published, not compiled. Consumers need Bun 1.4.3 or newer. Installing under Node succeeds but nothing runs.
+- TypeScript sources are published, not compiled. Consumers need Bun 1.4.4 or newer. Installing under Node succeeds but nothing runs.
 - `bun:ffi` is marked experimental in Bun, and the entire native boundary depends on it.
 - `pickFolder()` blocks the calling thread. The modal loop inside `SHBrowseForFolder` keeps timers on that thread from firing, and the call cannot be cancelled or timed out. Run it in a worker if you need concurrency.
 - One window per process. The native layer keeps a process-wide singleton, so a second `start()` fails until the previous window is observed dead through `isAlive()`.

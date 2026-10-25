@@ -7,7 +7,7 @@
  * ## 三条来自实测的硬性约束
  *
  * 1. **`buffer` / `buffer_length` 必须写字符串，不能写 `FFIType.buffer`。**
- *    `ffi.d.ts` 声明了枚举可用，但 1.4.3 运行时抛 `invalid ABI type`。
+ *    `ffi.d.ts` 声明了枚举可用，但 1.4.4 运行时抛 `invalid ABI type`。
  *    见 `docs/pitfalls.md` 3.5。
  * 2. **HANDLE 用 `u64_fast`**（拿到 `number`），不要用 `ptr`。见 3.7。
  * 3. **不声明任何 C→JS 回调类型。** 章程第 5 条禁的是「前端页面回调」，

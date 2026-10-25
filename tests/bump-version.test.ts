@@ -66,7 +66,7 @@ describe("replacePkgVersion", () => {
     const pkg = `{
     "name": "x",
     "version": "0.2.0",
-    "engines": { "bun": ">=1.4.3" }
+    "engines": { "bun": ">=1.4.4" }
 }
 `;
 
