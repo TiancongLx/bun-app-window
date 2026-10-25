@@ -8,6 +8,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **`getTitle()` / `getMinSize()` / `getBrowserUi()` read back what the setters wrote.** Until now
+  every window capability was one-way: `setTitle()`, `setMinSize()` and `setBrowserUi()` returned
+  `rc === 0`, which only means "the message reached the UI thread". A failed `SetWindowTextW`, a
+  size the system clamped, a browser behaviour that could not be disabled — all silent.
+
+    The three are **not** the same shape, and copying one template across all three would have been
+    wrong:
+
+    | Method           | Where the truth lives                                                                                                                                                           |
+    | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+    | `getMinSize()`   | `g_min_w` / `g_min_h` — the same values `WM_GETMINMAXINFO` consumes, so the cache _is_ the truth                                                                                |
+    | `getTitle()`     | The window itself (`GetWindowTextW`). `g_title` is assigned once in `shell_start_ex` and `shell_title()` never updates it, so reading it would return the startup title forever |
+    | `getBrowserUi()` | A new `g_browser_ui`, accumulated with `\|=`                                                                                                                                    |
+
+    `getTitle()` is the one that matters: reading a cached _input_ would make it an echo rather than
+    a getter, and it would report success for a `SetWindowTextW` that never took effect — exactly the
+    failure the whole read-back surface exists to expose.
+
+- **`getBrowserUi()` accumulates, because that is what the window actually does.** `apply_browser_ui()`
+  only ever calls `put_XXX(FALSE)` and returns early on `mask == 0` — there is no path that turns a
+  behaviour back on. So `setBrowserUi(MENU)` then `setBrowserUi(KEYS)` leaves _both_ disabled.
+  Recording the last mask would make the getter report `KEYS` alone, which reads as "the menu came
+  back". It is a bitwise OR at the setter instead.
+
+### Fixed
+
+- **`setMinSize()` no longer leaks across windows.** `g_min_w` / `g_min_h` are process-level globals
+  and nothing reset them, so a window that set 800×600 handed those limits to the _next_ window in
+  the same process — one that never asked for them. `g_browser_ui` would have inherited the same
+  defect. All three now reset in `shell_start_ex` alongside the other per-life globals.
+
+    Behaviour change: calling `setMinSize()` _before_ `start()` no longer has any effect. The public
+    surface never promised it (the documented path is `ShellOptions.minWidth` / `minHeight`, applied
+    after `start()`), and the TS side already works that way.
+
 - **`Shell.getRect()` reads the window rectangle as a structure.** `getBounds()` has always returned
   the native line `"x,y,w,h,maximized,dpi"` as a string, so every consumer had to split and validate
   it themselves — and the minimised sentinel rectangle (`-32000,-32000` plus an icon-sized box)

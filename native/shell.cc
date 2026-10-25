@@ -183,6 +183,15 @@ bool g_native_captions = false;
 std::wstring g_app_id;        // AppUserModelID：决定任务栏分组与图标归属
 int g_min_w = 320;
 int g_min_h = 200;
+// 已请求关闭的浏览器行为位掩码（`SHELL_BROWSER_*` 的按位或）。
+//
+// **按位或累积，不记最后一次**：`apply_browser_ui()` 只有关闭方向的 `put_XXX(FALSE)`，
+// 没有恢复分支，而且 `mask == 0` 直接 return——所以窗口的实际状态是单调累积的。
+// `setBrowserUi(MENU)` 之后 `setBrowserUi(KEYS)`，结果关的是两者，不是只有后者。
+// 记最后一次会让 `shell_get_browser_ui()` 报一个读者会理解反的答案。
+//
+// 在 `shell_start_ex` 里随其他全局一起归零（新窗口没有任何行为被关）。
+int g_browser_ui = 0;
 int g_start_w = 1200;
 int g_start_h = 800;
 
@@ -3667,6 +3676,18 @@ __declspec(dllexport) int shell_start_ex(const char *url, const char *title,
     g_app_doc = strip_fragment(wurl);
   }
   g_allow_external_nav = (flags & SHELL_FLAG_ALLOW_EXTERNAL_NAV) != 0;
+  // 几何约束与浏览器行为开关**不跨窗口继承**。
+  //
+  // 二者都是进程级全局，而窗口是进程级单例：上一条生命里 `setMinSize(800, 600)`、
+  // `setBrowserUi(MENU)`，窗口关掉之后这两个值原样留着。不重置的话第二条生命的
+  // `shell_get_min_size()` 会报一个调用方从没设过的值，而窗口真的会按 800×600 卡住
+  // ——一个只在上一次运行过同类窗口时才复现的缺陷。
+  //
+  // 放在这里而不是 `ui_thread` 里：`WM_GETMINMAXINFO` 可能早于那批赋值到达，
+  // 也更早于宿主调用 `shell_set_min_size()`。
+  g_min_w = 320;
+  g_min_h = 200;
+  g_browser_ui = 0;
   // 丢弃上一轮未读的事件记录并归零序号：否则宿主可能先拿到上一次的 CLOSED，
   // 误判「当前窗口已经关了」。宿主侧以「seq 变小」判定新一轮。
   reset_events();
@@ -3785,13 +3806,70 @@ __declspec(dllexport) int shell_show_app_menu(int x, int y, const char *items) {
 // 关闭 mask 里指定的浏览器行为（右键默认菜单 / 浏览器快捷键 / 状态栏 /
 // 滑动导航 / 自动填充）。位定义见 ShellBrowserUi。
 // 运行时生效；建议在 start() 之后立即调用。
+//
+// `g_browser_ui |= mask` 而不是 `= mask`：`apply_browser_ui()` 只做关闭方向的
+// `put_XXX(FALSE)`，`mask == 0` 直接 return，所以窗口的实际状态**只会累积**。
+// 记最后一次会让 `shell_get_browser_ui()` 在「先关菜单、再关快捷键」之后报
+// 只剩快捷键——读者会理解成菜单又开了。详见 ADR 0023。
 __declspec(dllexport) int shell_set_browser_ui(int mask) {
   if (!g_webview) return -1;
+  if (mask > 0) g_browser_ui |= mask;
   char buf[16];
   wsprintfA(buf, "%d", mask);
   enqueue(cmd_kind::browser_ui, std::string(buf));
   return 0;
 }
+
+// ---- 读回值（ADR 0023）----
+//
+// 三个 setter 的读回面。共同点：**同步直读**，不进 `enqueue` 队列——getter 必须当场
+// 给值，而队列是异步的。能这样做的前提是它们读的东西都不需要 UI 线程配合
+// （`GetWindowTextW` 对同进程窗口直接取内核结构，`IsZoomed` 一族本就是无阻塞查询，
+// 剩余两个是宿主线程读写的 int）。
+
+// 读窗口标题。`GetWindowTextW` 而不是 `g_title`——后者只在 `shell_start_ex` 里赋过
+// 一次，`shell_title()` 从不更新它，读回来会是启动时的标题（一个 echo，不是 getter）。
+//
+// 返回写入的 UTF-8 字节数（0 = 标题为空）；窗口不存在或缓冲区装不下时返回 -1。
+// 截断会让多字节字符断在中间、产出非法 UTF-8，所以装不下就报错而不是给半个字符。
+__declspec(dllexport) int shell_get_title(char *buf, int cap) {
+  if (!buf || cap <= 0) return -1;
+  buf[0] = 0;
+  if (!g_hwnd) return -1;
+  wchar_t wbuf[512];
+  const int n = GetWindowTextW(g_hwnd, wbuf, 512);
+  if (n <= 0) return 0;  // 空标题（或读取失败，两者对外同为「没有标题」）
+  const int need = WideCharToMultiByte(CP_UTF8, 0, wbuf, n, nullptr, 0, nullptr, nullptr);
+  if (need <= 0) return 0;
+  if (need >= cap) return -1;
+  WideCharToMultiByte(CP_UTF8, 0, wbuf, n, buf, need, nullptr, nullptr);
+  buf[need] = 0;
+  return need;
+}
+
+// 读生效中的最小尺寸（逻辑像素），格式 "w,h"。窗口不存在返回 -1。
+//
+// 读的是 `g_min_w` / `g_min_h`，而它们**就是** `WM_GETMINMAXINFO` 的依据
+// （见 `min_track_size`）——缓存即真相，这里不存在 echo 问题。
+// 与 `shell_get_bounds` 同一种「写入文本 + 返回长度」的形态，消费者不必学第二套。
+__declspec(dllexport) int shell_get_min_size(char *buf, int cap) {
+  if (!buf || cap <= 0) return -1;
+  buf[0] = 0;
+  if (!g_hwnd) return -1;
+  char tmp[64];
+  wsprintfA(tmp, "%d,%d", g_min_w, g_min_h);
+  const int n = lstrlenA(tmp);
+  if (n >= cap) return -1;
+  lstrcpyA(buf, tmp);
+  return n;
+}
+
+// 已请求关闭的浏览器行为位掩码（累积，见 `g_browser_ui` 的注释）。
+//
+// **未启动时返回 0**，不是 -1：`0` 在这里是一个有意义的答案（「什么都没关，
+// 因为没有窗口」），不需要第三个状态。这与 `shell_get_title` / `shell_get_min_size`
+// 返回 -1 的不对称是有意的——那两个在无窗口时给不出有意义的字符串。
+__declspec(dllexport) int shell_get_browser_ui(void) { return g_browser_ui; }
 
 // ---- 窗口位置（供持久化 helper 使用）----
 

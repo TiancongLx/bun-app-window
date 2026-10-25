@@ -372,6 +372,42 @@ export function parseBounds(text: string): WindowRect | null {
     return { x, y, width, height, maximized: maximized !== 0, dpi };
 }
 
+/**
+ * 窗口的最小尺寸（**逻辑像素**，96 DPI 基准）。
+ *
+ * 与 `WindowRect` 分开：后者的四个数值是物理像素的屏幕坐标，本类型是逻辑像素的
+ * 约束值。两者混用会让高 DPI 下的窗口大小差一倍，而症状只是「比我设的小」。
+ */
+export type WindowSize = {
+    /** 逻辑像素，96 DPI 基准 */
+    width: number;
+    height: number;
+};
+
+/**
+ * 把原生 `shell_get_min_size()` 返回的 `"w,h"` 解析成 `WindowSize`；格式不对返回 `null`。
+ *
+ * 为什么原生给字符串而不是两个输出参数：与 `shell_get_bounds` 同一种「写入文本 +
+ * 返回长度」的形态，`bun:ffi` 侧一行 `readBuffer` 就够，不必为它引入第二套指针传参。
+ *
+ * 尺寸为 0 或负数返回 `null`：`shell_set_min_size()` 对非正值是忽略的（保持旧值），
+ * 所以真出现 0 说明数据来自别处（比如被手改过的持久化文件），不该当成合法约束。
+ */
+export function parseSize(text: string): WindowSize | null {
+    const parts = text.trim().split(",");
+    if (parts.length !== 2) {
+        return null;
+    }
+    const [width, height] = parts.map((p) => Number(p)) as [number, number];
+    if (!Number.isFinite(width) || !Number.isFinite(height)) {
+        return null;
+    }
+    if (width <= 0 || height <= 0) {
+        return null;
+    }
+    return { width, height };
+}
+
 /** 原生库的解析结果 */
 export type NativeLibInfo = {
     path: string;

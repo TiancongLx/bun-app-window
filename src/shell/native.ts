@@ -45,6 +45,14 @@ export function openNativeLib(path: string) {
         shell_set_browser_ui: { args: [FFIType.i32], returns: FFIType.i32 },
         shell_show_app_menu: { args: [FFIType.i32, FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
 
+        // 读回面（ADR 0023）：三个 setter 的同步直读。不进命令队列——getter 必须当场给值。
+        //   shell_get_title       写入 UTF-8，返回字节数；< 0 表示窗口不存在或装不下
+        //   shell_get_min_size    写入 "w,h"，返回长度；< 0 表示窗口不存在
+        //   shell_get_browser_ui  返回累积的位掩码，0 = 什么都没关
+        shell_get_title: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+        shell_get_min_size: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+        shell_get_browser_ui: { args: [], returns: FFIType.i32 },
+
         // 窗口位置面
         shell_get_bounds: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
         shell_restore_bounds: {

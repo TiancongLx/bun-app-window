@@ -30,12 +30,14 @@ import {
     STATE_MAXIMIZED,
     STATE_MINIMIZED,
     parseBounds,
+    parseSize,
     resizeIndex,
     type NativeLibInfo,
     type ResizeEdge,
     type ShellOptions,
     type StartResult,
     type WindowRect,
+    type WindowSize,
     type WindowState,
 } from "./types";
 
@@ -83,6 +85,17 @@ export type Shell = {
     /** 宿 → 页面：投递 JSON 文本（单向，不等结果） */
     post(json: string): number;
     setTitle(title: string): number;
+    /**
+     * 读回窗口标题的**真实值**（原生 `GetWindowTextW`）。窗口不存在时返回 `null`。
+     *
+     * 与 `setTitle()` 的 `rc` 不是一回事：`rc === 0` 只说明消息投递到了 UI 线程，
+     * 而 `SetWindowTextW` 可能因为窗口正在销毁而失败。一次写之后读一次，才能区分
+     * 「投递成功」与「效果发生」。
+     *
+     * **读的是窗口，不是输入缓存。** `setTitle()` 不更新任何 TS 侧镜像，所以这里
+     * 拿到的一定是窗口现在的标题；空标题返回 `""`，与「窗口不存在」的 `null` 分开。
+     */
+    getTitle(): string | null;
     minimize(): number;
     toggleMaximize(): number;
     close(): number;
@@ -104,6 +117,14 @@ export type Shell = {
     beginResize(edge: ResizeEdge): number;
     /** 最小尺寸，逻辑像素 */
     setMinSize(width: number, height: number): void;
+    /**
+     * 读回**生效中**的最小尺寸（逻辑像素）；窗口不存在时返回 `null`。
+     *
+     * 这个值不是「最后一次 set 的参数」，而是 `WM_GETMINMAXINFO` 真正会用的那一个
+     * ——`setMinSize(0, 0)` 对非正值是忽略的（保持旧值），所以读回来的可能与你刚传的
+     * 不同。这正是它比 `setMinSize()` 的 `void` 返回值多出来的信息。
+     */
+    getMinSize(): WindowSize | null;
     /**
      * 显示窗口。配合 `FLAG_DEFER_SHOW` 使用：页面就绪后再调用，消除首帧闪烁。
      * 未启用延迟显示时是幂等 no-op。
@@ -168,6 +189,19 @@ export type Shell = {
      * （例如调试模式临时放开 `Ctrl+F`）。
      */
     setBrowserUi(mask: number): number;
+    /**
+     * 已请求关闭的浏览器行为位掩码（`BROWSER_UI_*` 的按位或）。
+     *
+     * **累积语义**：`setBrowserUi()` 只有「关」的方向，没有恢复分支（它内部的
+     * `apply_browser_ui()` 对 `mask === 0` 直接 return）。所以
+     * `setBrowserUi(BROWSER_UI_MENU)` 之后再 `setBrowserUi(BROWSER_UI_KEYS)`，
+     * 结果是**两者都关**，这里读回来是 `MENU | KEYS`。
+     *
+     * 窗口未启动时返回 `0`——那是一个准确的答案（没有窗口，没有任何行为被关），
+     * 不是「读不到」。这一点与 `getTitle()` / `getMinSize()` 的 `null` 不对称，
+     * 因为它们在没有窗口时给不出有意义的字符串。
+     */
+    getBrowserUi(): number;
     /**
      * 在屏幕坐标弹出**原生**上下文菜单。
      *
@@ -311,12 +345,27 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
 
         post: (json) => symbols.shell_post(cstr(json)),
         setTitle: (title) => symbols.shell_title(cstr(title)),
+        getTitle(): string | null {
+            // 1024 B 够放约 340 个汉字；原生侧装不下会回 -1 而不是给半个字符
+            const buf = new Uint8Array(1024);
+            const n = symbols.shell_get_title(ptr(buf), buf.length);
+            // n < 0 覆盖「窗口不存在」与「装不下」。空标题（n === 0）是 ""，不是 null。
+            if (n < 0) return null;
+            return new TextDecoder().decode(buf.subarray(0, n));
+        },
         minimize: () => symbols.shell_minimize(),
         toggleMaximize: () => symbols.shell_toggle_maximize(),
         close: () => symbols.shell_close(),
         drag: () => symbols.shell_drag(),
         beginResize: (edge) => symbols.shell_begin_resize(resizeIndex(edge)),
         setMinSize: (w, h) => symbols.shell_set_min_size(w, h),
+        getMinSize(): WindowSize | null {
+            // "320,200" 这种形态最长几十字节
+            const buf = new Uint8Array(64);
+            const n = symbols.shell_get_min_size(ptr(buf), buf.length);
+            if (n < 0) return null;
+            return parseSize(new TextDecoder().decode(buf.subarray(0, n)));
+        },
         show: () => symbols.shell_show(),
         setAppId: (appId) => symbols.shell_set_app_id(cstr(appId)),
 
@@ -352,6 +401,8 @@ export async function createShell(opts: ShellOptions): Promise<Shell> {
         lastError,
 
         setBrowserUi: (mask) => symbols.shell_set_browser_ui(mask),
+        // 累积值，0 是「什么都没关」——不是「读不到」，所以不套 null
+        getBrowserUi: () => symbols.shell_get_browser_ui(),
         showContextMenu: (x, y, items) => symbols.shell_show_app_menu(x, y, cstr(items)),
 
         getBounds: readBounds,

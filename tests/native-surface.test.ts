@@ -40,6 +40,10 @@ const DECLARED = [
     "shell_reload",
     "shell_devtools",
     "shell_toggle_fullscreen",
+    // 读回面（ADR 0023）：三个 setter 的同步直读，不进命令队列
+    "shell_get_title",
+    "shell_get_min_size",
+    "shell_get_browser_ui",
     // 运行时形态（ADR 0019）
     "shell_set_frameless",
     "shell_is_frameless",
@@ -75,7 +79,7 @@ test("dlopen 成功且每个声明符号都存在", async () => {
     expect(missing).toEqual([]);
     // 与 native.ts 的声明数、DLL 的导出数（多一个遗留 shell_start）保持一致。
     // 数字写在**一处**：改了这里就是改了契约，加符号时必须连 DECLARED 一起动。
-    expect(DECLARED.length).toBe(35);
+    expect(DECLARED.length).toBe(38);
 
     lib.close();
 });
